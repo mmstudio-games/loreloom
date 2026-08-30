@@ -143,8 +143,9 @@ Adapter 优先由二进制装配。不得依赖 Bevy 类型或持久化后端。
 codec，不得让 Store 查询 Bevy World。候选后端 adapter 可以依赖 Toasty、公开发布的 SurrealDB
 driver 与对应嵌入式引擎，但这些类型不得穿透 Core/World/Agent API。
 
-首选候选为 SurrealDB + SurrealKV，SQLite 为 P0 对照；具体后端与 commit 协议仍为 **OPEN**。
-冻结前只允许创建不暴露 Store 公共 API 的空 crate 和 Spike，不能实现或选定生产 adapter。
+第一阶段后端固定为 SurrealDB + SurrealKV，SQLite 只作为 P0 与回归测试对照；commit/failure/
+backup 协议遵循第 11.4 节。领域 record Schema、未知字段和领域迁移仍未冻结，因此当前只能保留
+测试专用 adapter/模型，不能提前建立生产 Store 公共 API。
 
 ### 3.6 `loreloom-runtime`
 
@@ -237,7 +238,7 @@ Content Definition ID 与运行 ObjectId 分离。Definition ID 必须包含或�
 pub struct Revision(u64);
 ```
 
-- 新世界从一个规范化初始 Revision 开始，具体是 0 或 1 在 Store RFC 中冻结；
+- 新世界从规范化的 Revision `0` 开始；第一个成功修改提交生成 Revision `1`；
 - 每个成功的修改提交生成严格递增 Revision；
 - Query 可以声明读取的 Revision；
 - 修改 Command 必须携带 `expected_revision`；
@@ -1205,9 +1206,15 @@ WorldCommand/System 变化。
 
 本节只冻结方向；标有 **OPEN** 的提交细节阻塞 Store 实现。
 
-当前首选候选是通过 Toasty 使用嵌入式 SurrealDB + SurrealKV，SQLite 作为 P0 对照。候选 driver
-已经验证显式顶层事务、原生 JSON、migration tracking/安全范围自动生成和文件引擎重开。这些
-结论允许 Store Spike 针对真实能力设计，但不构成最终后端选择或产品实现授权。
+第一阶段 Store 后端固定为通过 Toasty 使用嵌入式 SurrealDB + SurrealKV；SQLite 只保留为测试
+对照，不进入默认产品装配。Store Spike 已验证显式顶层事务、原生 JSON、migration tracking、
+文件引擎重开、冲突、崩溃恢复、关闭后备份和 10,000 Record 规模。后端类型不得穿透
+Core/World/Agent API。
+
+第一阶段使用公开 Git 仓库 `https://github.com/noctisynth/toasty-driver-surreal` 的固定 revision
+`0a7c87408e0daae0d6f5ed9f2b9d1ebf01d08549`。crates.io 的 `0.1.0-alpha.0` 发布包早于上述能力，
+仍缺少显式事务、SurrealKV、原生 JSON 和 migration tracking，不能作为替代。该 driver 为
+`AGPL-3.0-only`；Loreloom 的分发方式必须与该许可证兼容，或在发布前取得兼容的重新许可。
 
 Loreloom 必须显式打开事务；普通 Toasty batch 不具有本 Spec 所需的原子性承诺。数据库 migration
 只管理物理表、索引和 migration ID；领域 record、ModLock、payload version、未知字段和领域不变量
@@ -1269,9 +1276,9 @@ Load 必须：
 - 验证所有 Parameter/Event/Rule record 仍符合锁定 Definition 与迁移结果；
 - 成功后生成与 loaded Revision 一致的 UiSnapshot。
 
-### 11.4 OPEN：提交协议
+### 11.4 提交、幂等与 ECS/Store 顺序
 
-无论最终选择下列哪种 ECS/Store 顺序，一个成功 WorldCommand 的候选 durable unit 至少包含：
+一个成功 WorldCommand 的 durable unit 至少包含：
 
 - 使 Snapshot/工作状态可重建的有序 RecordOp；
 - 由该 Command 接受的 WorldEvent；
@@ -1279,26 +1286,45 @@ Load 必须：
 - Save Head 的新 current Revision；
 - 用于重复提交判断的 ActionId/commit identity。
 
-这些记录必须在一个**显式** Store transaction 中 all-or-reject。更新 Save Head 时必须以
-`expected_revision` 做 CAS；两个连接从同一 Revision 竞争时最多一个成功。Store 只有在 commit
-明确成功后才能返回 committed；serialization conflict 必须映射为 Conflict，不得由 driver 或
-Runtime 静默重试部分操作。ActionId 的精确 once/idempotent 结果缓存语义仍为 **OPEN**，但 Spike
-必须证明重复提交不会产生第二组 RecordOp/Event/Transcript。
+这些记录必须在一个**显式** Store transaction 中 all-or-reject。事务先读取 Save Head 并验证
+`expected_revision`，再写入全部 durable unit 并把 Head 更新为 `expected_revision + 1`。两个连接
+从同一 Revision 竞争时，SurrealKV 的 write conflict 必须让恰好一个 commit 成功；serialization
+failure 映射为 `Conflict`，Store 和 Runtime 都不得静默重试部分操作。
 
-在实现 durable commit 产品路径前必须选择并验证以下之一或提出其它完整方案：
+`ActionId` 在单个 Save 内唯一。`ActionCommit` 必须与其它 durable records 同事务写入，并至少保存
+ActionId、Revision、规范化请求摘要或 digest 以及可安全重放的 committed outcome。重复 ActionId
+且请求 digest 相同时返回已保存的 `AlreadyCommitted` outcome，不创建第二组 RecordOp、Event 或
+Transcript；相同 ActionId 对应不同 digest 时返回 `ActionIdentityConflict`，不得把旧结果冒充为新
+请求结果。只发生 expected Revision 冲突且没有 durable commit 的尝试不写入 ActionCommit；重新
+规划必须使用新的 ActionId。
 
-1. 先生成纯领域变更，durable append 后再应用 ECS；
-2. 在隔离 Working World 中执行，durable commit 后交换世界；
-3. 先修改 ECS，持久化失败时通过 Snapshot/Event 重建到旧 Revision；
-4. 修改后持久化，失败则 Runtime 进入阻塞故障态并禁止继续观察/行动。
+第一阶段选择“先修改受隔离的当前 ECS，durable commit 后才发布”的顺序：
 
-选择必须说明性能、内存、System API 限制、崩溃窗口和 ToolResult 时机。没有该决定，不能宣称
-`committed`。
+1. Runtime 取得唯一世界执行槽，保留最后一个 committed UiSnapshot，并阻止新的 Observation；
+2. World System 从 committed Revision N 执行 Command，在内存中产生 candidate N+1，同时返回
+   拥有所有权的 RecordOp、WorldEvent、Transcript delta 和 Action identity；
+3. Runtime 进入不可被普通取消打断的 commit critical section，使用 expected Revision N 提交
+   durable unit；
+4. 只有 Store 明确返回 committed，Runtime 才把 candidate 标记为 committed、发布 UiSnapshot 和
+   成功 ToolResult；
+5. 已知 rollback/Conflict 不得发布 candidate。Runtime 进入 recovery barrier，丢弃当前 World，
+   从最后 committed Store Revision 重新物化后才恢复行动；恢复期间最多继续显示先前 committed
+   UiSnapshot 与错误状态，不得查询 candidate World；
+6. commit 结果不确定时，Runtime 关闭并重开 Store，通过 ActionId、request digest 和 Head
+   Revision 判定结果，然后无条件从 durable Store 重新物化；判定完成前不得继续世界行动或发布
+   新 Snapshot。
 
-如果 commit 返回结果不确定，Runtime 必须关闭当前写入路径，重新打开 Store 并通过 durable
-ActionId/Revision 检查实际结果；检查完成前不得发布 UiSnapshot 或继续世界行动。最终协议必须
-定义备份一致性、checkpoint、关闭、存档切换，以及进程在提交前/中/后终止时只恢复完整 Revision
-N 或 N+1 的保证。
+该方案符合 Armillae 当前同步 mutation-oriented System API，且不要求克隆任意 Bevy World。Spike
+同时评估了“纯变更计划后应用”和“克隆 World 后交换”：前者会在第一阶段重复规则验证/应用路径，
+后者无法要求所有 Mod Component/Resource 可克隆，因此不采用。崩溃时 ECS 只在内存中；重开仅以
+Store 为准，所以提交前或事务中止恢复 N，commit 完成后恢复 N+1。
+
+每个 Save 使用独立 SurrealKV 数据目录。物理备份第一阶段只在 command gate 关闭、所有事务已
+解析且 Store handle 确定性关闭后执行；备份写入临时目录，记录 SaveId、Revision、Schema version
+和内容校验，再经 fsync/原子 rename 发布。恢复与存档切换同样只在 handle 关闭时进行，并在物化
+World 前验证备份 manifest、Head 和 records。SurrealDB driver 不暴露手动 KV checkpoint；领域
+checkpoint 是一个普通显式事务中的版本化 Snapshot/compaction record，物理一致点由确定性关闭
+承担。
 
 ## 12. TUI 规范
 
@@ -1404,7 +1430,10 @@ UiSnapshot 是拥有所有权且不可变的 View Model。TUI 不能通过 Widge
 产品 API 与最小可玩垂直切片实现前需要；workspace 与空 crate 脚手架可以先行：
 
 1. **Store commit Spike**：以 SurrealDB + SurrealKV 为首选候选、SQLite 为对照，验证至少两个
-   ECS/Store 提交策略并解决第 11.4 节；Spike 必须覆盖：
+   ECS/Store 提交策略并解决第 11.4 节；SurrealDB driver 候选固定为公开 Git URL
+   `https://github.com/noctisynth/toasty-driver-surreal` 的 revision
+   `0a7c87408e0daae0d6f5ed9f2b9d1ebf01d08549`，不得使用功能较早的 registry alpha 或本地路径。
+   Spike 必须覆盖：
    - 显式事务原子写入 RecordOp + WorldEvent + Transcript + Save Head Revision；
    - 两连接 expected Revision CAS、serialization conflict 和 ActionId 重复提交；
    - 每个写入阶段的强制错误，确认没有部分 durable unit；
@@ -1413,7 +1442,11 @@ UiSnapshot 是拥有所有权且不可变的 View Model。TUI 不能通过 Widge
    - 版本化 JSON 的未知字段、大整数、数组、嵌套对象、数据库空值与 JSON null；
    - 至少一万条 Record 的加载、重建、checkpoint 和提交延迟，以及构建体积；
    - 依赖可从公开 release/fixed revision 解析，且许可证与 Loreloom 发布方式兼容；
-2. **Armillae/Bevy Spike**：验证 Loreloom Component/System、ToolContext WorldGateway、
+2. **Armillae/Bevy Spike**：以公开 Git URL
+   `https://github.com/mmstudio-games/armillae` 的固定 revision
+   `c9896fc4eb3a4f37918c0cabcefc84f8dcd69137` 为候选输入；该 revision 的 Simulation crates 尚无
+   registry release，因此 Loreloom 必须验证干净 checkout 可拉取该 revision，并与其精确依赖的
+   `bevy_ecs = 0.19.1` 使用同一类型版本。Spike 验证 Loreloom Component/System、ToolContext WorldGateway、
    Observation capture、Item/Container relation、Skill Executor、Attribute aggregation、
    Condition/Clock 和 Revision conflict 可由当前 Armillae API 表达；
 3. **TUI Spike**：验证 Ratatui/Crossterm 双栏、多行输入、streaming 更新、resize 和终端恢复；
@@ -1538,8 +1571,8 @@ RFC 0001 已于 2026-08-30 被项目方接受。以下事项继续阻塞对应�
 
 - Stable ID 编码冻结；
 - Command/Event 的重建权威关系冻结；
-- SurrealDB + SurrealKV/SQLite P0 对照完成，Store 后端、公开依赖版本、许可证和
-  commit/failure/backup 协议冻结；
+- Store driver 的 AGPL 兼容分发方式在发布前确认；后端、公开依赖 revision 与
+  commit/failure/backup 协议已由 P0 Spike 冻结；
 - 多修改 ToolCall 原子性冻结；
 - 第一阶段 PlayerInput 的“说话/行动”解释模式、Narrator Scene Directive、NarratorNpcDecision、
   Materialization/Lifetime/Controller 与 promotion/cleanup 冻结；

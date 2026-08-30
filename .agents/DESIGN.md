@@ -1,6 +1,6 @@
 # Loreloom 设计索引
 
-> 状态：核心架构已接受；Active Runtime 基线进入实施初始化
+> 状态：核心架构已接受；Store 与 Armillae/Bevy P0 Spike 已完成
 > 更新日期：2026-08-30
 > 作用：Loreloom 的权威工程设计入口，不在本文件重复 RFC 或 Spec 的细节
 
@@ -53,7 +53,7 @@ Loreloom Runtime ───────────────► Persistence
 - TUI 只通过 Runtime API 发送输入并读取不可变 `UiSnapshot`，不直接查询或修改 Bevy World；
 - Agent Harness 只接收针对某个角色和世界版本的 `Observation`，通过受限 Tool 请求命令；
 - Runtime 是应用级协调者，拥有 Agent Step、Tool Loop、Mod 加载图、世界请求、提交、取消和 UI
-  发布顺序；
+  发布顺序；它隔离尚未 durable commit 的 ECS candidate，提交失败或结果不确定时从 Store 重建；
 - Loreloom Content 拥有版本化 Mod/Content Package、Definition/Rule Schema、依赖与跨引用验证，
   以及到领域 SpawnSpec/规则计划的纯编译，不依赖 Bevy、LLM 或存储后端，也不直接修改
   Working World；
@@ -62,8 +62,8 @@ Loreloom Runtime ───────────────► Persistence
 - `NpcFactory` 属于 World 领域边界，消费已编译 SpawnSpec，结合当前世界校验属性预算、Scene、
   领域引用和不变量后形成 WorldCommand；Capability、数量和模型预算仍由 Runtime 校验；
 - Persistence 保存稳定逻辑 ID 和拥有所有权的版本化记录，不序列化 Bevy 内部身份或内存布局；
-  当前首选候选为通过 Toasty 使用嵌入式 SurrealDB + SurrealKV，SQLite 保留为 P0 Store Spike 的
-  对照后端；该候选定位不等同于冻结最终 Store；
+  第一阶段固定为通过 Toasty 使用嵌入式 SurrealDB + SurrealKV，SQLite 只保留为提交契约测试
+  对照；durable unit 必须使用显式事务；
 - Armillae 不反向依赖 Loreloom，也不承担 Loreloom 的 Agent、Memory、存档或 UI 策略。
 
 ## 3. 权威工程文档
@@ -125,9 +125,9 @@ Loreloom Runtime ───────────────► Persistence
     注册的白名单效果和通用 Gameplay Tool，不能自行注册任意 Tool 或扩大 Capability；
 23. 存档固定 Mod ID、版本、内容哈希和依赖闭包；缺失或不兼容内容必须迁移或拒绝加载，不能
     依赖模糊加载顺序静默覆盖 Definition；
-24. 持久化后端以 SurrealDB + SurrealKV 作为首选候选，SQLite 作为对照；候选 driver 已具备显式
-    顶层事务、原生 JSON 列和迁移跟踪/安全范围自动生成，但 Loreloom 只有在 Store Spike 验证
-    原子提交、Revision CAS、崩溃恢复、备份和性能后才能冻结选择；
+24. 第一阶段持久化后端固定为 SurrealDB + SurrealKV，SQLite 只作为测试对照；SurrealDB driver
+    固定到公开 Git revision，已通过 Store Spike 验证显式事务、原生 JSON、migration tracking、
+    Revision CAS、崩溃恢复、关闭后备份和 10,000 Record 规模；
 25. Loreloom 的 durable commit 必须使用显式事务，不得把普通 ORM batch 当作原子事务；数据库
     Schema migration 也不能替代领域 record、ModLock 和 payload Schema 的版本迁移；
 26. 第一阶段只有一个 Agent Loop 执行槽：NarratorAgent 与 NpcAgent、以及不同 NpcAgent 之间严格
@@ -150,14 +150,20 @@ Loreloom Runtime ───────────────► Persistence
     `rust-version`，使用 Semifold 的 Rust resolver 和 `.changes/` 变更集管理各 crate 版本；
     Semifold base branch 为 `main`，release branch 为非 `main` 的 `release`；
 33. 仓库内置模组内容位于 `mods/`，共享测试数据位于 `tests/data/`；具体 Mod Package 与测试数据
-    Schema 仍由对应协议冻结。
+    Schema 仍由对应协议冻结；
+34. 第一阶段 WorldCommand 先在唯一世界槽中把 ECS 从 committed Revision N 修改为隔离的
+    candidate N+1，再用 expected Revision N 显式提交 Store durable unit；只有 commit 成功才发布
+    ToolResult/UiSnapshot，失败或不确定时丢弃 candidate 并从 Store 重建；
+35. 新世界从 Revision 0 开始。ActionId 在单 Save 内幂等；ActionCommit 与 RecordOp、WorldEvent、
+    Transcript 和 Save Head 同事务提交，重复相同请求返回已保存结果，不产生第二组 durable rows。
 
 项目方已于 2026-08-29 明确确认第 18–23 项的 Mod 子系统方向。该确认把 Content Mod、Rule Mod、
 统一导入路径、类型化参数、结构化 Event Option、通用 Gameplay Tool、ModLock 和 Extension Mod
 隔离作为后续 Schema 的约束，但不等同于接受整份 RFC 或授权实现。
 
-项目方于 2026-08-30 同意把第 24–25 项记录为持久化候选上下文。这只确认候选排序、显式事务
-边界和验证门槛；最终后端、Store Schema、ECS/Store 提交顺序与故障恢复协议仍保持 OPEN。
+项目方于 2026-08-30 同意把第 24–25 项记录为持久化候选上下文，并随后明确第一阶段使用
+SurrealKV。Store/Armillae P0 Spike 完成后，第 24、34、35 项已同步为 Active Spec 约束；生产
+Store Schema、领域迁移和 AGPL 兼容分发方式仍按各自门禁处理。
 
 项目方同日确认第 26 项的第一阶段串行 Agent 调度边界。该次确认当时尚未冻结调度触发源、
 语义顺序、数量和预算，也未决定等待 Provider 时世界是否继续推进；这些问题随后由第 27–30
@@ -181,10 +187,8 @@ workspace、版本管理和仓库目录约定。尚未冻结的精确协议转�
 - Event/Rule/Parameter Schema、Predicate/Effect 白名单、规则执行顺序和 Gameplay Action 协议；
 - Extension Mod 是否采用 WASM Component、Host API、Capability、签名与存档兼容边界；
 - NarratorNpcDecision 的精确 Schema、SceneScoped 清理条件、Agent 化预算和持久引用升级规则；
-- SurrealDB + SurrealKV 与 SQLite 对照 Spike 的最终结论，以及 Store Schema、备份、存档切换、
-  性能、依赖发布和许可证结论；
+- Store 领域 Schema，以及最终 AGPL 兼容分发方式；
 - 领域 record/ModLock/payload Schema 的版本迁移、迁移校验与未知字段策略；
-- ECS 执行与显式 Store 事务之间的提交顺序、提交失败、结果不确定和崩溃恢复语义；
 - 一个玩家输入、Agent Step、ToolCall、WorldCommand 和世界提交之间的原子性；
 - `NarratorPlan`、`NpcTurnRequest`、`NpcTurnResult`、`NarratorSynthesis` 的精确 Schema，整轮/单
   Turn 预算字段、配置层级、默认值和最大编排轮数；

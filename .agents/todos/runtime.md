@@ -21,9 +21,9 @@ OPEN 项、后续 RFC 或 P0 Spike；空 crate 不代表相关协议已经实现
 
 ## P0：架构 Spikes
 
-- [ ] **GATED** Store commit：SurrealDB + SurrealKV 与 SQLite 对照，覆盖显式事务、Revision CAS、
+- [x] [Store commit Spike](../spikes/0002-store-commit.md)：SurrealDB + SurrealKV 与 SQLite 对照，覆盖显式事务、Revision CAS、
   ActionId 幂等、故障注入、崩溃恢复、备份、性能、公开依赖和许可证；
-- [ ] **GATED** Armillae/Bevy：验证 Component/System、WorldGateway、Observation、容器、技能、
+- [x] [Armillae/Bevy Spike](../spikes/0001-armillae-bevy.md)：验证 Component/System、WorldGateway、Observation、容器、技能、
   Attribute、Condition/Clock 与 Revision conflict；
 - [ ] **GATED** TUI：验证 Ratatui/Crossterm 双栏、多行输入、streaming、resize 和终端恢复；
 - [ ] **GATED** Agent Loop：验证 NarratorPlan、NpcTurnRequest/Result、NarratorSynthesis、严格串行、
@@ -35,7 +35,7 @@ OPEN 项、后续 RFC 或 P0 Spike；空 crate 不代表相关协议已经实现
 ## 后续协议与实现
 
 - [ ] 冻结 Stable ID 与 Command/Event 重建权威关系；
-- [ ] 冻结领域 record、提交、迁移和恢复协议；
+- [ ] 冻结领域 record Schema 与领域迁移协议；提交、后端和物理恢复顺序已由 Store Spike 冻结；
 - [ ] 冻结角色、物品、技能、属性、资源、Condition 和正交状态 Schema；
 - [ ] 冻结 Content/Mod/Event/Rule/Parameter/Gameplay Action Schema；
 - [ ] 冻结 NarratorPlan/NpcTurnRequest/NpcTurnResult/NarratorSynthesis 与预算配置；
