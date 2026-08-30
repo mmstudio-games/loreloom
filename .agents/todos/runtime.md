@@ -36,8 +36,9 @@ OPEN 项、后续 RFC 或 P0 Spike；空 crate 不代表相关协议已经实现
 
 ## 后续协议与实现
 
-- [ ] 冻结 Stable ID 与 Command/Event 重建权威关系；
-- [ ] 冻结领域 record Schema 与领域迁移协议；提交、后端和物理恢复顺序已由 Store Spike 冻结；
+- [x] 冻结 Stable ID 与 Command/Event/RecordOp 重建权威关系；
+- [ ] 冻结领域 record payload Schema；record envelope、未知字段、迁移与重建协议已冻结，提交、
+  后端和物理恢复顺序已由 Store Spike 冻结；
 - [ ] 冻结角色、物品、技能、属性、资源、Condition 和正交状态 Schema；
 - [ ] 冻结 Character/Scene/Item/Skill 等 Content Definition 的完整 JSON 字段与迁移版本；
 - [x] 冻结 Mod Manifest/ModLock、Parameter、Event、Gameplay Action 与声明式 Rule 协议边界；

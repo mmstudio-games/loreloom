@@ -2840,6 +2840,12 @@ dependencies = [
 [[package]]
 name = "loreloom-core"
 version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror",
+ "uuid",
+]
 
 [[package]]
 name = "loreloom-runtime"

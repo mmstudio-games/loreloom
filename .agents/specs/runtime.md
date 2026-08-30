@@ -221,14 +221,24 @@ pub struct ModId(String);
 pub struct ContentDefinitionId(String);
 ```
 
-具体编码（UUIDv7、ULID 或其它）为 **OPEN**。转为 Active 前必须冻结：
+运行期生成的 ID 固定为 RFC 9562 UUIDv7，并使用 canonical lowercase hyphenated UUID 文本。Wire
+格式为 `<prefix>_<uuid>`，前缀固定为 `wld`、`obj`、`act`、`evt`、`ses`、`sav`、`gen` 与 `ntr`；
+因此当前格式长度固定为 40 ASCII bytes。解析必须拒绝大写、非 canonical 文本、错误前缀、非
+RFC 4122 variant 或非 version 7 UUID。`ActorId` 是 `ObjectId` 的语义新类型，序列化仍使用同一
+`obj_` 文本，避免一个角色同时拥有两份运行身份。
 
-- 文本格式、大小写与长度；
-- 解析和生成方式；
-- 是否包含类型前缀；
-- 排序、碰撞和测试 Seed 语义。
+生成器使用进程时间与安全随机源生成 UUIDv7；Store/World 必须把重复 ID 当作 Identity 错误，
+不能自动覆盖。排序按完整 canonical ASCII/UUID bytes，是稳定确定性顺序且通常具有时间局部性，
+但不能替代 Revision、Clock 或因果关系。测试不得给全局生产生成器安装 Seed；确定性测试使用
+固定的合法 v7 文本，或依赖注入只在测试场景使用的 `IdGenerator`。
 
-无论选择何种编码，ID 必须是拥有所有权、可序列化、`Eq + Ord + Hash` 的领域值。禁止把
+`ModId` 不是 UUID：固定为 3–127 bytes 的 lowercase reverse-DNS ASCII 标识，至少两个 segment，
+segment 以字母或数字开始/结束并可在中间包含 `-`。`ContentDefinitionId` 固定为
+`<mod-id>:<kind>/<local-key>`，总长不超过 255 bytes；kind 与 local key 使用 lowercase ASCII，
+local key 可用 `/` 分层但不得含空、`.` 或 `..` segment。它们按 UTF-8 bytes 排序。Mod 版本与
+hash 由 ModLock 记录，不进入 Definition ID。
+
+所有 ID 必须是拥有所有权、可序列化、`Eq + Ord + Hash` 的领域值。禁止把
 `bevy_ecs::entity::Entity`、指针、数组索引或显示名称作为 Stable ID。
 
 Content Definition ID 与运行 ObjectId 分离。Definition ID 必须包含或规范关联 Mod 命名空间，
@@ -260,12 +270,22 @@ pub struct Revision(u64);
 - 可选 provenance；
 - 所属 Snapshot/Revision。
 
-Wire 字段使用 `snake_case`，枚举使用显式 `type` tag。未知对象字段的前向兼容策略和未知记录
-类型的处理为 **OPEN**，必须在 Store 实现前通过 Schema 测试冻结。
+Wire 字段使用 `snake_case`，枚举使用显式 `type` tag。Envelope 固定包含
+`record_type`、非零 `schema_version`、`record_id`、`revision`、`payload` 与可选 `provenance`，
+并拒绝未知 envelope 字段。`record_type` 是最长 64 bytes 的 lowercase snake_case ASCII；
+`payload` 顶层必须为 JSON object。当前版本的领域 codec 必须拒绝未知 payload 字段；未知 record
+type 或高于运行时支持版本的 record 必须拒绝 Load，不能 opaque-pass-through 后发布 World。
+
+旧 payload 只能通过注册的连续 `vN -> vN+1` migration 链升级。Migration 必须纯、确定性、无
+Provider/墙钟/随机 I/O，逐步保留 stable identity，并在全部 record、ModLock、引用和领域不变量
+通过后才在一个显式事务/checkpoint 中发布升级结果；缺失步骤和 downgrade 均拒绝。原存档在完整
+升级发布前保持可恢复。
 
 后端可以用原生 JSON 保存版本化 payload，但“原生 JSON”只是无损存储表示，不授权任意无 Schema
-属性袋。可查询且参与提交的 envelope 字段必须保持类型化；payload 仍必须由 record type + schema
-version 约束，并对嵌套对象、数组、大整数、JSON null、数据库空值和未知字段给出明确策略。
+属性袋。嵌套对象和数组由具体 codec 明确约束；领域数值只使用有范围的 integer 或第 6.4 节 Fixed，
+不保存 JSON float。`null` 只允许出现在 Schema 显式 nullable 的字段，普通 `Option` 缺失使用字段
+omission；SurrealDB `NONE` 不是 JSON payload 值，读到 payload/envelope 必需列为 `NONE` 必须视为
+corruption。超出 codec 所声明 i64/u64 范围的大整数必须拒绝。
 
 ## 6. Working World 领域模型
 
@@ -735,8 +755,16 @@ Tool 参数中的 Actor、Action 和 Revision 不得覆盖可信 Runtime Context
 WorldEvent 是已经发生的领域事实，不是待执行命令。它必须包含稳定 Event ID、Action ID、
 Actor、Revision、事件类型、拥有所有权的 payload 与必要 provenance。
 
-回放使用 Event、Command 或二者组合的选择为 **OPEN**。实现前必须明确哪个是重建事实源，不能
-同时让二者各自独立成为可冲突的权威记录。
+重建的唯一事实源固定为“目标 Revision 之前最近的已验证完整 checkpoint + 其后的连续有序
+`RecordOp`”。每个修改 Revision 的 RecordOp 具有 action identity 和从零开始的无缺口 order，
+只允许 `upsert` 完整 versioned record 或按完整 record key `delete`；重复 order、Revision 缺口、
+checksum/digest 不匹配或删除不存在的 required record 都使重建失败。
+
+WorldCommand 作为已接受输入、request digest 与 ActionCommit 幂等依据保存，但 Load/Replay 不重新
+执行 Command，因为新版规则代码可能改变结果。WorldEvent 作为已经发生的领域事实、Agent 叙事
+provenance 与审计记录保存，但不是第二套状态重建输入。Replay 不运行 Agent、Provider、Tool、Rule
+或领域 executor；World 只从重建后的拥有所有权 record 重新物化 ECS，再验证 canonical record
+投影等价。
 
 ## 8. Observation 与上下文组装
 
@@ -1336,7 +1364,8 @@ WorldCommand/System 变化。
 
 ## 11. Persistence 规范候选
 
-本节只冻结方向；标有 **OPEN** 的提交细节阻塞 Store 实现。
+本节冻结后端、事务、重建与恢复边界；各领域 payload Schema 必须在对应领域协议冻结后才能进入
+生产 Store codec。
 
 第一阶段 Store 后端固定为通过 Toasty 使用嵌入式 SurrealDB + SurrealKV；SQLite 只保留为测试
 对照，不进入默认产品装配。Store Spike 已验证显式顶层事务、原生 JSON、migration tracking、

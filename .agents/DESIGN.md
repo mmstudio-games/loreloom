@@ -1,6 +1,6 @@
 # Loreloom 设计索引
 
-> 状态：核心架构已接受；Store 与 Armillae/Bevy P0 Spike 已完成
+> 状态：核心架构已接受；全部 P0 Spike 已完成，MVP 基础协议开始冻结
 > 更新日期：2026-08-30
 > 作用：Loreloom 的权威工程设计入口，不在本文件重复 RFC 或 Spec 的细节
 
@@ -156,6 +156,15 @@ Loreloom Runtime ───────────────► Persistence
     ToolResult/UiSnapshot，失败或不确定时丢弃 candidate 并从 Store 重建；
 35. 新世界从 Revision 0 开始。ActionId 在单 Save 内幂等；ActionCommit 与 RecordOp、WorldEvent、
     Transcript 和 Save Head 同事务提交，重复相同请求返回已保存结果，不产生第二组 durable rows。
+36. 运行时生成的 Stable ID 使用带三字母类型前缀的 canonical lowercase UUIDv7；ActorId 是
+    ObjectId 的语义新类型，共享同一 `obj_` 身份。Mod ID 使用 reverse-DNS lowercase 标识，
+    Content Definition ID 使用 `mod-id:kind/local-key`，不与运行对象 ID 混用。
+37. 存档重建的唯一事实源是“最近完整 checkpoint + 其后的连续有序 RecordOp”。WorldCommand
+    只作为已接受输入和幂等摘要保存，WorldEvent 只作为已发生事实、叙事 provenance 与审计记录；
+    Load/Replay 不重新执行 Command、Rule、Agent 或 Provider。
+38. 领域 record 使用拒绝未知控制字段的 versioned JSON envelope；当前 payload codec 拒绝未知
+    字段和浮点数，旧版本只能通过逐版本、纯确定性的显式 migration 升级，新版本、未知 record
+    type、迁移缺口或数据库 `NONE` 必须在物化 World 前失败。
 
 项目方已于 2026-08-29 明确确认第 18–23 项的 Mod 子系统方向。该确认把 Content Mod、Rule Mod、
 统一导入路径、类型化参数、结构化 Event Option、通用 Gameplay Tool、ModLock 和 Extension Mod
@@ -187,8 +196,8 @@ workspace、版本管理和仓库目录约定。尚未冻结的精确协议转�
 - Event/Rule/Parameter Schema、Predicate/Effect 白名单、规则执行顺序和 Gameplay Action 协议；
 - Extension Mod 是否采用 WASM Component、Host API、Capability、签名与存档兼容边界；
 - NarratorNpcDecision 的精确 Schema、SceneScoped 清理条件、Agent 化预算和持久引用升级规则；
-- Store 领域 Schema，以及最终 AGPL 兼容分发方式；
-- 领域 record/ModLock/payload Schema 的版本迁移、迁移校验与未知字段策略；
+- Store 各领域 payload Schema，以及最终 AGPL 兼容分发方式；record envelope、重建事实源、
+  migration 顺序与未知字段策略已冻结；
 - 一个玩家输入、Agent Step、ToolCall、WorldCommand 和世界提交之间的原子性；
 - `NarratorPlan`、`NpcTurnRequest`、`NpcTurnResult`、`NarratorSynthesis` 的精确 Schema，整轮/单
   Turn 预算字段、配置层级、默认值和最大编排轮数；
