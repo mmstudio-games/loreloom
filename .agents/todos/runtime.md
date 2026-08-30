@@ -29,8 +29,8 @@ OPEN 项、后续 RFC 或 P0 Spike；空 crate 不代表相关协议已经实现
   streaming、resize、窄屏降级和终端恢复，并冻结第一阶段交互边界；
 - [x] [Agent Loop Spike](../spikes/0004-agent-loop.md)：验证并冻结 NarratorPlan、
   NpcTurnRequest/Result、NarratorSynthesis、严格串行、两级预算、取消和 stale Revision；
-- [ ] **GATED** Content/NpcFactory：验证预设 Definition 与运行时 Draft 的统一 SpawnSpec/Factory
-  路径、跨引用和失败回滚；
+- [x] [Content/NpcFactory Spike](../spikes/0005-content-npc-factory.md)：验证并冻结预设 Definition
+  与运行时 Draft 的统一 SpawnSpec/Factory 路径、两阶段跨引用、失败回滚和 GeneratedOrigin 恢复；
 - [ ] **GATED** Mod/Rule：验证依赖/Patch/哈希锁定、Parameter、Event Option、Rule 预算和资源限制。
 
 ## 后续协议与实现

@@ -2830,6 +2830,8 @@ name = "loreloom-content"
 version = "0.1.0"
 dependencies = [
  "loreloom-core",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

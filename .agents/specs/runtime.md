@@ -960,8 +960,9 @@ pub enum NarratorSynthesis {
 
 规范要求：
 
-- 自然语言 PlayerInput 只交给 NarratorAgent；Narrator 可以生成叙事文本、Scene Directive 和
-  NarratorPlan，但不能在 Tool Handler 内同步递归调用 NpcAgent；
+- 自然语言 PlayerInput 只交给 NarratorAgent；Narrator 可以生成叙事文本、非权威 narrative
+  guidance 和 NarratorPlan，但不能生成绕过 Tool 的世界修改，也不能在 Tool Handler 内同步递归
+  调用 NpcAgent；
 - NarratorPlan 中 NpcTurnRequest 的列表顺序就是语义执行顺序；Request 不携带 `priority`，Runtime
   不重新计算叙事优先级或公平性；
 - Runtime 必须验证请求中的 Actor、Scene membership、Revision 和 Capability，并在独立预算配置
@@ -1018,8 +1019,8 @@ provenance，而任何 narration/NPC claim 本身仍不成为 ECS 或存档世�
 
 ### 10.2 Mod/Content Package、SpawnSpec 与运行时生成
 
-预设 NPC/Scene 必须来自版本化 Mod Package 中的 Content Pack。具体文件格式为 **OPEN**，但逻辑
-内容至少包含：
+预设 NPC/Scene 必须来自版本化 Mod Package 中的 Content Pack。物理文件布局、编码和 Manifest
+语法由 Mod/Rule Spike 冻结；本节已经冻结以下逻辑内容：
 
 - Mod/Pack ID、版本、Loreloom Schema/Engine 兼容范围、依赖和内容哈希；
 - Character/Scene Definition；
@@ -1030,11 +1031,17 @@ provenance，而任何 narration/NPC claim 本身仍不成为 ECS 或存档世�
 导入管线按以下边界执行：
 
 1. Content 层解析完整 Pack，并验证 Schema、版本、依赖、Definition ID 和所有跨引用；
-2. Content 层在不访问 Working World 的情况下生成不可变 Definition Registry，并纯编译
+2. Content 层先收集 Pack 内所有 Definition ID/kind，再解析前向引用和引用种类；重复 ID、缺失
+   引用、错误 kind 或非法 local key 使完整 Pack 失败；
+3. Content 层在不访问 Working World 的情况下生成 candidate immutable Definition Registry，并纯编译
    CharacterSpawnSpec/Scene spawn plan；
-3. Runtime 建立单一初始化提交边界，把验证结果交给 World；
-4. NpcFactory/World 先为实例建立 Stable ObjectId/Entity，再解析跨对象引用并校验世界不变量；
-5. 任一步失败都丢弃暂存结果，不能发布部分 Pack 或 Scene。
+4. 只有完整 candidate 通过才原子发布 Registry；规范迭代顺序按 Definition ID，不依赖文件或
+   JSON array 顺序；
+5. Runtime 建立单一初始化提交边界，把验证结果交给 World；
+6. NpcFactory/World 在 candidate world 中先为全部实例建立 Stable ObjectId/Entity，再解析 local
+   key、existing ObjectId 等跨对象引用并校验世界不变量；
+7. 任一步失败都丢弃暂存结果，不能发布部分 Pack、Scene、Entity、关系、Event 或已经推进的 ID
+   allocator。
 
 Content Definition ID 不是运行 ObjectId。预设实例必须记录：
 
@@ -1045,6 +1052,7 @@ pub struct ContentOrigin {
     pub pack_id: ContentPackId,
     pub definition_id: ContentDefinitionId,
     pub content_version: ContentVersion,
+    pub content_hash: ContentHash,
 }
 ```
 
@@ -1081,6 +1089,7 @@ pub struct CharacterSpawnSpec {
     pub inventory: Vec<ItemGrantInput>,
     pub skills: Vec<SkillGrantInput>,
     pub goals: Vec<GoalInput>,
+    pub trusted_constraints: SpawnConstraintInput,
 }
 ```
 
@@ -1088,9 +1097,20 @@ Runtime 必须先验证来源 Capability、数量和模型预算；NpcFactory �
 预算、Resource 范围、Condition、物品/技能、Scene 和当前世界引用，形成 `SpawnNpcCommand`。
 两种来源共享 Factory、World System、Event、持久化和 Agent Turn 路径。
 
+`trusted_constraints` 只能由 Content compiler 从 Character Archetype 或 Runtime 从已授权
+GenerationPolicy 注入；NpcDraft、模型输出和 Mod 文本不能声明或扩大 attribute points、允许的
+Definition、数量、lifetime 或 capability。NpcDraft 只携带请求的领域值，编译器拒绝额外控制字段。
+
+Scene spawn plan 每个 entry 具有只在该 plan 内有效的唯一 local key、一个 CharacterSpawnSpec 和
+有界跨对象引用；local key 不进入长期身份。Factory 第一阶段为规范顺序的全部 entry 分配 ObjectId，
+第二阶段才把 local key/existing ObjectId 解析为类型化关系。成功的 Content/Generated 角色使用同一
+`character_spawned` WorldEvent 和领域实例形状，Origin 只保留来源/provenance 差异。
+
 运行时生成 NPC 在成功提交后保存完整领域状态与 GeneratedOrigin；Load 不调用模型，也不依赖
 原 Prompt 重建角色。Mod/Content version 或内容哈希不匹配时必须迁移或拒绝，不能静默使用不同
-Definition。
+Definition。存档 ModLock 与每个 ContentOrigin 的 mod/pack/definition/content version/hash 必须
+一致；GeneratedOrigin 不替代当前领域 Definition lock，因为生成角色仍可能引用 Attribute、Item、
+Skill 等内容定义。
 
 ### 10.3 NarratorNpcDecision 与物化生命周期
 
@@ -1531,8 +1551,9 @@ UiSnapshot 是拥有所有权且不可变的 View Model。TUI 不能通过 Widge
    PlayerInput -> NarratorPlan -> 有序 NpcTurnRequest/NpcTurnResult -> NarratorSynthesis、单一执行槽
    无重叠、请求开始时重新投影、只叙述已提交事实、配置化整轮/单 Turn budget、cancel 和 stale
    Revision；证据入口为 [Spike 0004](../spikes/0004-agent-loop.md)；
-5. **Content/NpcFactory Spike**：验证预设 Definition 与运行时 Draft 汇入同一 CharacterSpawnSpec、
-   双阶段引用解析、全包失败回滚、GeneratedOrigin 保存和加载不重新调用模型；
+5. **Content/NpcFactory Spike（已通过）**：验证预设 Definition 与运行时 Draft 汇入同一 CharacterSpawnSpec、
+   双阶段引用解析、全包失败回滚、GeneratedOrigin 保存和加载不重新调用模型；证据入口为
+   [Spike 0005](../spikes/0005-content-npc-factory.md)；
 6. **Mod/Rule Spike**：验证内置/外部包共用加载管线、依赖/Patch/哈希锁定、类型化 Parameter、
    Event Option stale Revision、Rule 预算、包路径/资源限制和保存后精确重开。
 
@@ -1653,8 +1674,9 @@ RFC 0001 已于 2026-08-30 被项目方接受。以下事项继续阻塞对应�
 - 第一阶段 PlayerInput 的“说话/行动”解释模式、NarratorNpcDecision、Materialization/Lifetime/
   Controller 与 promotion/cleanup 冻结；Narrator 已明确不存在绕过 Tool 的特权 Scene Directive；
 - Known Fact/Belief/Transcript 的最小 Schema 冻结；
-- Content Pack/Definition ID、Character/Scene Definition、CharacterSpawnSpec、NpcFactory、
-  Content/Generated Origin 和导入事务冻结；
+- Content Pack 的物理文件布局/编码、Manifest 与 Definition ID 的最终编码冻结；Character/Scene、
+  CharacterSpawnSpec、NpcFactory、Content/Generated Origin 和导入事务的逻辑边界已由 P0 Spike
+  冻结；
 - Mod Manifest/ID/版本/兼容范围、依赖图、内容哈希、包来源/资源限制、显式 Patch、冲突策略和
   ModLock/迁移语义冻结；
 - Event Definition/Instance、Option、Parameter Definition/Set、Gameplay Action、
