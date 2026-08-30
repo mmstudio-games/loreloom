@@ -1,0 +1,80 @@
+[branches]
+base = "main"
+release = "release"
+
+[tags]
+chore = "Chores"
+feat = "New Features"
+fix = "Bug Fixes"
+perf = "Performance Improvements"
+refactor = "Refactors"
+
+[changelog]
+template = """
+## v{{ package.next_version }}
+
+{% for section in sections %}### {{ section.name }}
+
+{% for entry in section.entries %}{{ entry.content }}{% if not loop.last %}
+{% endif %}{% endfor %}{% if not loop.last or dependency_updates %}
+
+{% endif %}{% endfor %}{% if dependency_updates %}### Dependencies
+
+{% for dependency in dependency_updates %}- Update {{ dependency.package }} to {{ dependency.next_version }}.{% if not loop.last %}
+{% endif %}{% endfor %}{% endif %}"""
+changeset-template = """
+- {% if changeset.commit and changeset.commit.web_url %}[`{{ changeset.commit.short_sha }}`]({{ changeset.commit.web_url }}): {% endif %}{{ changeset.summary_paragraphs[0] | join(" ") }}{% if changeset.pull_request %} {% if changeset.pull_request.web_url %}([#{{ changeset.pull_request.number }}]({{ changeset.pull_request.web_url }}){% else %}(#{{ changeset.pull_request.number }}{% endif %}{% if changeset.pull_request.author %} by @{{ changeset.pull_request.author }}{% endif %}){% endif %}{% for paragraph in changeset.summary_paragraphs %}{% if not loop.first %}
+
+    {{ paragraph | join(" ") }}{% endif %}{% endfor %}{% if changeset.summary_paragraphs | length > 1 %}
+{% endif %}"""
+
+[packages.loreloom]
+path = "crates/loreloom"
+resolver = "rust"
+
+[packages.loreloom-agent]
+path = "crates/loreloom-agent"
+resolver = "rust"
+
+[packages.loreloom-content]
+path = "crates/loreloom-content"
+resolver = "rust"
+
+[packages.loreloom-core]
+path = "crates/loreloom-core"
+resolver = "rust"
+
+[packages.loreloom-runtime]
+path = "crates/loreloom-runtime"
+resolver = "rust"
+
+[packages.loreloom-store]
+path = "crates/loreloom-store"
+resolver = "rust"
+
+[packages.loreloom-tui]
+path = "crates/loreloom-tui"
+resolver = "rust"
+
+[packages.loreloom-world]
+path = "crates/loreloom-world"
+resolver = "rust"
+
+[resolver.rust.pre-check]
+type = "http"
+url = "https://crates.io/api/v1/crates/{{ package.name }}/{{ package.version }}"
+retry = [
+    2,
+    5,
+    15,
+    30,
+]
+
+[[resolver.rust.publish]]
+command = "cargo"
+args = ["publish"]
+
+[[resolver.rust.post-version]]
+command = "cargo"
+args = ["generate-lockfile"]
+dry-run = true

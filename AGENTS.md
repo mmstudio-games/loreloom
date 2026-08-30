@@ -13,9 +13,9 @@
 `.agents/DESIGN.md` 只负责生态分层、权威文档路由和跨子系统边界；RFC 负责尚未确认的架构
 决定；Spec 负责接受后持续约束实现的契约；TODO 只记录已确认设计与实现之间的差异。
 
-当前 RFC 状态为 Draft，Runtime Spec 状态为 Proposed。用户明确接受 RFC、Spec 转为 Active
-并建立实施清单前，不得创建 Cargo workspace、产品 crate、公共 Rust API、持久化格式或实现
-代码。讨论、审查和文档修改不等同于实现授权。
+RFC 0001 已于 2026-08-30 接受，Runtime Spec 已转为 Active，并已建立 Runtime 实施清单。
+workspace、空 crate、版本工具和明确的 P0 Spike 可以实施；Active Spec 中仍标记 OPEN 或
+GATED 的范围在独立冻结前不得创建公共 Rust API、持久化格式或产品行为。
 
 ## 2. 设计与同步顺序
 

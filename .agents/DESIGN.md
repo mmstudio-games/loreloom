@@ -1,6 +1,6 @@
 # Loreloom 设计索引
 
-> 状态：Discovery
+> 状态：核心架构已接受；Active Runtime 基线进入实施初始化
 > 更新日期：2026-08-30
 > 作用：Loreloom 的权威工程设计入口，不在本文件重复 RFC 或 Spec 的细节
 
@@ -70,11 +70,12 @@ Loreloom Runtime ───────────────► Persistence
 
 | 文档 | 类型与状态 | 权威范围 |
 |---|---|---|
-| [RFC 0001：Loreloom 架构](rfcs/0001-loreloom-architecture.md) | Draft RFC | 产品边界、ECS 权威状态、Agent/Tool 流程、持久化方向、TUI 和 crate 候选拆分 |
-| [Runtime Spec](specs/runtime.md) | Proposed Spec | 可审查的第一阶段规范候选；RFC 接受并转为 Active 前不授权实现 |
-| [TODO 索引](TODO.md) | Blocked | 只说明当前没有可实施清单 |
+| [RFC 0001：Loreloom 架构](rfcs/0001-loreloom-architecture.md) | Accepted RFC | 产品边界、ECS 权威状态、Agent/Tool 流程、持久化方向、TUI 和 crate 拆分 |
+| [Runtime Spec](specs/runtime.md) | Active Spec | 第一阶段工程约束与范围化实施门禁 |
+| [TODO 索引](TODO.md) | Active | 路由到从 Active Spec 派生的实施清单 |
 
-当前没有 Active Spec 或 Accepted RFC，因此没有产品代码实施入口。
+当前允许按 Runtime TODO 初始化 workspace、空 crate、版本工具与 P0 Spike；仍标记 OPEN/GATED 的
+范围在独立冻结前没有产品 API 实施入口。
 
 ## 4. 当前设计结论
 
@@ -142,6 +143,14 @@ Loreloom Runtime ───────────────► Persistence
     模型或 Mod 不能扩大配置上限；
 30. 等待 Provider 时 TUI 流式显示和取消保持响应，但第一阶段逻辑 World Clock 不随真实墙钟时间
     隐式推进；世界只通过明确 WorldCommand/System 变化。
+31. 第一阶段使用 Cargo virtual workspace，包含 `loreloom-core`、`loreloom-content`、
+    `loreloom-world`、`loreloom-agent`、`loreloom-store`、`loreloom-runtime`、`loreloom-tui` 七个
+    library crate 和 `loreloom` binary crate；
+32. 每个 crate 在自己的 Manifest 中显式声明版本，禁止使用 `version.workspace`；项目不声明
+    `rust-version`，使用 Semifold 的 Rust resolver 和 `.changes/` 变更集管理各 crate 版本；
+    Semifold base branch 为 `main`，release branch 为非 `main` 的 `release`；
+33. 仓库内置模组内容位于 `mods/`，共享测试数据位于 `tests/data/`；具体 Mod Package 与测试数据
+    Schema 仍由对应协议冻结。
 
 项目方已于 2026-08-29 明确确认第 18–23 项的 Mod 子系统方向。该确认把 Content Mod、Rule Mod、
 统一导入路径、类型化参数、结构化 Event Option、通用 Gameplay Tool、ModLock 和 Extension Mod
@@ -158,7 +167,11 @@ Loreloom Runtime ───────────────► Persistence
 取代早期的 NPC 激活请求表述。这次确认冻结玩家入口、语义调度所有权、Narrator Synthesis、配置化
 资源边界和 Provider 等待期间暂停逻辑世界；精确数据 Schema、预算字段与默认值仍待 Spec 冻结。
 
-## 5. 仍待接受或独立冻结的事项
+项目方于 2026-08-30 接受 RFC 0001 的核心架构并授权进入实施初始化，同时确认第 31–33 项的
+workspace、版本管理和仓库目录约定。尚未冻结的精确协议转为 Active Spec 下的范围化实施门禁，
+不得由空 crate 脚手架反向冻结公共 API。
+
+## 5. Active 基线下仍需独立冻结的事项
 
 - 第一阶段全部领域类型的精确 Schema，包括 Attribute ID/Fixed 数值、Resource 最大值变化、
   Modifier 聚合、Condition Stack/Duration 和正交状态机；
@@ -179,12 +192,10 @@ Loreloom Runtime ───────────────► Persistence
 - TUI 的窄屏降级、快捷键、流式输出和后台任务交互细节；
 - 初始世界内容、玩法循环和可发布范围。
 
-## 6. 文档推进顺序
+## 6. 后续推进顺序
 
-1. 审查 RFC 0001 的核心边界和待决问题；
-2. 用户确认后把 RFC 状态改为 Accepted；
-3. 根据确认结果修改 Proposed Runtime Spec 并转为 Active；
-4. 建立 Runtime TODO，把门禁拆成 Spike、协议、测试和实现任务；
-5. 使用 Cargo CLI 创建 workspace/crates，再开始代码实现。
-
-RFC 接受之前，允许继续修改设计文档和进行只读技术调查，不允许以候选接口创建实现。
+1. 从 Active Runtime Spec 建立并维护 Runtime TODO；
+2. 初始化 Cargo workspace、Semifold 与不暴露公共领域 API 的空 crate；
+3. 完成 Store、Armillae/Bevy、TUI、Agent Loop、Content/NpcFactory 和 Mod/Rule P0 Spike；
+4. 对仍标记 OPEN 的协议建立后续 RFC 或明确冻结记录；
+5. 只有对应实施门禁解除后，才在相关 crate 中建立公共 API 与产品实现。

@@ -1,17 +1,19 @@
 # RFC 0001：Loreloom 持久化 Agentic 世界与 TUI 架构
 
-> 状态：Draft
+> 状态：Accepted
+> 接受日期：2026-08-30
 > 更新日期：2026-08-30
 > 设计入口：[Loreloom 设计索引](../DESIGN.md)
-> 候选规范：[Loreloom Runtime Proposed Spec](../specs/runtime.md)
+> 规范：[Loreloom Runtime Active Spec](../specs/runtime.md)
 > 基础设施依赖：[Armillae](https://github.com/mmstudio-games/armillae)
 
 本 RFC 提议 Loreloom 第一阶段的整体架构：以 Bevy ECS 工作世界承载结构化游戏事实，以
 Armillae 提供 Simulation、单次 LLM 调用和单次 Tool 执行能力，由 Loreloom Runtime 组合玩家
 输入、Agent Step、世界命令、持久化与 TUI。
 
-本文处于 Draft，不构成实现授权。候选接口和 MUST 级行为在 Proposed Spec 中展开；只有项目方
-接受本文的核心决定并复核 Spec 后，才能创建 Cargo workspace、实现清单和产品代码。
+本文的核心架构已经项目方接受，MUST 级行为由 Active Runtime Spec 约束。第 14 节尚未冻结的
+精确协议是范围化实施门禁：它们不阻止 workspace 与空 crate 初始化，但在独立冻结前不得据此
+创建相应公共 API、持久化格式或产品行为。
 
 ## 1. 背景与问题
 
@@ -584,6 +586,11 @@ Provider Adapter 由二进制装配，`rig-core` 类型不得进入 `loreloom-co
 CharacterSpawnSpec 和各 Definition 输入类型最终放在 Core 还是 Content，由 Schema 冻结时决定，
 但依赖方向不得反转。
 
+物理布局采用根级 Cargo virtual workspace，八个成员统一位于 `crates/`。每个 crate 必须在自己的
+Manifest 中显式写版本，禁止 `version.workspace`，也不得声明 `rust-version`。Semifold 使用 Rust
+workspace resolver 与 `.changes/` 变更集维护成员版本。内置 Mod 位于 `mods/`，共享测试数据位于
+`tests/data/`；这两个目录的位置已经冻结，内部数据格式仍由后续 Schema 冻结。
+
 ## 8. 典型执行流程
 
 ### 8.1 玩家自然语言行动
@@ -863,23 +870,20 @@ LLM 输出本身不被宣称为确定性。Loreloom 的可回放承诺应是：
 23. Extension Mod 明确拆到后续 RFC 时，是否采用 WASM Component，以及 Host API、Capability、
     签名和资源配额边界是什么？
 
-## 15. 接受与后续工作
+## 15. 接受结果与后续工作
 
-项目方接受本文时，应同时说明：
+项目方于 2026-08-30 接受第 5 至 10 节的核心架构，并授权 Runtime Spec 转为 Active、建立实施
+清单和初始化 Cargo workspace。第 14 节未决问题不因接受而获得默认答案；它们作为 Active Spec
+中的范围化实施门禁，必须在相应产品 API、持久化格式或行为实现前通过后续 RFC、Spike 结论或
+明确冻结记录解决。
 
-- 是否接受第 5 至 10 节的核心边界；
-- 第 14 节哪些问题现在决定，哪些拆为后续 RFC；
-- Proposed Runtime Spec 是否可据此修改并转为 Active。
+后续按以下顺序执行：
 
-接受后按顺序执行：
-
-1. 更新本文件状态、接受日期和决策记录；
-2. 同步 `.agents/DESIGN.md`；
-3. 修订 `../specs/runtime.md` 并转为 Active Spec；
-4. 创建 `../todos/runtime.md` 和更新 TODO 索引；
-5. 先做 Persistence commit、Bevy/Armillae integration 和 TUI 输入等 P0 Spike；
-6. 使用 Cargo CLI 创建 workspace 与 crates；
-7. 按 Active Spec 实现最小可玩垂直切片。
+1. 同步 `.agents/DESIGN.md` 和 Active Runtime Spec；
+2. 创建 `../todos/runtime.md` 并更新 TODO 索引；
+3. 使用 Cargo CLI 创建 workspace 与无公共领域 API 的 crate 脚手架；
+4. 完成 Persistence commit、Bevy/Armillae integration、TUI、Agent Loop、Content 与 Mod P0 Spike；
+5. 解除对应范围门禁后实现最小可玩垂直切片。
 
 ## 16. 决策依据
 
@@ -933,8 +937,8 @@ LLM 输出本身不被宣称为确定性。Loreloom 的可回放承诺应是：
 - 数据 Mod 不能注入任意 Tool、脚本、动态 Component 或外部副作用；
 - 存档固定 Mod lock，Extension Mod 由后续沙箱 RFC 处理。
 
-这次确认是 RFC 的已确认输入，不解决第 14 节的精确 Schema/协议问题，也不把 RFC 状态从 Draft
-改为 Accepted。
+这次确认在当时只是 RFC 的已确认输入，不解决第 14 节的精确 Schema/协议问题，也没有单独改变
+RFC 状态；整体接受结果记录于第 15 节与第 16.5 节。
 
 ### 16.2 持久化候选确认记录
 
@@ -945,7 +949,7 @@ LLM 输出本身不被宣称为确定性。Loreloom 的可回放承诺应是：
 这次确认只改变候选排序和 P0 验证输入，不冻结最终后端，也不授权产品实现。Loreloom 仍需独立
 验证 durable unit、Revision CAS、ActionId 幂等、故障注入、进程崩溃、备份恢复、存档切换、性能、
 构建体积、公开依赖可解析性与许可证；数据库 migration 不能替代领域 record/ModLock/payload
-migration。RFC 继续保持 Draft。
+migration。该次确认当时未单独改变 RFC 状态；整体接受结果记录于第 16.5 节。
 
 ### 16.3 串行 Agent 调度确认记录
 
@@ -973,4 +977,21 @@ Loop 执行槽，多个 NpcTurnRequest 可以排队但不能并发运行；每�
 - 早期的 NPC 激活请求术语由 `NpcTurnRequest`/`NpcTurnResult` 取代。
 
 该确认冻结编排所有权、串行数据流和世界等待语义，但不冻结 Plan/Request/Result/Synthesis 的精确
-Schema、预算字段、配置层级、默认值或最大编排轮数。RFC 继续保持 Draft。
+Schema、预算字段、配置层级、默认值或最大编排轮数。
+
+### 16.5 RFC 接受与 workspace 初始化确认记录
+
+项目方于 2026-08-30 在被明确询问是否接受 RFC 0001、授权 Runtime Spec 转为 Active、建立实施
+清单并初始化 Cargo workspace 后回复“开始吧”，确认进入实施阶段。随后进一步确认共享测试数据
+采用 `tests/data/`。
+
+本次接受冻结第 5 至 10 节的核心边界和以下工程约定：
+
+- 使用 `crates/` 下的八成员 Cargo virtual workspace；
+- 每个 crate 显式声明自身版本，禁止 `version.workspace`，项目不设置 MSRV 或 `rust-version`；
+- 使用 Semifold Rust resolver 与 `.changes/` 管理版本；base branch 为 `main`，release branch 为
+  非 `main` 的 `release`；
+- 仓库内置 Mod 位于 `mods/`，共享测试数据位于 `tests/data/`。
+
+第 14 节未决问题继续阻塞相应公共 API、持久化格式和产品行为，但不阻止无公共领域 API 的
+workspace 脚手架、版本工具配置与 P0 Spike。

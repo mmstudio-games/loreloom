@@ -15,14 +15,16 @@ dependencies.
 
 ## Status
 
-Loreloom is in design discovery. The initial architecture is recorded in:
+Loreloom has entered workspace bootstrap. Its accepted architecture and active runtime baseline are
+recorded in:
 
 - [Design index](.agents/DESIGN.md)
 - [RFC 0001: persistent agentic world and TUI architecture](.agents/rfcs/0001-loreloom-architecture.md)
-- [Proposed runtime specification](.agents/specs/runtime.md)
+- [Active runtime specification](.agents/specs/runtime.md)
+- [Runtime implementation checklist](.agents/todos/runtime.md)
 
-The RFC is Draft and the specification is Proposed. They must be reviewed and accepted before
-product code or implementation TODOs are created.
+RFC 0001 is Accepted and the runtime specification is Active. Unresolved protocol details remain
+scoped implementation gates and do not receive default answers from workspace scaffolding.
 
 ## Rust policy
 

@@ -1,0 +1,12 @@
+[workspace]
+members = [
+    "crates/loreloom",
+    "crates/loreloom-agent",
+    "crates/loreloom-content",
+    "crates/loreloom-core",
+    "crates/loreloom-runtime",
+    "crates/loreloom-store",
+    "crates/loreloom-tui",
+    "crates/loreloom-world",
+]
+resolver = "3"

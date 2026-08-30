@@ -1,0 +1,8 @@
+[package]
+name = "loreloom-world"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+loreloom-content = { version = "0.1.0", path = "../loreloom-content" }
+loreloom-core = { version = "0.1.0", path = "../loreloom-core" }

@@ -1,19 +1,18 @@
 # Loreloom Runtime 规范
 
-> 状态：Proposed Spec；不构成实现授权
+> 状态：Active Spec
 > 规范基线：2026-08-30
 > 适用范围：Loreloom Core、Content、World、Agent、Store、Runtime、TUI 与应用装配
-> 已确认子设计：Content/Rule Mod 分层与安全边界；精确 Schema 和实现仍为 OPEN
+> 已确认基线：RFC 0001 核心架构、Content/Rule Mod 边界与 workspace 初始化约定
 > 设计入口：[Loreloom 设计索引](../DESIGN.md)
 > 决策来源：[RFC 0001：Loreloom 架构](../rfcs/0001-loreloom-architecture.md)
 > 基础设施依赖：[Armillae](https://github.com/mmstudio-games/armillae)
 
-本文把 RFC 0001 展开成可审查的第一阶段工程契约。本文中的“必须”“不得”和“只”表示 Spec
-转为 Active 后的规范要求；在 RFC 仍为 Draft 时，这些条款只是候选契约，不得用于推断实现
-授权。
+本文把已接受的 RFC 0001 展开成第一阶段工程契约。本文中的“必须”“不得”和“只”约束所有
+进入实施的 Loreloom 代码、配置、测试和内容。
 
-标记为 **OPEN** 的条款尚未冻结，相关 crate 或代码路径保持阻塞。实现不得选择一个方便的答案
-后再反向修改规范。
+标记为 **OPEN** 的条款尚未冻结，相关公共 API、持久化格式或产品行为保持阻塞；它们不阻止
+workspace、空 crate、版本工具和 P0 Spike 初始化。实现不得选择一个方便的答案后再反向修改规范。
 
 ## 1. 第一阶段范围
 
@@ -144,8 +143,8 @@ Adapter 优先由二进制装配。不得依赖 Bevy 类型或持久化后端。
 codec，不得让 Store 查询 Bevy World。候选后端 adapter 可以依赖 Toasty、公开发布的 SurrealDB
 driver 与对应嵌入式引擎，但这些类型不得穿透 Core/World/Agent API。
 
-首选候选为 SurrealDB + SurrealKV，SQLite 为 P0 对照；具体后端与 commit 协议仍为 **OPEN**，
-冻结前不得创建该 crate。
+首选候选为 SurrealDB + SurrealKV，SQLite 为 P0 对照；具体后端与 commit 协议仍为 **OPEN**。
+冻结前只允许创建不暴露 Store 公共 API 的空 crate 和 Spike，不能实现或选定生产 adapter。
 
 ### 3.6 `loreloom-runtime`
 
@@ -173,6 +172,15 @@ Backend、Runtime 与 TUI 装配，以及进程退出顺序。
 
 ## 4. Rust、Cargo 与依赖策略
 
+- 根目录使用 Cargo virtual workspace，八个成员位于 `crates/`；七个 library crate 与一个
+  `loreloom` binary crate 的名称和职责遵循第 3 节。
+- 每个成员 Manifest 必须显式声明自己的 `package.version`，禁止 `version.workspace`；初始版本为
+  `0.1.0`。
+- Semifold 使用 Rust workspace resolver 与根级 `.changes/` 变更集管理成员版本；base branch 为
+  `main`，release branch 为非 `main` 的 `release`。Semifold 必须直接更新各成员 Manifest 中的
+  版本。
+- 内置 Mod 的仓库目录为 `mods/`，跨 crate 共享测试数据位于 `tests/data/`；运行时外部 Mod 来源
+  仍由配置决定，不要求复制进源码仓库。
 - Rust edition 固定为当前可用的 `2024`。
 - 工具链 channel 为 `stable`，不固定 `1.x.y` 数字。
 - 所有 Loreloom package 都不得设置 `package.rust-version`。
@@ -185,7 +193,7 @@ Backend、Runtime 与 TUI 装配，以及进程退出顺序。
 - Toasty/SurrealDB Store 候选同样只能使用 registry release，或公开 Git URL 与明确 tag/revision；
   未进入公开来源的本地提交不构成 Loreloom 可采用的依赖版本。
 - `bevy_ecs` 版本必须与选定 `armillae-simulate-bevy` 发布线精确兼容。
-- TUI 候选技术栈为 Ratatui + Crossterm；在 Active Spec 前需要 P0 输入、恢复和窄屏 Spike。
+- TUI 候选技术栈为 Ratatui + Crossterm；在建立 TUI 产品 API 前需要 P0 输入、恢复和窄屏 Spike。
 - 第一阶段只加载 Content/Rule Mod 数据，不加载 Rust/C 原生动态库；WASM Extension Host 必须
   由后续 RFC 和独立 capability/sandbox Spike 授权。
 - 生产代码对可恢复路径不得使用 `unwrap()`。
@@ -284,7 +292,7 @@ version 约束，并对嵌套对象、数组、大整数、JSON null、数据库
 | `Goals` | Actor 的结构化目标、状态和优先级 |
 | `WorldClock` | 当前世界时间或第一阶段选定 Clock |
 
-最终 Rust 类型、规范化程度和数据规模在 Active Spec 前通过最小场景复核。不得用一个无 Schema
+最终 Rust 类型、规范化程度和数据规模必须在建立对应公共 API 前通过最小场景复核。不得用一个无 Schema
 的 `HashMap<String, Value>` 代替全部领域建模；允许扩展值时也必须有命名空间、版本和校验。
 
 ### 6.2 物品、容器与装备
@@ -1277,7 +1285,7 @@ Load 必须：
 Runtime 静默重试部分操作。ActionId 的精确 once/idempotent 结果缓存语义仍为 **OPEN**，但 Spike
 必须证明重复提交不会产生第二组 RecordOp/Event/Transcript。
 
-在 Active Spec 前必须选择并验证以下之一或提出其它完整方案：
+在实现 durable commit 产品路径前必须选择并验证以下之一或提出其它完整方案：
 
 1. 先生成纯领域变更，durable append 后再应用 ECS；
 2. 在隔离 Working World 中执行，durable commit 后交换世界；
@@ -1393,7 +1401,7 @@ UiSnapshot 是拥有所有权且不可变的 View Model。TUI 不能通过 Widge
 
 ### 16.1 P0 Spikes
 
-Active Spec 与产品 crate 前需要：
+产品 API 与最小可玩垂直切片实现前需要；workspace 与空 crate 脚手架可以先行：
 
 1. **Store commit Spike**：以 SurrealDB + SurrealKV 为首选候选、SQLite 为对照，验证至少两个
    ECS/Store 提交策略并解决第 11.4 节；Spike 必须覆盖：
@@ -1523,9 +1531,11 @@ CI 使用最新 stable，不执行 MSRV Job，不允许 manifest 出现 `rust-ve
 52. 等待 Provider 时 TUI 的流式显示、取消和退出保持响应，逻辑 World Clock 不随墙钟时间隐式
     推进。
 
-## 18. 转为 Active 前的阻塞项
+## 18. Active Spec 下的范围化实施门禁
 
-- RFC 0001 被项目方明确接受；
+RFC 0001 已于 2026-08-30 被项目方接受。以下事项继续阻塞对应公共 API、持久化格式或产品行为，
+但不阻塞 workspace、空 crate、Semifold、测试数据目录和 P0 Spike：
+
 - Stable ID 编码冻结；
 - Command/Event 的重建权威关系冻结；
 - SurrealDB + SurrealKV/SQLite P0 对照完成，Store 后端、公开依赖版本、许可证和
@@ -1553,4 +1563,5 @@ CI 使用最新 stable，不执行 MSRV Job，不允许 manifest 出现 `rust-ve
 - Armillae 当前 API 与候选架构的 Spike 通过；
 - 本文所有 **OPEN** 标记被解决或链接到明确阻塞范围的后续 RFC。
 
-在这些条件满足前，本文保持 Proposed，`.agents/TODO.md` 不产生产品实施任务。
+本 Spec 保持 Active；实施清单必须把上述门禁映射到具体任务，未解除门禁的 crate 只能保留无公共
+领域 API 的脚手架或承载明确标注的 Spike。

@@ -1,0 +1,8 @@
+[package]
+name = "loreloom"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+loreloom-runtime = { version = "0.1.0", path = "../loreloom-runtime" }
+loreloom-tui = { version = "0.1.0", path = "../loreloom-tui" }

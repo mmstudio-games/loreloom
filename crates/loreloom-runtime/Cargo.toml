@@ -1,0 +1,11 @@
+[package]
+name = "loreloom-runtime"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+loreloom-agent = { version = "0.1.0", path = "../loreloom-agent" }
+loreloom-content = { version = "0.1.0", path = "../loreloom-content" }
+loreloom-core = { version = "0.1.0", path = "../loreloom-core" }
+loreloom-store = { version = "0.1.0", path = "../loreloom-store" }
+loreloom-world = { version = "0.1.0", path = "../loreloom-world" }
