@@ -33,7 +33,7 @@ checkout 只用于核对，不是 Loreloom 的构建输入。
 - [x] 从同一 expected Revision 竞争的两个提交恰好一个成功，另一方分类为 Conflict；
 - [x] 重复 ActionId 不产生第二组记录或事件；
 - [x] 强制错误与 rollback 不留下部分 durable unit；
-- [x] SurrealKV 关闭、重开后只观察到完整 Revision；
+- [x] SurrealKV handle drop 后经有界等待重开，只观察到完整 Revision；
 - [x] JSON 嵌套对象、数组、大整数策略、未知字段、database empty 与 JSON null 有 round-trip 证据；
 - [x] 一致备份可恢复，存档路径切换不会串扰数据；
 - [x] 至少 10,000 条 Record 的提交/加载/checkpoint 指标被记录；
@@ -58,7 +58,7 @@ SurrealKV 文件引擎测试互相争用临时目录。
 | Revision 竞争 | 两个 SurrealKV 连接同读 Revision 0 并写 Head；第一个 commit，第二个为 serialization failure |
 | 崩溃恢复 | 子进程在提交前/事务中/commit 后直接 exit；重开只观察完整 Revision 0/0/1 |
 | JSON | 嵌套对象、数组、Unicode、未知字段、`u64::MAX` 和 JSON null 无损；`Option::None` 保持 database empty |
-| 文件恢复 | 确定性关闭后复制 SurrealKV 目录，备份重开为完整 Revision 1；另一存档目录保持 Revision 0 |
+| 文件恢复 | handle drop 后等待 100 ms 再复制 SurrealKV 目录，备份重开为完整 Revision 1；另一存档目录保持 Revision 0 |
 | Migration | public Driver contract 的 migration ID apply/tracking 可读取 |
 | SQLite | 显式 transaction commit/rollback 通过；原生 JSON 能力关闭，需使用规范化 JSON text |
 
@@ -78,10 +78,11 @@ SurrealKV 10,000 Record 测试在当前 macOS arm64、最新 stable、test profi
 | 操作 | 实测 |
 |---|---:|
 | 10,000 Record 显式事务提交 | 1,390 ms |
-| 确定性关闭后重开 | 177 ms |
+| handle drop、等待后重开 | 177 ms |
 | 全量加载 10,000 Record | 193 ms |
 
-Driver 不暴露手动 KV checkpoint；本 Spike 把事务 commit + 确定性关闭作为物理一致点，把领域
+Driver 不暴露手动 KV checkpoint；本 Spike 证明事务 commit 后经 handle drop 与有界等待可以重开，
+但固定等待不能证明产品级确定性关闭。物理备份/切换仍需要可等待的 shutdown API；领域
 Snapshot/compaction 作为后续 Store transaction。当前 Store Spike test executable 为约 161 MiB，
 包含完整测试 harness、SurrealDB 与 SQLite；对应低调试信息 `target/debug` 缓存约 1.5 GiB。这些是
 开发构建代理值，不是最终 release binary 门槛，产品纵向切片建立后必须重新测量 release 体积。
@@ -97,6 +98,8 @@ Snapshot/compaction 作为后续 Store transaction。当前 Store Spike test exe
   write conflict 均可用；nested transaction/savepoint、remote engine、live backup 和手动 KV
   checkpoint 不属于第一阶段依赖面；
 - 普通 Toasty batch 对 KV backend 不自动形成所需原子性，Loreloom 必须始终显式开启事务。
+- 当前 Toasty `Db`/Surreal driver 没有可等待的 close/shutdown；产品备份、恢复和存档切换在新 driver
+  revision 提供该能力前保持门禁，不能把测试中的 100 ms sleep 复制到产品代码。
 
 ## ECS/Store 策略比较与结论
 

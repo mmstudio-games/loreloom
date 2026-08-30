@@ -1,7 +1,7 @@
 # Loreloom TODO 索引
 
 > 状态：Active implementation tracking
-> 最后核对：2026-08-30
+> 最后核对：2026-08-31
 
 任务必须来自 Active Spec 或 Accepted RFC。本索引只记录工程规范与实现之间的差异，不是独立
 需求来源。

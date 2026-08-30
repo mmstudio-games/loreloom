@@ -5,12 +5,15 @@ edition = "2024"
 
 [dependencies]
 loreloom-core = { version = "0.1.0", path = "../loreloom-core" }
-
-[dev-dependencies]
+serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1"
-tempfile = "3"
+sha2 = "0.11.0"
+thiserror = "2.0.20"
 toasty = { version = "0.10", default-features = false, features = ["migration", "serde"] }
 toasty-core = "0.10"
+toasty-driver-surreal = { git = "https://github.com/noctisynth/toasty-driver-surreal", rev = "0a7c87408e0daae0d6f5ed9f2b9d1ebf01d08549", version = "0.1.0-alpha.0" }
+
+[dev-dependencies]
+tempfile = "3"
 toasty-driver-sqlite = "0.10.0"
-toasty-driver-surreal = { git = "https://github.com/noctisynth/toasty-driver-surreal", rev = "0a7c87408e0daae0d6f5ed9f2b9d1ebf01d08549" }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }

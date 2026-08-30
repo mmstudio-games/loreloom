@@ -43,5 +43,10 @@ OPEN 项、后续 RFC 或 P0 Spike；空 crate 不代表相关协议已经实现
 - [x] 冻结 Character/Scene/Item/Skill 等 Content Definition v1 字段与迁移版本；
 - [x] 冻结 Mod Manifest/ModLock、Parameter、Event、Gameplay Action 与声明式 Rule 协议边界；
 - [x] 冻结 NarratorPlan/NpcTurnRequest/NpcTurnResult/NarratorSynthesis 与预算配置；
+- [x] 实现 Bevy Working World 的 Stable ID 映射、typed record 投影/重建与第一阶段领域 Command；
+- [x] 实现 typed ModLock/SaveManifest、SurrealKV 显式事务、Revision CAS、ActionId 幂等、checksum、
+  checkpoint + RecordOp 重建和 Transcript/Event/Action durable rows；
+- [ ] 取得并接入可等待、幂等的 SurrealKV shutdown API，移除物理关闭/备份对 sleep/retry 的依赖；
+- [ ] 实现关闭后物理备份、恢复与存档切换的产品 API；
 - [ ] 实现最小可玩 Runtime、World、Agent、Store、TUI 纵向切片；
 - [ ] 满足 Active Spec 第 17 节全部验收条件。

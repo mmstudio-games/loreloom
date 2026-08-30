@@ -1,3 +1,10 @@
-//! Loreloom persistence, migration, recovery, and save lifecycle.
-//!
-//! Store APIs remain gated by the persistence P0 spike.
+//! SurrealKV-backed Loreloom persistence and recovery.
+
+mod error;
+mod models;
+mod request;
+mod store;
+
+pub use error::StoreError;
+pub use request::{CommitRequest, CommitResult, CommittedAction};
+pub use store::{ActionResolution, LoadedSave, SaveStore};

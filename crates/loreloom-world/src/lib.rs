@@ -1,3 +1,9 @@
 //! Loreloom ECS state, rules, factories, and simulation integration.
-//!
-//! World APIs remain gated by the active runtime specification and P0 spikes.
+
+mod components;
+mod error;
+mod game_world;
+
+pub use components::{ObjectKind, PersistentId};
+pub use error::WorldError;
+pub use game_world::{GameWorld, WorldConfig};

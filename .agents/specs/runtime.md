@@ -1463,9 +1463,104 @@ Core/World/Agent API。
 仍缺少显式事务、SurrealKV、原生 JSON 和 migration tracking，不能作为替代。该 driver 为
 `AGPL-3.0-only`；Loreloom 的分发方式必须与该许可证兼容，或在发布前取得兼容的重新许可。
 
+上述 revision 的 `drop(Db)` 会触发连接任务和 SurrealDB local router 的异步退出，但 Toasty/driver
+没有“等待 SurrealKV flusher、router 与文件句柄全部关闭”的产品 API；固定 sleep 只能作为 Spike
+观测，不能满足本节确定性关闭契约。事务、重建与领域 checkpoint 可以先实现，物理备份、恢复、
+存档切换和产品 `close` 必须等待 driver 提供可等待且幂等的 shutdown，并用“无 sleep/重试地立即
+复制或重开”验证后才能解除门禁。
+
 Loreloom 必须显式打开事务；普通 Toasty batch 不具有本 Spec 所需的原子性承诺。数据库 migration
 只管理物理表、索引和 migration ID；领域 record、ModLock、payload version、未知字段和领域不变量
 迁移仍属于 Loreloom Store/Core/Content 契约。
+
+### 11.0 Core 持久化契约
+
+第一阶段 Save Format 固定为 v1。Core 使用拥有所有权、`deny_unknown_fields` 的类型表达以下 wire
+shape；Store adapter 可以使用不同的私有数据库 row，但不得把 Toasty、SurrealDB 类型暴露给
+Core、World、Agent 或 Runtime：
+
+```rust
+pub const SAVE_FORMAT_V1: u32 = 1;
+
+pub enum ModSourceKind {
+    Builtin,
+    Directory,
+}
+
+pub struct LockedDependency {
+    pub mod_id: ModId,
+    pub version: semver::Version,
+    pub optional: bool,
+}
+
+pub struct LockedMod {
+    pub mod_id: ModId,
+    pub version: semver::Version,
+    pub content_hash: ContentHash,
+    pub manifest_schema: u32,
+    pub content_schema: u32,
+    pub source_kind: ModSourceKind,
+    pub dependencies: Vec<LockedDependency>,
+    pub applied_patches: Vec<ContentDefinitionId>,
+}
+
+pub struct ModLock {
+    pub mods: Vec<LockedMod>,
+}
+
+pub struct SaveManifest {
+    pub format_version: u32,
+    pub save_id: SaveId,
+    pub world_id: WorldId,
+    pub mod_lock: ModLock,
+}
+```
+
+`ModLock.mods` 保存已解析 dependency topology 顺序且 Mod ID 唯一；每个 `dependencies` 按 Mod ID
+byte-order 排序且唯一。required dependency 必须存在、版本精确相等并排在依赖者之前；optional
+dependency 可以缺失，但已安装时同样必须精确匹配并排在依赖者之前。Manifest/Content Schema 必须
+非零。`applied_patches` 保存实际应用顺序且 ID 唯一，不能在保存时重新排序。`source_kind` 不携带
+机器路径。Load 比较的是完整 `SaveManifest.mod_lock`，不能只比较 Mod ID/版本。
+
+Runtime 到 Store 的 durable unit 使用以下后端无关语义；具体 Rust 构造器可以通过
+`ExecutionChangeSet` 生成它，但必须在打开事务前完成全部关联校验：
+
+```rust
+pub struct CommitRequest {
+    pub command: WorldCommand,
+    pub record_ops: Vec<VersionedRecordOp>,
+    pub events: Vec<WorldEvent>,
+    pub transcripts: Vec<TranscriptItemRecord>,
+    pub safe_outcome: CommittedAction,
+}
+
+pub struct CommittedAction {
+    pub action_id: ActionId,
+    pub revision: Revision,
+    pub event_ids: Vec<EventId>,
+    pub safe_summary: ShortText,
+}
+
+pub enum CommitResult {
+    Committed(CommittedAction),
+    AlreadyCommitted(CommittedAction),
+    Conflict { expected: Revision, actual: Revision },
+    ActionIdentityConflict { action_id: ActionId },
+}
+```
+
+所有 RecordOp 必须与 Command 的 ActionId、`expected_revision + 1` 和无缺口 order 一致；Event
+必须与 Command 的 ActionId/Actor/new Revision 一致；Transcript 的 committed Revision 必须为 new
+Revision，且它的完整 record upsert 必须出现在同一个 RecordOp 列表。`safe_outcome` 只能引用本
+durable unit 的 Event，并与其 Action/Revision 一致。任何关联错误在事务开始前拒绝，不写入
+ActionCommit。
+
+第一阶段 request digest 固定为 SHA-256：输入为 ASCII domain separator
+`loreloom.world-command.v1\0`，随后是 `WorldCommand` v1 按已冻结字段/tag 顺序、无额外空白编码的
+UTF-8 JSON。所有 map/set 使用其 Core 类型的稳定排序。Checkpoint records 按 `RecordKey` 排序；
+Checkpoint、RecordOp、WorldEvent、Transcript 与 ActionCommit 的 JSON payload 分别保存 SHA-256
+完整性校验。校验输入均使用带版本的独立 domain separator，避免不同 row 类型间互换。Load 必须
+先验证 checksum，再反序列化/迁移/重建；不能把数据库能解析 JSON 当作领域完整性证明。
 
 ### 11.1 必须保存
 

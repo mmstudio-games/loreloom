@@ -4,6 +4,8 @@ mod codec;
 mod domain;
 mod identity;
 mod numeric;
+mod persistence;
+mod protocol;
 mod record;
 mod revision;
 mod text;
@@ -28,6 +30,13 @@ pub use identity::{
     WorldId,
 };
 pub use numeric::{Fixed, FixedError, WorldTime};
+pub use persistence::{
+    LockedDependency, LockedMod, ModLock, ModSourceKind, PersistenceError, SAVE_FORMAT_V1,
+    SaveManifest,
+};
+pub use protocol::{
+    ExecutionChangeSet, SkillTargetRef, WorldCommand, WorldCommandKind, WorldEvent, WorldEventKind,
+};
 pub use record::{
     MigrationRegistry, MigrationStep, RecordEnvelope, RecordError, RecordId, RecordKey,
     RecordMutation, RecordProvenance, RecordSet, RecordType, SchemaVersion, VersionedRecordOp,
