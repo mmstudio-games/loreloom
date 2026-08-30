@@ -148,6 +148,7 @@ runtime_id!(SessionId, "ses");
 runtime_id!(SaveId, "sav");
 runtime_id!(GenerationId, "gen");
 runtime_id!(NpcTurnRequestId, "ntr");
+runtime_id!(TranscriptItemId, "trn");
 
 /// A semantic view of an [`ObjectId`] known to identify a character.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -340,6 +341,28 @@ impl ContentDefinitionId {
             .split_once(':')
             .ok_or(IdentityError::InvalidContentDefinitionId)?;
         ModId::parse(mod_id)
+    }
+
+    pub fn kind(&self) -> Result<&str, IdentityError> {
+        let (_, rest) = self
+            .0
+            .split_once(':')
+            .ok_or(IdentityError::InvalidContentDefinitionId)?;
+        let (kind, _) = rest
+            .split_once('/')
+            .ok_or(IdentityError::InvalidContentDefinitionId)?;
+        Ok(kind)
+    }
+
+    pub fn local_key(&self) -> Result<&str, IdentityError> {
+        let (_, rest) = self
+            .0
+            .split_once(':')
+            .ok_or(IdentityError::InvalidContentDefinitionId)?;
+        let (_, local_key) = rest
+            .split_once('/')
+            .ok_or(IdentityError::InvalidContentDefinitionId)?;
+        Ok(local_key)
     }
 }
 

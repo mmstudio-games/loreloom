@@ -92,9 +92,10 @@ workspace、空 crate、版本工具和 P0 Spike 初始化。实现不得选择�
 - ContentOrigin 输入和可供迁移/诊断使用的内容 provenance。
 
 依赖 `loreloom-core`。不得依赖 Bevy、Armillae LLM/Tool、Provider SDK、Store 后端或 TUI，也不得
-直接访问 Working World、分配 Bevy Entity 或提交 WorldCommand。运行时 NpcDraft 是否复用该纯
-编译器，以及 Draft/SpawnSpec/Definition 输入类型最终属于 Core 还是 Content，为 **OPEN**；无论
-如何冻结，都不得引入 Content -> World/Agent/Store 的反向依赖。
+直接访问 Working World、分配 Bevy Entity 或提交 WorldCommand。Core 拥有
+`CharacterSpawnSpec`、持久领域 record 与共享值类型；Content 拥有 Definition/NpcDraft wire、
+Registry 和两条输入到 SpawnSpec 的统一纯编译器。不得引入 Content -> World/Agent/Store 的反向
+依赖，也不得让 World 直接接受原始 NpcDraft。
 
 ### 3.3 `loreloom-world`
 
@@ -222,7 +223,8 @@ pub struct ContentDefinitionId(String);
 ```
 
 运行期生成的 ID 固定为 RFC 9562 UUIDv7，并使用 canonical lowercase hyphenated UUID 文本。Wire
-格式为 `<prefix>_<uuid>`，前缀固定为 `wld`、`obj`、`act`、`evt`、`ses`、`sav`、`gen` 与 `ntr`；
+格式为 `<prefix>_<uuid>`，前缀固定为 `wld`、`obj`、`act`、`evt`、`ses`、`sav`、`gen`、`ntr` 与
+`trn`；
 因此当前格式长度固定为 40 ASCII bytes。解析必须拒绝大写、非 canonical 文本、错误前缀、非
 RFC 4122 variant 或非 version 7 UUID。`ActorId` 是 `ObjectId` 的语义新类型，序列化仍使用同一
 `obj_` 文本，避免一个角色同时拥有两份运行身份。
@@ -335,7 +337,8 @@ pub struct ItemDefinition {
 ```
 
 Item Definition 属于版本化内容注册表，不为世界中的每件物品复制完整定义。存档必须记录所使用
-的 content version；Definition 的具体文件格式与迁移为 **OPEN**。
+的 content version；Definition 使用第 10.2 节冻结的 Content Document v1，迁移只按显式 content
+schema version 执行。
 
 每件或每组实际存在的物品必须是具有 Stable ObjectId 的 ECS Entity。第一阶段候选 Component：
 
@@ -436,7 +439,16 @@ pub struct SkillCooldown {
 - 角色未拥有对应 Grant 时，不能凭 Skill 名称、Definition ID 或模型文本使用技能；
 - 最终属性、装备加成、技能可用性和效果预览属于派生数据，可缓存但必须可从权威状态重建。
 
-Skill Cost、Target Schema、Reaction Window 和数据驱动 Executor 的精确协议为 **OPEN**。
+Skill Cost 固定为有序的 Resource Cost 列表，每项 amount 必须大于零；同一 Resource 不得重复。
+Target Schema 固定为 `self`、`character`、`object` 或 `place` tagged variant，并为非 self target
+声明 allowed kind、是否允许 self 与非负最大 range。第一阶段距离只使用同 Place 或已注册 Scene
+graph distance，不让 Agent 提交距离结果。
+
+Active Skill 使用已编译白名单 Effect plan；Passive Skill 把同一计划注册到确定性 modifier/query
+入口；Reaction Skill 必须声明 Event type、Predicate 和每 World tick/Action 的触发上限。Reaction
+Window 只在当前 WorldCommand 的 candidate cascade 内存在，结束后不持久，也不调用 Agent。
+`executor_id` 只能引用 Engine 启动时注册的 allowlist；数据 Mod 可提供 typed config/effect plan，
+不能提供函数、脚本、动态 Tool 或 executor code。
 
 ### 6.4 属性、资源、Condition 与正交状态
 
@@ -456,7 +468,11 @@ pub struct BaseAttributes {
 ```
 
 `BTreeMap` 只允许已注册 AttributeId 和经过 Definition 校验的 Fixed 值，不是无 Schema
-`String -> JsonValue` 扩展袋。Fixed 的位宽、scale、舍入和 overflow 策略为 **OPEN**。
+`String -> JsonValue` 扩展袋。Fixed 固定为 signed i64 raw micros，全局 scale `1_000_000`，Wire
+保存 integer micros 而不是 JSON float/decimal string。加减与最终结果使用 checked i64；乘除使用
+i128 中间值并按 round-to-nearest、ties-to-even 回到 micros，除零或越界拒绝完整 candidate。
+显示格式不是持久协议。WorldTime 固定为从 0 开始的 u64 逻辑秒 tick，只由显式 Command/System
+推进，tick addition overflow 拒绝。
 
 Modifier 必须携带 attribute、operation、value、priority 和稳定 source ID。有效属性按以下
 规范顺序求值：
@@ -486,9 +502,11 @@ pub struct ResourcePool {
 }
 ```
 
-`current` 是权威持久状态；effective maximum 可由 base maximum 与 Modifier 推导。Maximum
-下降时 current 的 clamp、比例缩放或临时超限必须由 Resource Definition 明确。Resource
-System 不得让 current 静默落入 Definition 禁止的范围。
+`current` 是权威持久状态；effective maximum 可由 base maximum 与 Modifier 推导。Resource
+Definition 必须选择 `clamp_current`、`preserve_ratio` 或 `allow_overcap` maximum policy。
+`clamp_current` 在 effective maximum 下降时把 current 同 candidate 原子 clamp；
+`preserve_ratio` 以前后 maximum 比例、Fixed ties-to-even 调整 current；`allow_overcap` 保留 current
+但禁止继续增加，直到不再超限。所有 policy 都要求 current 非负，effective maximum 必须大于零。
 
 Condition 同样使用 Definition + Instance：
 
@@ -530,6 +548,13 @@ pub enum StackPolicy {
 - 周期效果、触发和过期通过注册的 System/Clock entry 执行，不自动调用 Agent；
 - Condition Definition 的 executor 使用稳定 ID，持久化不保存函数指针或 Trait Object；
 - Condition 真相与 Known Fact 分离，Observation 根据感知/诊断只投影名称或症状。
+
+`Unique` 在已有实例时拒绝；`RefreshDuration` 保持一个 instance/stacks=1 并重算 expiry；
+`IncreaseStacks` 保持一个 instance、加到 Definition maximum，并由 Definition 决定是否 refresh；
+`IndependentInstances` 每次创建新 ID 且受 Definition maximum instances 限制。Intensity merge 固定由
+Definition 选择 `keep`、`replace` 或 `maximum`。Duration 只允许 `permanent` 或非零 finite ticks；
+periodic effect 声明非零 interval 和白名单 Effect plan，按 `(next_tick, definition_id, instance_id)`
+稳定执行。过期、周期 Effect 与 stack 变化在同一 candidate cascade 中 all-or-reject。
 
 互相可并存的角色状态必须使用正交类型：
 
@@ -671,6 +696,20 @@ Definition Registry 在一个活动世界版本内不可被隐式替换。启停
 - Tool/System 只有在规则允许时才能创建、确认、反驳或遗忘认知；
 - Observation Builder 只能读取当前 Actor 被允许的认知和感知结果。
 
+第一阶段 `KnownFact` 是有 Stable ObjectId 的 typed record，包含 owner、`world | object | scene`
+subject、ContentDefinitionId predicate、`bool | fixed | counter | bounded_text | object_ref | tag`
+value、`believed | confirmed | disputed | forgotten` epistemic status、0..1 confidence、source 与首次/
+最近确认 WorldTime。Belief 不另建隐藏字符串 Memory；它就是 status/confidence 未达到 confirmed 的
+KnownFact。`forgotten` 保留 tombstone/provenance 但不进入普通 Observation。
+
+Goal 是有 Stable ObjectId 的 record，包含 owner、有界 description、i32 priority、
+`active | achieved | abandoned | blocked` 状态、source 与更新时间。Relationship 是有 Stable ObjectId
+的有向 record，包含 source/target、Definition kind、Fixed strength 与 provenance。
+
+TranscriptItem 使用独立 Stable ID，包含 Session、可选 committed Revision、Player/Narrator/Actor/
+System speaker、有界正文、`committed | interrupted` 状态和可见 supporting Event ID。Transcript 是
+对话档案而非结构化世界事实；引用它或模型上一轮文本不会自动创建 KnownFact。
+
 ### 6.7 不变量
 
 - 同一 Working World 内 Stable ObjectId 唯一；
@@ -811,7 +850,12 @@ Context assembler 必须按确定顺序组合：
 
 裁剪策略必须优先保留规则、身份、当前状态和 Tool 合约，再裁剪较旧的展示文本。不得让摘要
 覆盖结构化 World Fact。来自 Mod 的 Profile、文本和规则说明属于不可信内容，不能覆盖第 1 步
-的产品安全与 Capability。上下文 Token 预算、摘要模型和长期记忆规模为 **OPEN**。
+的产品安全与 Capability。第一阶段不调用摘要模型，也不保存模型生成的自由文本 Memory；完整
+Transcript 分页保存在 Store，Agent Context 使用确定性有界投影。默认投影上限为 64 条/64 KiB
+近期 Transcript、256 条 KnownFact、64 个 Goal、128 个可见对象/背包条目和 64 个可用 Skill，
+Context 总预算默认 32,768 tokens。Host 配置可按模型收紧这些值或在资源允许时提高到编译时硬上限
+的 4 倍；Model/Mod/Agent 请求不能改预算。超限按“安全/Tool 合约、身份、当前状态、当前输入、
+Knowledge/Goal、最近 Transcript”的保留顺序确定性裁剪，并在 Observation metadata 标记 truncation。
 
 ## 9. Tool 规范
 
@@ -1070,6 +1114,35 @@ provenance，而任何 narration/NPC claim 本身仍不成为 ECS 或存档世�
 - 可选 Event/Rule/Gameplay Action Definition；
 - 初始位置、关系、物品、Skill Grant、Knowledge、Goal 和 Scene Narrative 数据。
 
+每个 `content/*.json` 固定使用 Content Document v1：顶层只有 `schema_version: 1` 与
+`definitions`；definition 是拒绝未知字段的 `type` tagged union，并具有完整 namespaced ID 与有界
+display/description。v1 字段按 kind 固定为：
+
+- AgentProfile：system style、model alias、Tool capability allowlist 与默认 autonomy；
+- Attribute：minimum、maximum 与允许的 aggregation/modifier operation；
+- Resource：minimum/effective maximum、maximum policy 与可选关联 Attribute；
+- Condition：tags、stack/intensity/duration、症状投影、Modifier、可选 periodic allowlisted Effect；
+- Item：tags、stack limit、Fixed gram unit weight、可选 durability/container/equipment slot、Modifier；
+- Skill：active/passive/reaction kind、唯一 Resource cost、cooldown ticks、typed target、registered
+  executor/effect plan 与 reaction window；
+- Character：Profile、Archetype、可选 AgentProfile、placement、Base Attribute/Resource、Condition、
+  inventory、Skill、Knowledge、Goal 与 trusted spawn constraints；
+- Place：名称、描述、tags 与 Scene graph edge；
+- Scene：入口 Place、初始 Character/Item、关系、活动 Event 与 narrative framing；
+- Parameter/Event/GameplayAction/Rule：服从第 6.5 节已经冻结的 tagged Schema。
+
+所有文本分别受字段上限约束，Content compiler 规范化 map/set 顺序并拒绝重复 key。Content schema
+升级只能通过完整 document 的连续纯 migration 进行；Pack 中任一 document、跨引用或 migration
+失败时不发布 candidate Registry。Core 拥有运行时领域值、持久 record 和
+`CharacterSpawnSpec`；Content 拥有 Definition/NpcDraft wire、Registry 与两者到 SpawnSpec 的统一
+纯编译器。这一归属不允许 Core 依赖 Content，也不允许 World 接收原始 NpcDraft。
+
+Item v1 的质量单位固定为 Fixed 克，Container capacity 同样使用克和最大直接 child 数。两个 stack
+只在 Definition/content lock、durability、custom name、bound actor、instance Parameter/Modifier 与
+Origin 全部相等时等价；ObjectId、quantity、location 和 owner 不参与。Container、equipped 或已有
+child 的 item 不可 stack。拆分复制全部等价字段/Origin、分配新 ObjectId，并在同一 Command 调整
+数量、位置和 provenance。
+
 导入管线按以下边界执行：
 
 1. Content 层解析完整 Pack，并验证 Schema、版本、依赖、Definition ID 和所有跨引用；
@@ -1202,7 +1275,20 @@ Runtime 只执行受约束决定：
 - 完整 Character 可以 Dormant/禁用 AgentBinding，不自动降级或删除权威状态。
 
 Runtime 拒绝时返回结构化原因，由 Narrator 重新选择代理、生成、请求 NPC Turn 或其它叙事路径。
-Materialization/lifetime/controller 的最终枚举、数量门禁和清理算法为 **OPEN**。
+上述三个 enum 即第一阶段最终 wire 枚举，并补充以下约束：`Beat` 只可与 `MentionOnly` 组合且不保存；
+`MaterializeLightweight` 只可使用 Scene/Persistent lifetime 与 NarratorProxy/Rules controller；
+`RequestNpcTurn` 只可使用 Scene/Persistent lifetime，最终角色必须有 enabled AgentBinding，controller
+为 Agent。Lightweight 与 Agent character 使用同一完整 Character record，不存在丢字段的轻量
+持久格式。
+
+Runtime 数量门禁只使用 Host 的可配置资源 policy（每次编排生成数、每 Scene materialized 数和
+全存档 persistent generated 数），不是叙事优先级且不写入模型可覆盖字段；默认分别为 32、256 与
+1,024，Host 可调整。promotion 是同一 WorldCommand 内把 lifetime 改为 Persistent 并建立将要产生
+的跨 Scene durable reference；不能先产生悬空引用再补升级。Scene 结束后，cleanup 按 ObjectId
+顺序只删除 Scene lifetime 且无来自 Persistent/其它 active Scene 的强引用对象；Character 拥有的
+Item、Condition、SkillGrant 和私有 Goal 随 owner 一起删除，外部 Relationship/KnownFact/Event/
+ObjectRef 视为强引用并阻止 cleanup。Transcript 只保存 speaker display snapshot 时不构成强引用；
+若保存 ActorId 则构成强引用并要求先 promotion。拒绝 promotion/cleanup 不改变 Revision。
 
 ### 10.4 Mod 加载、冲突与扩展边界
 
@@ -1739,13 +1825,12 @@ CI 使用最新 stable，不执行 MSRV Job，不允许 manifest 出现 `rust-ve
 RFC 0001 已于 2026-08-30 被项目方接受。以下事项继续阻塞对应公共 API、持久化格式或产品行为，
 但不阻塞 workspace、空 crate、Semifold、测试数据目录和 P0 Spike：
 
-- Stable ID 编码冻结；
-- Command/Event 的重建权威关系冻结；
+- Stable ID 编码、record envelope/migration 与 Command/Event/RecordOp 重建权威关系已冻结；
 - Store driver 的 AGPL 兼容分发方式在发布前确认；后端、公开依赖 revision 与
   commit/failure/backup 协议已由 P0 Spike 冻结；
-- 第一阶段 PlayerInput 的“说话/行动”解释模式、NarratorNpcDecision、Materialization/Lifetime/
-  Controller 与 promotion/cleanup 冻结；Narrator 已明确不存在绕过 Tool 的特权 Scene Directive；
-- Known Fact/Belief/Transcript 的最小 Schema 冻结；
+- 第一阶段 PlayerInput 不做代码层说话/行动关键词分类，原文只进入 Narrator；NarratorNpcDecision、
+  Materialization/Lifetime/Controller、可配置数量 policy 与 promotion/cleanup 已冻结；
+- Known Fact/Belief/Goal/Transcript 的 v1 最小 Schema 与有界上下文投影已冻结；
 - Content Pack 的目录布局、Manifest 与加载边界已冻结；Definition ID 的最终编码和各领域完整 JSON
   字段/迁移版本仍受对应门禁。CharacterSpawnSpec、NpcFactory、Content/Generated Origin 和导入
   transaction 的逻辑边界已由 P0 Spike 冻结；
@@ -1755,15 +1840,14 @@ RFC 0001 已于 2026-08-30 被项目方接受。以下事项继续阻塞对应�
   Effect 白名单、可信 rule initiator/provenance、执行顺序和预算边界已冻结；Fixed 的底层数值编码
   仍由第 6.4 节门禁决定；
 - 第一阶段明确排除 Extension Mod；WASM Host API、Capability、配额与签名拆到独立后续 RFC；
-- Content 与 Core 之间的 Draft/SpawnSpec/Definition 输入类型归属、运行时 Draft 是否复用 Content
-  编译器冻结；
-- Attribute ID/Fixed、Modifier 聚合、Resource maximum policy、Condition stack/duration/
-  executor、症状投影与 Life/Action/Posture Schema 冻结；
-- Item/Skill Definition 内容格式、content version 和迁移策略冻结；
-- 堆叠等价/拆分规则、重量/容量单位和 Skill Executor 数据驱动边界冻结；
+- Core 拥有 CharacterSpawnSpec 与持久领域 record；Content 拥有 Definition/NpcDraft 与统一纯编译器；
+- Attribute ID/Fixed、Modifier、Resource maximum、Condition、症状投影与正交状态 v1 已冻结；
+- Item/Skill Definition v1、content version/migration、堆叠/拆分、质量单位和受限 Skill Effect
+  Executor 已冻结；
 - TUI 技术栈 P0 结论记录；
 - Armillae 当前 API 与候选架构的 Spike 通过；
-- 本文所有 **OPEN** 标记被解决或链接到明确阻塞范围的后续 RFC。
+- 新增 **OPEN** 标记必须链接到明确阻塞范围的后续 RFC；当前第一阶段产品协议不再包含未路由的
+  OPEN 条款。
 
 本 Spec 保持 Active；实施清单必须把上述门禁映射到具体任务，未解除门禁的 crate 只能保留无公共
 领域 API 的脚手架或承载明确标注的 Spike。

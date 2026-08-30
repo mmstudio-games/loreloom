@@ -399,21 +399,19 @@ impl MigrationRegistry {
         record_type: RecordType,
         current: SchemaVersion,
     ) -> Result<(), RecordError> {
-        if self.current.insert(record_type, current).is_some() {
+        if self.current.contains_key(&record_type) {
             return Err(RecordError::InvalidMigration);
         }
+        self.current.insert(record_type, current);
         Ok(())
     }
 
     pub fn register_migration(&mut self, step: MigrationStep) -> Result<(), RecordError> {
-        if step.from.next()? != step.to
-            || self
-                .steps
-                .insert((step.record_type.clone(), step.from), step)
-                .is_some()
-        {
+        let key = (step.record_type.clone(), step.from);
+        if step.from.next()? != step.to || self.steps.contains_key(&key) {
             return Err(RecordError::InvalidMigration);
         }
+        self.steps.insert(key, step);
         Ok(())
     }
 

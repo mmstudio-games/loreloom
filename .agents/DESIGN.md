@@ -165,6 +165,21 @@ Loreloom Runtime ───────────────► Persistence
 38. 领域 record 使用拒绝未知控制字段的 versioned JSON envelope；当前 payload codec 拒绝未知
     字段和浮点数，旧版本只能通过逐版本、纯确定性的显式 migration 升级，新版本、未知 record
     type、迁移缺口或数据库 `NONE` 必须在物化 World 前失败。
+39. 第一阶段所有机械数值使用全局 scale 为 `1_000_000` 的 signed i64 Fixed；中间计算使用 i128，
+    乘除采用 ties-to-even，任何最终越界都拒绝完整 candidate。WorldTime 是从 0 开始、只由显式
+    Command 推进的逻辑秒 tick。
+40. 持久领域状态使用 v1 typed aggregate records：World、Place/Scene、Character、Item、
+    Condition、SkillGrant、Relationship、KnownFact、Goal、EventInstance、ParameterSet、RuleState 与
+    Transcript。派生属性、背包列表、可用技能和 UI 文本不保存。
+41. Content 与运行时生成共享 Core 拥有的 `CharacterSpawnSpec`；Content 拥有 Definition/NpcDraft
+    Schema 与纯编译器，World 拥有结合当前状态校验并执行的 NpcFactory。Content document v1 拒绝
+    未知字段，升级按 content schema version 显式迁移。
+42. Beat lifetime 只允许 MentionOnly，不生成 Entity；Scene 与 Persistent 使用同一完整 Character
+    record，Lightweight 只是没有 AgentBinding 的 NarratorProxy/Rules controller。产生跨 Scene 的
+    持久引用前必须原子 promotion；Scene 结束后只有无持久入引用的 Scene entity 可以清理。
+43. Agent 长期上下文不增加隐藏 Memory 数据库：KnownFact/Goal 是决策事实，Transcript 是有状态的
+    对话归档。第一阶段只做确定性、可配置的有界投影，不调用摘要模型；Narrator/NPC 文本不会自动
+    写入 KnownFact。
 
 项目方已于 2026-08-29 明确确认第 18–23 项的 Mod 子系统方向。该确认把 Content Mod、Rule Mod、
 统一导入路径、类型化参数、结构化 Event Option、通用 Gameplay Tool、ModLock 和 Extension Mod
@@ -188,20 +203,20 @@ workspace、版本管理和仓库目录约定。尚未冻结的精确协议转�
 
 ## 5. Active 基线下仍需独立冻结的事项
 
-- 第一阶段全部领域类型的精确 Schema，包括 Attribute ID/Fixed 数值、Resource 最大值变化、
-  Modifier 聚合、Condition Stack/Duration 和正交状态机；
-- Item/Skill Definition 的内容包版本、堆叠等价规则和 Skill Executor 数据驱动边界；
-- Content Pack 文件格式、Definition ID、CharacterSpawnSpec、导入事务和 Generated Origin；
+- 已冻结第一阶段领域 record、Fixed、Attribute/Resource/Condition、物品/技能、正交状态、
+  KnownFact/Goal/Transcript、Content Definition v1 与 CharacterSpawnSpec；后续新增类型必须走新的
+  schema version/migration，不能扩展 v1 未知字段；
 - Mod Package Manifest、命名空间、依赖解析、显式 Patch、内容哈希、信任来源和资源限额；
 - Event/Rule/Parameter Schema、Predicate/Effect 白名单、规则执行顺序和 Gameplay Action 协议；
 - Extension Mod 是否采用 WASM Component、Host API、Capability、签名与存档兼容边界；
-- NarratorNpcDecision 的精确 Schema、SceneScoped 清理条件、Agent 化预算和持久引用升级规则；
+- NarratorNpcDecision、Scene cleanup、Agent 化资源门禁和持久引用升级规则已冻结；具体预算值是
+  Host 配置，不进入模型/Mod wire；
 - Store 各领域 payload Schema，以及最终 AGPL 兼容分发方式；record envelope、重建事实源、
   migration 顺序与未知字段策略已冻结；
 - 一个玩家输入、Agent Step、ToolCall、WorldCommand 和世界提交之间的原子性；
 - `NarratorPlan`、`NpcTurnRequest`、`NpcTurnResult`、`NarratorSynthesis` 的精确 Schema，整轮/单
   Turn 预算字段、配置层级、默认值和最大编排轮数；
-- 角色私有知识、长期记忆、对话归档和上下文摘要的结构与规模上限；
+- 角色私有知识、Goal、Transcript 与确定性上下文投影已冻结；摘要模型延期；
 - TUI 的窄屏降级、快捷键、流式输出和后台任务交互细节；
 - 初始世界内容、玩法循环和可发布范围。
 
