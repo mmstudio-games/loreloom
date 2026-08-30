@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     ActionId, ActorId, CharacterSpawnSpec, ContentDefinitionId, DomainError, DomainRecord, EventId,
     Fixed, ObjectId, RecordKey, RecordMutation, RecordProvenance, Revision, ShortText,
-    VersionedRecordOp,
+    TranscriptItemRecord, VersionedRecordOp,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -47,6 +47,9 @@ pub enum WorldCommandKind {
     },
     PromoteCharacter {
         actor_id: ActorId,
+    },
+    AppendTranscript {
+        items: Vec<TranscriptItemRecord>,
     },
 }
 

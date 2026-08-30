@@ -12,7 +12,8 @@ use loreloom_core::{
     DisplayName, DomainRecord, EntityOrigin, Fixed, ItemRecord, LifeState, ModId, ObjectId,
     PlaceRecord, PlacementInput, Posture, ResourcePool, Revision, SceneRecord, ShortText,
     SkillGrantRecord, SkillSource, SkillTargetRef, SpawnConstraints, StackState, SystemIdGenerator,
-    WorldCommand, WorldCommandKind, WorldEventKind, WorldId, WorldStateRecord, WorldTime,
+    TranscriptItemId, TranscriptItemRecord, TranscriptSpeaker, TranscriptState, WorldCommand,
+    WorldCommandKind, WorldEventKind, WorldId, WorldStateRecord, WorldTime,
 };
 use loreloom_world::{GameWorld, WorldConfig, WorldError};
 use semver::Version;
@@ -570,4 +571,50 @@ fn scene_character_spawns_and_promotes_through_stable_records() {
         CharacterLifetime::Persistent
     );
     assert_eq!(world.revision(), Revision::new(2));
+}
+
+#[test]
+fn trusted_runtime_appends_versioned_transcript_records() {
+    let fixture = fixture();
+    let mut world = GameWorld::from_records(
+        Revision::ZERO,
+        fixture.records,
+        fixture.config,
+        &fixture.registry,
+    )
+    .expect("load world");
+    let item = TranscriptItemRecord {
+        id: "trn_01890f6a-2b80-7d4e-8f90-123456789abc"
+            .parse::<TranscriptItemId>()
+            .expect("transcript id"),
+        session_id: "ses_01890f6a-2b81-7d4e-8f90-123456789abc"
+            .parse()
+            .expect("session id"),
+        revision: Some(Revision::new(1)),
+        speaker: TranscriptSpeaker::Player {
+            actor_id: fixture.player,
+            display_name: name("Traveler"),
+        },
+        text: loreloom_core::LongText::new("I listen at the inn door.").expect("text"),
+        state: TranscriptState::Committed,
+        supporting_events: Vec::new(),
+    };
+    let mut ids = SystemIdGenerator;
+    let changes = world
+        .execute(
+            WorldCommand {
+                action_id: action_id("2b82"),
+                actor_id: fixture.player,
+                expected_revision: Revision::ZERO,
+                kind: WorldCommandKind::AppendTranscript {
+                    items: vec![item.clone()],
+                },
+            },
+            &fixture.registry,
+            &mut ids,
+        )
+        .expect("append transcript");
+    assert_eq!(changes.revision, Revision::new(1));
+    assert!(changes.events.is_empty());
+    assert_eq!(world.transcripts().collect::<Vec<_>>(), vec![&item]);
 }

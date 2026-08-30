@@ -1,0 +1,946 @@
+use std::sync::Arc;
+
+use armillae_core::{ToolCall, ToolDefinition, ToolResult, ToolResultContent};
+use armillae_tools::{BoxFuture, ToolContext, ToolExecutionError, ToolExecutor};
+use loreloom_agent::AgentToolContext;
+use loreloom_content::{Definition, DefinitionRegistry, ParameterVisibility, PredicateDefinition};
+use loreloom_core::{
+    ActionId, ActiveEventView, ActorId, AttributeAdjustment, AttributeOperation, AttributeView,
+    CharacterContext, CharacterController, ConditionView, DomainRecord, EventId, EventOptionView,
+    InventoryView, LongText, ObjectId, ParameterSetView, ParameterValueView, ResourceView,
+    Revision, RuntimePhase, SceneContext, SceneObservation, SessionId, SkillView,
+    SystemIdGenerator, ToolActivity, TranscriptWindow, UiNotice, UiSnapshot, VisibleActorView,
+    WorldCommand, WorldCommandKind, WorldEvent,
+};
+use loreloom_store::{ActionResolution, CommitRequest, CommitResult, CommittedAction, SaveStore};
+use loreloom_world::{GameWorld, WorldConfig};
+use serde_json::{Value as JsonValue, json};
+use tokio::sync::Mutex;
+
+use crate::RuntimeError;
+
+const CONTEXT_TRANSCRIPT_LIMIT: usize = 64;
+const CONTEXT_EVENT_LIMIT: usize = 64;
+
+struct RuntimeWorld {
+    world: GameWorld,
+    store: SaveStore,
+    registry: DefinitionRegistry,
+    config: WorldConfig,
+    events: Vec<WorldEvent>,
+    ids: SystemIdGenerator,
+}
+
+pub struct WorldService {
+    inner: Mutex<RuntimeWorld>,
+}
+
+impl std::fmt::Debug for WorldService {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("WorldService")
+            .finish_non_exhaustive()
+    }
+}
+
+impl WorldService {
+    pub async fn open(
+        mut store: SaveStore,
+        registry: DefinitionRegistry,
+        config: WorldConfig,
+    ) -> Result<Arc<Self>, RuntimeError> {
+        let loaded = store.load().await?;
+        let world =
+            GameWorld::from_records(loaded.revision, loaded.records, config.clone(), &registry)?;
+        Ok(Arc::new(Self {
+            inner: Mutex::new(RuntimeWorld {
+                world,
+                store,
+                registry,
+                config,
+                events: loaded.events,
+                ids: SystemIdGenerator,
+            }),
+        }))
+    }
+
+    pub async fn revision(&self) -> Revision {
+        self.inner.lock().await.world.revision()
+    }
+
+    pub async fn player_actor(&self) -> ActorId {
+        self.inner.lock().await.world.world_state().player_actor
+    }
+
+    pub async fn agent_profile(
+        &self,
+        actor_id: ActorId,
+    ) -> Option<loreloom_core::ContentDefinitionId> {
+        self.inner
+            .lock()
+            .await
+            .world
+            .character(actor_id)
+            .filter(|character| character.controller == CharacterController::Agent)
+            .and_then(|character| character.agent_binding.as_ref())
+            .filter(|binding| binding.enabled)
+            .map(|binding| binding.profile_id.clone())
+    }
+
+    pub async fn observation(
+        &self,
+        session_id: SessionId,
+        player_input: LongText,
+    ) -> Result<SceneObservation, RuntimeError> {
+        let inner = self.inner.lock().await;
+        let revision = inner.world.revision();
+        let player_id = inner.world.world_state().player_actor;
+        let records = inner.world.project_records()?;
+        let player = character_context(&records, &inner.registry, player_id, revision)?;
+        let scene = scene_context(&records, &inner.events, player_id, revision)?;
+        let transcript = transcript_records(&records);
+        let truncated = transcript.len() > CONTEXT_TRANSCRIPT_LIMIT;
+        let recent_transcript = tail(transcript, CONTEXT_TRANSCRIPT_LIMIT);
+        Ok(SceneObservation {
+            revision,
+            session_id,
+            player,
+            scene,
+            recent_transcript,
+            player_input,
+            truncated,
+        })
+    }
+
+    pub async fn npc_context(
+        &self,
+        actor_id: ActorId,
+        scene_id: ObjectId,
+    ) -> Result<
+        (
+            CharacterContext,
+            SceneContext,
+            Vec<loreloom_core::TranscriptItemRecord>,
+        ),
+        RuntimeError,
+    > {
+        let inner = self.inner.lock().await;
+        let revision = inner.world.revision();
+        let records = inner.world.project_records()?;
+        let character = character_context(&records, &inner.registry, actor_id, revision)?;
+        let scene = scene_context(&records, &inner.events, actor_id, revision)?;
+        if scene.scene_id != scene_id {
+            return Err(RuntimeError::Unavailable);
+        }
+        let recent = tail(transcript_records(&records), CONTEXT_TRANSCRIPT_LIMIT);
+        Ok((character, scene, recent))
+    }
+
+    pub async fn events(&self) -> Vec<WorldEvent> {
+        self.inner.lock().await.events.clone()
+    }
+
+    async fn inspect_character(
+        &self,
+        actor_id: ActorId,
+        expected_revision: Revision,
+    ) -> Result<CharacterContext, RuntimeError> {
+        let inner = self.inner.lock().await;
+        if inner.world.revision() != expected_revision {
+            return Err(RuntimeError::Unavailable);
+        }
+        character_context(
+            &inner.world.project_records()?,
+            &inner.registry,
+            actor_id,
+            expected_revision,
+        )
+    }
+
+    pub async fn append_transcript(
+        &self,
+        actor_id: ActorId,
+        session_id: SessionId,
+        speaker: loreloom_core::TranscriptSpeaker,
+        text: LongText,
+        supporting_events: Vec<EventId>,
+    ) -> Result<loreloom_core::TranscriptItemRecord, RuntimeError> {
+        let mut inner = self.inner.lock().await;
+        let revision = inner.world.revision().next()?;
+        let transcript = loreloom_core::TranscriptItemRecord {
+            id: loreloom_core::TranscriptItemId::generate_with(&mut inner.ids)?,
+            session_id,
+            revision: Some(revision),
+            speaker,
+            text,
+            state: loreloom_core::TranscriptState::Committed,
+            supporting_events,
+        };
+        let command = WorldCommand {
+            action_id: ActionId::generate_with(&mut inner.ids)?,
+            actor_id,
+            expected_revision: inner.world.revision(),
+            kind: WorldCommandKind::AppendTranscript {
+                items: vec![transcript.clone()],
+            },
+        };
+        apply_command(&mut inner, command).await?;
+        Ok(transcript)
+    }
+
+    pub async fn execute(
+        &self,
+        context: &AgentToolContext,
+        kind: WorldCommandKind,
+    ) -> Result<CommittedAction, RuntimeError> {
+        let mut inner = self.inner.lock().await;
+        let command = WorldCommand {
+            action_id: ActionId::generate_with(&mut inner.ids)?,
+            actor_id: context.actor_id,
+            expected_revision: context.revision,
+            kind,
+        };
+        apply_command(&mut inner, command).await
+    }
+
+    pub async fn snapshot(
+        &self,
+        session_id: SessionId,
+        phase: RuntimePhase,
+        tool_activity: Vec<ToolActivity>,
+        notices: Vec<UiNotice>,
+        supporting_events: Vec<EventId>,
+    ) -> Result<UiSnapshot, RuntimeError> {
+        let inner = self.inner.lock().await;
+        let revision = inner.world.revision();
+        let player_id = inner.world.world_state().player_actor;
+        let records = inner.world.project_records()?;
+        Ok(UiSnapshot {
+            revision,
+            session_id,
+            player: character_context(&records, &inner.registry, player_id, revision)?,
+            scene: scene_context(&records, &inner.events, player_id, revision)?,
+            parameters: parameter_views(&records, &inner.registry)?,
+            active_events: active_event_views(&records, &inner.registry, player_id)?,
+            transcript: transcript_window(&records, CONTEXT_TRANSCRIPT_LIMIT),
+            tool_activity,
+            phase,
+            can_submit: matches!(phase, RuntimePhase::Idle | RuntimePhase::Completed),
+            can_cancel: !matches!(
+                phase,
+                RuntimePhase::Idle
+                    | RuntimePhase::Completed
+                    | RuntimePhase::Cancelled
+                    | RuntimePhase::Failed
+            ),
+            waiting: !matches!(
+                phase,
+                RuntimePhase::Idle
+                    | RuntimePhase::Completed
+                    | RuntimePhase::Cancelled
+                    | RuntimePhase::Failed
+            ),
+            notices,
+            supporting_events,
+        })
+    }
+}
+
+#[derive(Debug)]
+pub struct RuntimeToolExecutor {
+    service: Arc<WorldService>,
+}
+
+impl RuntimeToolExecutor {
+    #[must_use]
+    pub fn new(service: Arc<WorldService>) -> Self {
+        Self { service }
+    }
+}
+
+impl ToolExecutor for RuntimeToolExecutor {
+    fn definitions(&self) -> Vec<ToolDefinition> {
+        vec![
+            ToolDefinition {
+                name: "inspect_character_status".to_owned(),
+                description: "Inspect the authorized actor at the bound revision.".to_owned(),
+                input_schema: json!({
+                    "type": "object",
+                    "additionalProperties": false
+                }),
+            },
+            ToolDefinition {
+                name: "move_character".to_owned(),
+                description: "Move the authorized actor to an adjacent place.".to_owned(),
+                input_schema: json!({
+                    "type": "object",
+                    "required": ["destination_id"],
+                    "properties": { "destination_id": { "type": "string" } },
+                    "additionalProperties": false
+                }),
+            },
+            ToolDefinition {
+                name: "advance_time".to_owned(),
+                description: "Explicitly advance the logical World clock.".to_owned(),
+                input_schema: json!({
+                    "type": "object",
+                    "required": ["ticks"],
+                    "properties": { "ticks": { "type": "integer", "minimum": 1 } },
+                    "additionalProperties": false
+                }),
+            },
+        ]
+    }
+
+    fn execute<'a>(
+        &'a self,
+        context: ToolContext,
+        call: ToolCall,
+    ) -> BoxFuture<'a, Result<ToolResult, ToolExecutionError>> {
+        Box::pin(async move {
+            let runtime = context.get::<AgentToolContext>().ok_or_else(|| {
+                ToolExecutionError::ExecutionFailed {
+                    name: call.name.clone(),
+                    message: "missing runtime context".to_owned(),
+                }
+            })?;
+            let result = match call.name.as_str() {
+                "inspect_character_status" => self
+                    .service
+                    .inspect_character(runtime.actor_id, runtime.revision)
+                    .await
+                    .map(|character| json!({ "character": character })),
+                "move_character" => match parse_object_id(&call.arguments, "destination_id") {
+                    Ok(destination_id) => self
+                        .service
+                        .execute(runtime, WorldCommandKind::Move { destination_id })
+                        .await
+                        .map(committed_json),
+                    Err(error) => Err(error),
+                },
+                "advance_time" => match call.arguments.get("ticks").and_then(JsonValue::as_u64) {
+                    Some(ticks) if ticks > 0 => self
+                        .service
+                        .execute(runtime, WorldCommandKind::AdvanceTime { ticks })
+                        .await
+                        .map(committed_json),
+                    _ => Err(RuntimeError::InvalidInput),
+                },
+                _ => {
+                    return Err(ToolExecutionError::UnknownTool {
+                        name: call.name.clone(),
+                    });
+                }
+            };
+            Ok(match result {
+                Ok(value) => tool_result(&call, value, false),
+                Err(error) => tool_result(&call, json!({ "code": error.code() }), true),
+            })
+        })
+    }
+}
+
+async fn apply_command(
+    inner: &mut RuntimeWorld,
+    command: WorldCommand,
+) -> Result<CommittedAction, RuntimeError> {
+    let changes = {
+        let RuntimeWorld {
+            world,
+            registry,
+            ids,
+            ..
+        } = inner;
+        match world.execute(command.clone(), registry, ids) {
+            Ok(changes) => changes,
+            Err(error) => {
+                recover(inner).await?;
+                return Err(RuntimeError::World(error));
+            }
+        }
+    };
+    let events = changes.events.clone();
+    let request = CommitRequest::from_execution(command.clone(), changes)?;
+    match inner.store.commit(&request).await {
+        Ok(CommitResult::Committed(outcome) | CommitResult::AlreadyCommitted(outcome)) => {
+            for event in events {
+                if !inner.events.iter().any(|existing| existing.id == event.id) {
+                    inner.events.push(event);
+                }
+            }
+            inner.events.sort_by_key(|event| (event.revision, event.id));
+            Ok(outcome)
+        }
+        Ok(CommitResult::Conflict { .. }) => {
+            recover(inner).await?;
+            Err(RuntimeError::Unavailable)
+        }
+        Ok(CommitResult::ActionIdentityConflict { .. }) => {
+            recover(inner).await?;
+            Err(RuntimeError::Unavailable)
+        }
+        Err(error) => {
+            let resolution = inner.store.resolve_action(&command).await;
+            recover(inner).await?;
+            match resolution {
+                Ok(ActionResolution::Committed(outcome)) => Ok(outcome),
+                Ok(
+                    ActionResolution::NotCommitted { .. }
+                    | ActionResolution::ActionIdentityConflict { .. },
+                )
+                | Err(_) => Err(RuntimeError::Store(error)),
+            }
+        }
+    }
+}
+
+async fn recover(inner: &mut RuntimeWorld) -> Result<(), RuntimeError> {
+    let loaded = inner.store.load().await?;
+    inner.world = GameWorld::from_records(
+        loaded.revision,
+        loaded.records,
+        inner.config.clone(),
+        &inner.registry,
+    )?;
+    inner.events = loaded.events;
+    Ok(())
+}
+
+fn character_context(
+    records: &[DomainRecord],
+    registry: &DefinitionRegistry,
+    actor_id: ActorId,
+    revision: Revision,
+) -> Result<CharacterContext, RuntimeError> {
+    let character = records
+        .iter()
+        .find_map(|record| match record {
+            DomainRecord::Character(character) if character.id == actor_id => Some(character),
+            _ => None,
+        })
+        .ok_or(RuntimeError::Unavailable)?;
+    let clock = records
+        .iter()
+        .find_map(|record| match record {
+            DomainRecord::WorldState(state) => Some(state.clock),
+            _ => None,
+        })
+        .ok_or(RuntimeError::Unavailable)?;
+    let attributes = attribute_views(records, registry, character)?;
+    let mut resources = character
+        .resources
+        .values()
+        .map(|resource| {
+            let Definition::Resource(definition) = definition(registry, &resource.resource_id)?
+            else {
+                return Err(RuntimeError::Unavailable);
+            };
+            let maximum = definition
+                .derived_from_attribute
+                .as_ref()
+                .and_then(|attribute_id| {
+                    attributes
+                        .iter()
+                        .find(|attribute| &attribute.attribute_id == attribute_id)
+                        .map(|attribute| attribute.effective)
+                })
+                .unwrap_or(resource.base_maximum);
+            Ok(ResourceView {
+                resource_id: resource.resource_id.clone(),
+                display_name: definition.display_name.clone(),
+                current: resource.current,
+                maximum,
+            })
+        })
+        .collect::<Result<Vec<_>, RuntimeError>>()?;
+    resources.sort_by(|left, right| left.resource_id.cmp(&right.resource_id));
+    let mut inventory = records
+        .iter()
+        .filter_map(|record| match record {
+            DomainRecord::Item(item) if item.owned_by == Some(actor_id) => Some(item),
+            _ => None,
+        })
+        .map(|item| {
+            let Definition::Item(definition) = definition(registry, &item.definition_id)? else {
+                return Err(RuntimeError::Unavailable);
+            };
+            Ok(InventoryView {
+                item: item.clone(),
+                display_name: definition.display_name.clone(),
+            })
+        })
+        .collect::<Result<Vec<_>, RuntimeError>>()?;
+    inventory.sort_by_key(|view| view.item.id);
+    let mut skills = records
+        .iter()
+        .filter_map(|record| match record {
+            DomainRecord::SkillGrant(grant) if grant.owner_id == actor_id => Some(grant),
+            _ => None,
+        })
+        .map(|grant| {
+            let Definition::Skill(definition) = definition(registry, &grant.skill_id)? else {
+                return Err(RuntimeError::Unavailable);
+            };
+            Ok(SkillView {
+                available: grant.enabled && grant.ready_at.is_none_or(|ready| ready <= clock),
+                grant: grant.clone(),
+                display_name: definition.display_name.clone(),
+            })
+        })
+        .collect::<Result<Vec<_>, RuntimeError>>()?;
+    skills.sort_by_key(|view| view.grant.id);
+    let mut conditions = records
+        .iter()
+        .filter_map(|record| match record {
+            DomainRecord::Condition(condition) if condition.target_id == actor_id => {
+                Some(condition)
+            }
+            _ => None,
+        })
+        .map(|condition| {
+            let Definition::Condition(definition) = definition(registry, &condition.condition_id)?
+            else {
+                return Err(RuntimeError::Unavailable);
+            };
+            Ok(ConditionView {
+                condition: condition.clone(),
+                display_name: definition.display_name.clone(),
+                symptoms: definition
+                    .symptoms
+                    .iter()
+                    .filter(|symptom| symptom.minimum_intensity <= condition.intensity)
+                    .map(|symptom| symptom.text.clone())
+                    .collect(),
+            })
+        })
+        .collect::<Result<Vec<_>, RuntimeError>>()?;
+    conditions.sort_by_key(|view| view.condition.id);
+    let mut known_facts = records
+        .iter()
+        .filter_map(|record| match record {
+            DomainRecord::KnownFact(fact) if fact.owner_id == actor_id => Some(fact.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    known_facts.sort_by_key(|fact| fact.id);
+    let mut goals = records
+        .iter()
+        .filter_map(|record| match record {
+            DomainRecord::Goal(goal) if goal.owner_id == actor_id => Some(goal.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    goals.sort_by_key(|goal| goal.id);
+    Ok(CharacterContext {
+        actor_id,
+        revision,
+        display_name: character.display_name.clone(),
+        profile: character.profile.clone(),
+        location_id: character.location,
+        attributes,
+        resources,
+        conditions,
+        inventory,
+        skills,
+        known_facts,
+        goals,
+        life_state: character.life_state,
+        action_state: character.action_state,
+        posture: character.posture,
+    })
+}
+
+fn scene_context(
+    records: &[DomainRecord],
+    events: &[WorldEvent],
+    actor_id: ActorId,
+    revision: Revision,
+) -> Result<SceneContext, RuntimeError> {
+    let character = records
+        .iter()
+        .find_map(|record| match record {
+            DomainRecord::Character(character) if character.id == actor_id => Some(character),
+            _ => None,
+        })
+        .ok_or(RuntimeError::Unavailable)?;
+    let place = records
+        .iter()
+        .find_map(|record| match record {
+            DomainRecord::Place(place) if place.id == character.location => Some(place),
+            _ => None,
+        })
+        .ok_or(RuntimeError::Unavailable)?;
+    let scene = records
+        .iter()
+        .find_map(|record| match record {
+            DomainRecord::Scene(scene) if scene.id == place.scene_id => Some(scene),
+            _ => None,
+        })
+        .ok_or(RuntimeError::Unavailable)?;
+    let state = records
+        .iter()
+        .find_map(|record| match record {
+            DomainRecord::WorldState(state) => Some(state),
+            _ => None,
+        })
+        .ok_or(RuntimeError::Unavailable)?;
+    let mut visible_actors = records
+        .iter()
+        .filter_map(|record| match record {
+            DomainRecord::Character(other) if other.location == character.location => {
+                Some(VisibleActorView {
+                    actor_id: other.id,
+                    display_name: other.display_name.clone(),
+                    controller: other.controller,
+                    life_state: other.life_state,
+                    action_state: other.action_state,
+                    posture: other.posture,
+                })
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    visible_actors.sort_by_key(|actor| actor.actor_id);
+    Ok(SceneContext {
+        scene_id: scene.id,
+        revision,
+        display_name: scene.display_name.clone(),
+        framing: scene.framing.clone(),
+        place_id: place.id,
+        place_name: place.display_name.clone(),
+        clock: state.clock,
+        visible_actors,
+        recent_events: tail(events.iter().cloned(), CONTEXT_EVENT_LIMIT),
+    })
+}
+
+fn definition<'a>(
+    registry: &'a DefinitionRegistry,
+    id: &loreloom_core::ContentDefinitionId,
+) -> Result<&'a Definition, RuntimeError> {
+    registry
+        .get(id)
+        .map(|registered| &registered.definition)
+        .ok_or(RuntimeError::Unavailable)
+}
+
+fn attribute_views(
+    records: &[DomainRecord],
+    registry: &DefinitionRegistry,
+    character: &loreloom_core::CharacterRecord,
+) -> Result<Vec<AttributeView>, RuntimeError> {
+    let mut adjustments = character.attribute_adjustments.clone();
+    for record in records {
+        match record {
+            DomainRecord::Item(item)
+                if item
+                    .equipped
+                    .as_ref()
+                    .is_some_and(|equipped| equipped.wearer_id == character.id) =>
+            {
+                adjustments.extend(item.instance_adjustments.iter().cloned());
+                let Definition::Item(item_definition) = definition(registry, &item.definition_id)?
+                else {
+                    return Err(RuntimeError::Unavailable);
+                };
+                adjustments.extend(item_definition.modifiers.iter().map(|modifier| {
+                    AttributeAdjustment {
+                        source_id: item.id,
+                        attribute_id: modifier.attribute_id.clone(),
+                        operation: modifier.operation,
+                        value: modifier.value,
+                        priority: modifier.priority,
+                    }
+                }));
+            }
+            DomainRecord::Condition(condition) if condition.target_id == character.id => {
+                let Definition::Condition(condition_definition) =
+                    definition(registry, &condition.condition_id)?
+                else {
+                    return Err(RuntimeError::Unavailable);
+                };
+                adjustments.extend(condition_definition.modifiers.iter().map(|modifier| {
+                    AttributeAdjustment {
+                        source_id: condition.id,
+                        attribute_id: modifier.attribute_id.clone(),
+                        operation: modifier.operation,
+                        value: modifier.value,
+                        priority: modifier.priority,
+                    }
+                }));
+            }
+            _ => {}
+        }
+    }
+    adjustments.sort_by(|left, right| {
+        operation_order(left.operation)
+            .cmp(&operation_order(right.operation))
+            .then_with(|| left.priority.cmp(&right.priority))
+            .then_with(|| left.source_id.cmp(&right.source_id))
+    });
+
+    let mut views = Vec::with_capacity(character.base_attributes.0.len());
+    for (attribute_id, base) in &character.base_attributes.0 {
+        let Definition::Attribute(attribute_definition) = definition(registry, attribute_id)?
+        else {
+            return Err(RuntimeError::Unavailable);
+        };
+        let mut effective = *base;
+        for adjustment in adjustments
+            .iter()
+            .filter(|adjustment| &adjustment.attribute_id == attribute_id)
+        {
+            if !attribute_definition
+                .allowed_operations
+                .contains(&adjustment.operation)
+            {
+                return Err(RuntimeError::Unavailable);
+            }
+            effective = match adjustment.operation {
+                AttributeOperation::Flat => effective.checked_add(adjustment.value),
+                AttributeOperation::Multiply => effective.checked_mul(adjustment.value),
+                AttributeOperation::Override => Ok(adjustment.value),
+                AttributeOperation::ClampMinimum => Ok(effective.max(adjustment.value)),
+                AttributeOperation::ClampMaximum => Ok(effective.min(adjustment.value)),
+            }
+            .map_err(|error| RuntimeError::World(loreloom_world::WorldError::Fixed(error)))?;
+        }
+        views.push(AttributeView {
+            attribute_id: attribute_id.clone(),
+            display_name: attribute_definition.display_name.clone(),
+            base: *base,
+            effective: effective.clamp(attribute_definition.minimum, attribute_definition.maximum),
+        });
+    }
+    if adjustments.iter().any(|adjustment| {
+        !character
+            .base_attributes
+            .0
+            .contains_key(&adjustment.attribute_id)
+    }) {
+        return Err(RuntimeError::Unavailable);
+    }
+    Ok(views)
+}
+
+const fn operation_order(operation: AttributeOperation) -> u8 {
+    match operation {
+        AttributeOperation::Flat => 0,
+        AttributeOperation::Multiply => 1,
+        AttributeOperation::Override => 2,
+        AttributeOperation::ClampMinimum => 3,
+        AttributeOperation::ClampMaximum => 4,
+    }
+}
+
+fn parameter_views(
+    records: &[DomainRecord],
+    registry: &DefinitionRegistry,
+) -> Result<Vec<ParameterSetView>, RuntimeError> {
+    let mut sets = records
+        .iter()
+        .filter_map(|record| match record {
+            DomainRecord::ParameterSet(set) => Some(set),
+            _ => None,
+        })
+        .map(|set| {
+            let mut values = set
+                .values
+                .iter()
+                .filter_map(|(parameter_id, value)| {
+                    let registered = registry.get(parameter_id)?;
+                    let Definition::Parameter(parameter) = &registered.definition else {
+                        return None;
+                    };
+                    (parameter.visibility == ParameterVisibility::Public).then(|| {
+                        ParameterValueView {
+                            parameter_id: parameter_id.clone(),
+                            display_name: parameter.display_name.clone(),
+                            value: value.clone(),
+                        }
+                    })
+                })
+                .collect::<Vec<_>>();
+            values.sort_by(|left, right| left.parameter_id.cmp(&right.parameter_id));
+            Ok(ParameterSetView {
+                set_id: set.id,
+                schema_id: set.schema_id.clone(),
+                values,
+            })
+        })
+        .collect::<Result<Vec<_>, RuntimeError>>()?;
+    sets.sort_by_key(|set| set.set_id);
+    Ok(sets)
+}
+
+fn active_event_views(
+    records: &[DomainRecord],
+    registry: &DefinitionRegistry,
+    actor_id: ActorId,
+) -> Result<Vec<ActiveEventView>, RuntimeError> {
+    let character = records
+        .iter()
+        .find_map(|record| match record {
+            DomainRecord::Character(character) if character.id == actor_id => Some(character),
+            _ => None,
+        })
+        .ok_or(RuntimeError::Unavailable)?;
+    let place = records
+        .iter()
+        .find_map(|record| match record {
+            DomainRecord::Place(place) if place.id == character.location => Some(place),
+            _ => None,
+        })
+        .ok_or(RuntimeError::Unavailable)?;
+    let mut views = records
+        .iter()
+        .filter_map(|record| match record {
+            DomainRecord::EventInstance(event)
+                if event.status == loreloom_core::EventStatus::Active
+                    && event
+                        .scene_id
+                        .is_none_or(|scene_id| scene_id == place.scene_id) =>
+            {
+                Some(event)
+            }
+            _ => None,
+        })
+        .map(|event| {
+            let Definition::Event(event_definition) = definition(registry, &event.definition_id)?
+            else {
+                return Err(RuntimeError::Unavailable);
+            };
+            let node = event_definition
+                .nodes
+                .iter()
+                .find(|node| node.id == event.current_node)
+                .ok_or(RuntimeError::Unavailable)?;
+            let mut options = node
+                .options
+                .iter()
+                .filter(|option| predicates_match(&option.visible_if, character, place, records))
+                .map(|option| EventOptionView {
+                    option_id: option.id.clone(),
+                    display_name: option.display_name.clone(),
+                    enabled: predicates_match(&option.enabled_if, character, place, records),
+                })
+                .collect::<Vec<_>>();
+            options.sort_by(|left, right| left.option_id.cmp(&right.option_id));
+            Ok(ActiveEventView {
+                event_id: event.id,
+                definition_id: event.definition_id.clone(),
+                display_name: event_definition.display_name.clone(),
+                current_node: event.current_node.clone(),
+                node_text: node.text.clone(),
+                options,
+            })
+        })
+        .collect::<Result<Vec<_>, RuntimeError>>()?;
+    views.sort_by_key(|event| event.event_id);
+    Ok(views)
+}
+
+fn predicates_match(
+    predicates: &[PredicateDefinition],
+    character: &loreloom_core::CharacterRecord,
+    place: &loreloom_core::PlaceRecord,
+    records: &[DomainRecord],
+) -> bool {
+    predicates
+        .iter()
+        .all(|predicate| predicate_matches(predicate, character, place, records))
+}
+
+fn predicate_matches(
+    predicate: &PredicateDefinition,
+    character: &loreloom_core::CharacterRecord,
+    place: &loreloom_core::PlaceRecord,
+    records: &[DomainRecord],
+) -> bool {
+    match predicate {
+        PredicateDefinition::ResourceAtLeast {
+            resource_id,
+            amount,
+        } => character
+            .resources
+            .get(resource_id)
+            .is_some_and(|resource| resource.current >= *amount),
+        PredicateDefinition::HasCondition { condition_id } => records.iter().any(|record| {
+            matches!(record, DomainRecord::Condition(condition)
+                    if condition.target_id == character.id
+                        && &condition.condition_id == condition_id)
+        }),
+        PredicateDefinition::HasTag { tag_id } => {
+            character.profile.narrative_tags.contains(tag_id) || place.tags.contains(tag_id)
+        }
+        PredicateDefinition::Not { predicate } => {
+            !predicate_matches(predicate, character, place, records)
+        }
+        PredicateDefinition::All { predicates } => {
+            predicates_match(predicates, character, place, records)
+        }
+        PredicateDefinition::Any { predicates } => predicates
+            .iter()
+            .any(|predicate| predicate_matches(predicate, character, place, records)),
+    }
+}
+
+fn transcript_records(records: &[DomainRecord]) -> Vec<loreloom_core::TranscriptItemRecord> {
+    let mut transcripts = records
+        .iter()
+        .filter_map(|record| match record {
+            DomainRecord::TranscriptItem(item) => Some(item.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    transcripts.sort_by_key(|item| (item.revision, item.id));
+    transcripts
+}
+
+fn transcript_window(records: &[DomainRecord], limit: usize) -> TranscriptWindow {
+    let mut items = transcript_records(records);
+    let start = items.len().saturating_sub(limit);
+    let before_cursor = (start > 0).then(|| items[start].id);
+    if start > 0 {
+        items.drain(..start);
+    }
+    TranscriptWindow {
+        items,
+        before_cursor,
+    }
+}
+
+fn tail<T>(values: impl IntoIterator<Item = T>, limit: usize) -> Vec<T> {
+    let mut values = values.into_iter().collect::<Vec<_>>();
+    if values.len() > limit {
+        values.drain(..values.len() - limit);
+    }
+    values
+}
+
+fn parse_object_id(arguments: &JsonValue, field: &str) -> Result<ObjectId, RuntimeError> {
+    arguments
+        .get(field)
+        .and_then(JsonValue::as_str)
+        .ok_or(RuntimeError::InvalidInput)?
+        .parse()
+        .map_err(RuntimeError::Identity)
+}
+
+fn committed_json(outcome: CommittedAction) -> JsonValue {
+    let event_ids = outcome.event_ids;
+    json!({
+        "revision": outcome.revision,
+        "event_id": event_ids.first(),
+        "event_ids": event_ids,
+        "summary": outcome.safe_summary,
+    })
+}
+
+fn tool_result(call: &ToolCall, value: JsonValue, is_error: bool) -> ToolResult {
+    ToolResult {
+        call_id: call.id.clone(),
+        content: vec![ToolResultContent::Json { value }],
+        is_error,
+    }
+}

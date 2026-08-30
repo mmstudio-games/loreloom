@@ -9,6 +9,7 @@ mod protocol;
 mod record;
 mod revision;
 mod text;
+mod view;
 
 pub use codec::{DomainError, DomainRecord, decode_domain_records};
 pub use domain::{
@@ -44,3 +45,9 @@ pub use record::{
 };
 pub use revision::{Revision, RevisionError};
 pub use text::{BoundedText, DisplayName, LongText, ShortText, TextError};
+pub use view::{
+    ActiveEventView, AttributeView, CharacterContext, ConditionView, EventOptionView,
+    InventoryView, NoticeKind, ParameterSetView, ParameterValueView, ResourceView, RuntimePhase,
+    SceneContext, SceneObservation, SkillView, ToolActivity, ToolActivityState, TranscriptWindow,
+    UiNotice, UiSnapshot, VisibleActorView,
+};

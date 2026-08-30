@@ -63,6 +63,14 @@ impl CommitRequest {
         changes: ExecutionChangeSet,
     ) -> Result<Self, StoreError> {
         let event_ids = changes.events.iter().map(|event| event.id).collect();
+        let transcripts = changes
+            .upserts
+            .iter()
+            .filter_map(|record| match record {
+                DomainRecord::TranscriptItem(transcript) => Some(transcript.clone()),
+                _ => None,
+            })
+            .collect();
         let safe_outcome = CommittedAction {
             action_id: changes.action_id,
             revision: changes.revision,
@@ -74,7 +82,7 @@ impl CommitRequest {
             command,
             record_ops,
             changes.events,
-            Vec::new(),
+            transcripts,
             safe_outcome,
         )
     }

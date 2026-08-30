@@ -161,6 +161,9 @@ impl GameWorld {
             WorldCommandKind::PromoteCharacter { actor_id: target } => {
                 self.promote_character(actor_id, target, action_id, revision, ids)?
             }
+            WorldCommandKind::AppendTranscript { items } => {
+                self.append_transcripts(actor_id, items, revision)?
+            }
         };
         self.revision = revision;
         self.validate(registry)?;
@@ -1247,6 +1250,51 @@ impl GameWorld {
             Vec::new(),
             vec![event],
             summary("character promoted")?,
+        ))
+    }
+
+    fn append_transcripts(
+        &mut self,
+        actor_id: ActorId,
+        items: Vec<TranscriptItemRecord>,
+        revision: Revision,
+    ) -> Result<ChangeParts, WorldError> {
+        if items.is_empty() {
+            return domain_rule("transcript_items_empty");
+        }
+        let mut seen = BTreeSet::new();
+        for item in &items {
+            DomainRecord::TranscriptItem(item.clone()).validate()?;
+            if item.revision != Some(revision)
+                || !seen.insert(item.id)
+                || self.transcripts.contains_key(&item.id)
+            {
+                return domain_rule("transcript_item_invalid");
+            }
+            if let loreloom_core::TranscriptSpeaker::Player {
+                actor_id: speaker, ..
+            } = &item.speaker
+                && *speaker != actor_id
+            {
+                return domain_rule("transcript_player_actor");
+            }
+        }
+        let mut records = items
+            .into_iter()
+            .map(DomainRecord::TranscriptItem)
+            .collect::<Vec<_>>();
+        records.sort_by_key(domain_sort_key);
+        for record in &records {
+            let DomainRecord::TranscriptItem(item) = record else {
+                unreachable!("transcript records are constructed above")
+            };
+            self.transcripts.insert(item.id, item.clone());
+        }
+        Ok((
+            records,
+            Vec::new(),
+            Vec::new(),
+            summary("transcript appended")?,
         ))
     }
 }

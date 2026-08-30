@@ -739,28 +739,27 @@ pub struct WorldCommand {
     pub action_id: ActionId,
     pub actor_id: ActorId,
     pub expected_revision: Revision,
-    pub body: CommandBody,
+    pub kind: WorldCommandKind,
 }
 
 #[non_exhaustive]
-pub enum CommandBody {
-    Move { destination: ObjectId },
-    Speak { audience: Vec<ActorId>, content: String },
-    TransferItem { item: ObjectId, to: ObjectId },
-    EquipItem { item: ObjectId, slot: EquipmentSlotId },
-    UseItem { item: ObjectId, targets: Vec<ObjectId> },
-    UseSkill { skill_grant: ObjectId, targets: Vec<ObjectId> },
-    RecordKnowledge { fact: FactInput },
-    SetGoal { goal: GoalInput },
-    ChooseEventOption { event: ObjectId, option: ContentDefinitionId },
-    PerformGameplayAction {
-        action: ContentDefinitionId,
-        arguments: ParameterInput,
-    },
+pub enum WorldCommandKind {
+    Move { destination_id: ObjectId },
+    TransferItem { item_id: ObjectId, container_id: ObjectId },
+    EquipItem { item_id: ObjectId, slot_id: ContentDefinitionId },
+    SplitStack { item_id: ObjectId, quantity: u32 },
+    UseSkill { grant_id: ObjectId, target: SkillTargetRef },
+    AdvanceTime { ticks: u64 },
+    SpawnCharacter { spec: Box<CharacterSpawnSpec> },
+    PromoteCharacter { actor_id: ActorId },
+    AppendTranscript { items: Vec<TranscriptItemRecord> },
 }
 ```
 
-枚举内容只是最小场景候选，未转为 Active 前不冻结名称。每个 Command 必须：
+以上是第一阶段已经冻结的最小产品命令集合；Event Option、Gameplay Action、UseItem、Knowledge/Goal
+专用 Command 在对应 executor 实现时按本节共同规则增量加入，不能用任意 Component patch 代替。
+`AppendTranscript` 只供可信 Runtime 保存 Player/Narrator/Agent 输出：Runtime 分配 TranscriptItemId、
+Session/Revision 和 speaker binding，模型不能直接构造该 Command。每个 Command 必须：
 
 - 从可信 Runtime Context 获得 Actor 与 Revision，模型参数不能覆盖；
 - 完成 Schema、Capability、对象存在、可见性和规则前置条件校验；
@@ -985,12 +984,20 @@ lock 和当前 Observation 决定是否投影相应 Event/Action。
 | `NarratorSynthesis` | 一次编排轮的临时结果 | 生成最终叙事或在总预算内返回下一轮 NarratorPlan |
 | `AgentRunner` | 可共享运行服务 | 执行单次 Bridge、Tool Loop、取消、预算和结果关联 |
 
-以下候选形状只表达数据所有权与关联要求，不冻结公共 Rust API 或精确字段类型：
+P0 之后第一阶段产品 API 冻结为拥有所有权的下列语义形状；实现可以把纯构造/校验函数拆到不同
+文件，但 wire 字段、Stable ID、Revision binding、状态集合与 text 上限不能漂移：
 
 ```rust
 pub struct NpcAgent {
     pub definition: AgentDefinition,
     pub context: NpcContext,
+}
+
+pub struct AgentDefinition {
+    pub profile_id: ContentDefinitionId,
+    pub system_style: LongText,
+    pub model_alias: ShortText,
+    pub allowed_tools: BTreeSet<String>,
 }
 
 pub struct NpcContext {
@@ -999,8 +1006,7 @@ pub struct NpcContext {
     pub character: CharacterContext,
     pub scene: SceneContext,
     pub assignment: NpcAssignment,
-    pub memories: Vec<MemoryContext>,
-    pub recent_dialogue: Vec<DialogueItem>,
+    pub recent_dialogue: Vec<TranscriptItemRecord>,
 }
 
 pub struct NarratorPlan {
@@ -1013,36 +1019,88 @@ pub struct NpcTurnRequest {
     pub actor_id: ActorId,
     pub scene_id: ObjectId,
     pub based_on_revision: Revision,
-    pub assignment: NpcAssignment,
+    pub assignment: BoundedText<4096>,
 }
 
 pub struct NpcTurnResult {
     pub request_id: NpcTurnRequestId,
     pub actor_id: ActorId,
-    pub observed_revision: Revision,
+    pub observed_revision: Option<Revision>,
     pub final_revision: Revision,
     pub status: NpcTurnStatus,
-    pub utterance: Option<BoundedText>,
-    pub intent: Option<BoundedText>,
-    pub claimed_action_description: Option<BoundedText>,
-    pub tool_results: Vec<ToolResultRef>,
-    pub world_events: Vec<WorldEventId>,
+    pub utterance: Option<BoundedText<16384>>,
+    pub intent: Option<BoundedText<4096>>,
+    pub claimed_action_description: Option<BoundedText<8192>>,
+    pub tool_call_ids: Vec<String>,
+    pub world_events: Vec<EventId>,
 }
 
 pub enum NarratorSynthesis {
     Final {
         based_on_revision: Revision,
-        narration: BoundedText,
-        supporting_events: Vec<WorldEventId>,
+        narration: BoundedText<65536>,
+        supporting_events: Vec<EventId>,
     },
     Continue {
         based_on_revision: Revision,
-        narration: Option<BoundedText>,
-        supporting_events: Vec<WorldEventId>,
+        narration: Option<BoundedText<65536>>,
+        supporting_events: Vec<EventId>,
         next_plan: NarratorPlan,
     },
 }
 ```
+
+`CharacterContext` 固定包含 Actor/Revision、展示身份/Profile、Location、Base/Effective Attribute
+摘要、Resource、可感知 Condition、Inventory、可用 Skill、KnownFact 与 Goal 的有界拥有所有权
+投影；`SceneContext` 固定包含 Scene/Revision、展示 framing、World Clock、当前 Place、可见 Actor 与
+已提交 Event 摘要；`NpcAssignment` 只把 request assignment 与投影时 Revision 绑定。集合元素使用
+Core 的 Stable ID/Fixed/WorldTime，不引入 Bevy Entity 或 Armillae Provider 类型。
+
+展示投影不能要求 Agent/TUI 再访问 Content Registry。第一阶段 Core View wire 因此固定包含下列
+补充形状；所有结构拒绝未知字段，集合按 Stable ID 排序，`effective` 是 current Revision 的派生值：
+
+```rust
+pub struct AttributeView {
+    pub attribute_id: ContentDefinitionId,
+    pub display_name: DisplayName,
+    pub base: Fixed,
+    pub effective: Fixed,
+}
+
+pub struct ResourceView {
+    pub resource_id: ContentDefinitionId,
+    pub display_name: DisplayName,
+    pub current: Fixed,
+    pub maximum: Fixed,
+}
+
+pub struct ConditionView {
+    pub condition: ConditionRecord,
+    pub display_name: DisplayName,
+    pub symptoms: Vec<ShortText>,
+}
+
+pub struct InventoryView {
+    pub item: ItemRecord,
+    pub display_name: DisplayName,
+}
+
+pub struct SkillView {
+    pub grant: SkillGrantRecord,
+    pub display_name: DisplayName,
+    pub available: bool,
+}
+```
+
+`CharacterContext.attributes` 使用 `Vec<AttributeView>` 同时承载 Base/Effective，不再暴露只有 Base
+的 map；`known_facts` 使用 owner 已过滤的 `Vec<KnownFactRecord>`。Condition symptom 只包含
+`minimum_intensity <= instance.intensity` 的当前可感知文本。Resource maximum 是 effective maximum。
+这些都是可丢弃投影，不能写回存档。
+
+`NpcTurnStatus` wire 值固定为 `completed | stale | rejected | cancelled | budget_exhausted | failed`；
+`observed_revision` 对未开始的结果为 `None`，开始投影成功后为 `Some`。`NarratorPlan`、
+`NpcTurnRequest`、`NpcTurnResult`、NPC model output 与 `NarratorSynthesis` 均拒绝未知字段；同一 Plan
+中的 request ID 必须唯一。
 
 规范要求：
 
@@ -1697,6 +1755,68 @@ UiSnapshot 至少包含：
 - 非敏感错误和通知。
 
 UiSnapshot 是拥有所有权且不可变的 View Model。TUI 不能通过 Widget callback 修改 ECS。
+
+第一阶段 wire 形状补充冻结为：
+
+```rust
+pub struct VisibleActorView {
+    pub actor_id: ActorId,
+    pub display_name: DisplayName,
+    pub controller: CharacterController,
+    pub life_state: LifeState,
+    pub action_state: ActionState,
+    pub posture: Posture,
+}
+
+pub struct ParameterValueView {
+    pub parameter_id: ContentDefinitionId,
+    pub display_name: DisplayName,
+    pub value: ParameterValue,
+}
+
+pub struct ParameterSetView {
+    pub set_id: ObjectId,
+    pub schema_id: ContentDefinitionId,
+    pub values: Vec<ParameterValueView>,
+}
+
+pub struct EventOptionView {
+    pub option_id: ContentDefinitionId,
+    pub display_name: DisplayName,
+    pub enabled: bool,
+}
+
+pub struct ActiveEventView {
+    pub event_id: ObjectId,
+    pub definition_id: ContentDefinitionId,
+    pub display_name: DisplayName,
+    pub current_node: ContentDefinitionId,
+    pub node_text: ShortText,
+    pub options: Vec<EventOptionView>,
+}
+
+pub struct TranscriptWindow {
+    pub items: Vec<TranscriptItemRecord>,
+    pub before_cursor: Option<TranscriptItemId>,
+}
+
+pub struct UiSnapshot {
+    pub revision: Revision,
+    pub session_id: SessionId,
+    pub player: CharacterContext,
+    pub scene: SceneContext,
+    pub parameters: Vec<ParameterSetView>,
+    pub active_events: Vec<ActiveEventView>,
+    pub transcript: TranscriptWindow,
+    // Runtime phase, submit/cancel/wait flags, Tool activity, notices and supporting Event IDs.
+}
+```
+
+`SceneContext.visible_actors` 使用 `Vec<VisibleActorView>`，不能只给展示层裸 ActorId。Snapshot 的
+Parameter 只包含 `public` 值；`narrator | owner | hidden` 需要独立授权投影，不能泄漏给 TUI。
+Event Option 在 current Revision 求值 `visible_if`，不可见项不进入列表；可见项的 `enabled` 由
+`enabled_if` 求值。`TranscriptWindow` 默认最多 64 项；存在更旧内容时 `before_cursor` 等于当前窗口
+第一项 ID，调用方以“严格早于该 ID”请求上一页，没有更旧内容时为 `None`。
 
 ### 12.3 输入与流式输出
 

@@ -46,7 +46,13 @@ OPEN 项、后续 RFC 或 P0 Spike；空 crate 不代表相关协议已经实现
 - [x] 实现 Bevy Working World 的 Stable ID 映射、typed record 投影/重建与第一阶段领域 Command；
 - [x] 实现 typed ModLock/SaveManifest、SurrealKV 显式事务、Revision CAS、ActionId 幂等、checksum、
   checkpoint + RecordOp 重建和 Transcript/Event/Action durable rows；
+- [x] 实现严格 Agent wire、Armillae 单次调用/Tool continuation、顺序关联、可唤醒取消与两级预算；
+- [x] 实现单一 World owner 的 Runtime WorldService、candidate commit/recovery、可信 Transcript 提交与
+  Content-resolved Character/Scene/UiSnapshot 投影；
+- [x] 实现 Player -> Narrator planning -> ordered NPC turns -> Narrator synthesis 纵向编排，并覆盖
+  stale Request、committed Event provenance、伪造 Event 拒绝、SurrealKV durable replay 与冲突恢复；
 - [ ] 取得并接入可等待、幂等的 SurrealKV shutdown API，移除物理关闭/备份对 sleep/retry 的依赖；
 - [ ] 实现关闭后物理备份、恢复与存档切换的产品 API；
-- [ ] 实现最小可玩 Runtime、World、Agent、Store、TUI 纵向切片；
+- [ ] 实现 Runtime Client/Event loop、确定性 TUI 产品层与可运行的内置 demo 装配，完成最小可玩
+  Runtime、World、Agent、Store、TUI 纵向切片；
 - [ ] 满足 Active Spec 第 17 节全部验收条件。
