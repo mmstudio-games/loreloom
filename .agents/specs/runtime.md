@@ -194,7 +194,8 @@ Backend、Runtime 与 TUI 装配，以及进程退出顺序。
 - Toasty/SurrealDB Store 候选同样只能使用 registry release，或公开 Git URL 与明确 tag/revision；
   未进入公开来源的本地提交不构成 Loreloom 可采用的依赖版本。
 - `bevy_ecs` 版本必须与选定 `armillae-simulate-bevy` 发布线精确兼容。
-- TUI 候选技术栈为 Ratatui + Crossterm；在建立 TUI 产品 API 前需要 P0 输入、恢复和窄屏 Spike。
+- TUI 固定使用 registry `ratatui 0.30.2`（关闭 default features，仅启用 `crossterm`）、
+  `crossterm 0.29.0` 与 grapheme-aware 输入实现；P0 Spike 已验证输入、恢复和窄屏边界。
 - 第一阶段只加载 Content/Rule Mod 数据，不加载 Rust/C 原生动态库；WASM Extension Host 必须
   由后续 RFC 和独立 capability/sandbox Spike 授权。
 - 生产代码对可恢复路径不得使用 `unwrap()`。
@@ -1330,16 +1331,16 @@ checkpoint 是一个普通显式事务中的版本化 Snapshot/compaction record
 
 ### 12.1 布局
 
-宽度满足最小门槛时：
+宽度 `>= 80` columns 时：
 
-- 左 pane 占可配置的约 25%–35%，展示当前角色与可见世界状态；
+- 左 pane 默认占约 30%，展示当前角色与可见世界状态；产品配置可以在 25%–35% 内调整；
 - 右 pane 上部展示 Transcript、系统事件、Tool 阶段和错误；
 - 右 pane 底部固定保留多行输入编辑区；
 - 输入区下方或边缘提供当前模式、Provider/Agent 状态、Revision 和快捷键提示；
-- resize 后输入内容、滚动位置和已提交历史不得丢失。
+- resize 后输入内容、grapheme cursor、滚动位置、已提交输入历史和 streaming item 不得丢失。
 
-小于门槛时使用 State/Transcript 两个可切换页面，输入区仍固定可达。具体门槛和按键为 P0 TUI
-Spike 决定。
+宽度 `< 80` columns 时使用 State/Story 两个可切换页面，输入区在任一页面始终固定可达。布局
+切换只是同一 UiSnapshot 与本地交互状态的纯投影，不能触发 Runtime 请求或修改数据。
 
 ### 12.2 UiSnapshot
 
@@ -1358,12 +1359,16 @@ UiSnapshot 是拥有所有权且不可变的 View Model。TUI 不能通过 Widge
 
 ### 12.3 输入与流式输出
 
-- 输入支持多行编辑、提交、取消和历史；
+- 输入按 Unicode grapheme cluster 编辑，支持多行、cursor 移动、删除、提交、取消和历史；
+- `Enter` 提交，`Alt+Enter` 或 `Ctrl+J` 插入换行；运行中 `Esc` 产生 Cancel intent，空闲时
+  `Esc` 不产生世界行为；`Ctrl+C` 产生 Quit intent；
 - TUI 把输入作为数据发送给 Runtime，不自行构造 WorldCommand；
 - Provider 流式文本使用 ephemeral item 显示；
 - 完成后 Runtime 决定提交、标记中断或丢弃，再发布新 Snapshot；
-- Tool 开始、成功、拒绝和失败使用不同视觉状态；
-- 终端退出、panic hook 和错误路径必须恢复 raw mode/alternate screen；
+- Tool pending、succeeded、rejected 和 failed 使用确定性、可区分的视觉状态；颜色只是增强信息，
+  文本标签必须保留；
+- 终端 session 初始化顺序为 raw mode、alternate screen、隐藏 cursor、bracketed paste、mouse
+  capture；正常退出、部分初始化失败与 panic unwind 均按逆序尝试恢复所有已启用状态；
 - 渲染测试不得访问网络或真实 Provider。
 
 ## 13. 配置、Secret 与日志
@@ -1449,7 +1454,9 @@ UiSnapshot 是拥有所有权且不可变的 View Model。TUI 不能通过 Widge
    `bevy_ecs = 0.19.1` 使用同一类型版本。Spike 验证 Loreloom Component/System、ToolContext WorldGateway、
    Observation capture、Item/Container relation、Skill Executor、Attribute aggregation、
    Condition/Clock 和 Revision conflict 可由当前 Armillae API 表达；
-3. **TUI Spike**：验证 Ratatui/Crossterm 双栏、多行输入、streaming 更新、resize 和终端恢复；
+3. **TUI Spike（已通过）**：以 registry `ratatui 0.30.2`、`crossterm 0.29.0` 为固定输入，已验证
+   双栏、多行 Unicode 输入、streaming 更新、resize、窄屏降级和终端恢复；证据见
+   [Spike 0003](../spikes/0003-tui.md)；
 4. **Agent Loop Spike**：用 Armillae Mock Bridge 验证多 ToolCall 顺序、ToolResult correlation、
    PlayerInput -> NarratorPlan -> 有序 NpcTurnRequest/NpcTurnResult -> NarratorSynthesis、单一执行槽
    无重叠、请求开始时重新投影、只叙述已提交事实、配置化整轮/单 Turn budget、cancel 和 stale

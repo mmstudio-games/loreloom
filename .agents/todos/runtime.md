@@ -25,7 +25,8 @@ OPEN 项、后续 RFC 或 P0 Spike；空 crate 不代表相关协议已经实现
   ActionId 幂等、故障注入、崩溃恢复、备份、性能、公开依赖和许可证；
 - [x] [Armillae/Bevy Spike](../spikes/0001-armillae-bevy.md)：验证 Component/System、WorldGateway、Observation、容器、技能、
   Attribute、Condition/Clock 与 Revision conflict；
-- [ ] **GATED** TUI：验证 Ratatui/Crossterm 双栏、多行输入、streaming、resize 和终端恢复；
+- [x] [TUI Spike](../spikes/0003-tui.md)：验证 Ratatui/Crossterm 双栏、多行 Unicode 输入、
+  streaming、resize、窄屏降级和终端恢复，并冻结第一阶段交互边界；
 - [ ] **GATED** Agent Loop：验证 NarratorPlan、NpcTurnRequest/Result、NarratorSynthesis、严格串行、
   预算、取消和 stale Revision；
 - [ ] **GATED** Content/NpcFactory：验证预设 Definition 与运行时 Draft 的统一 SpawnSpec/Factory
