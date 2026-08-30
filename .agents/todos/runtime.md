@@ -31,14 +31,16 @@ OPEN 项、后续 RFC 或 P0 Spike；空 crate 不代表相关协议已经实现
   NpcTurnRequest/Result、NarratorSynthesis、严格串行、两级预算、取消和 stale Revision；
 - [x] [Content/NpcFactory Spike](../spikes/0005-content-npc-factory.md)：验证并冻结预设 Definition
   与运行时 Draft 的统一 SpawnSpec/Factory 路径、两阶段跨引用、失败回滚和 GeneratedOrigin 恢复；
-- [ ] **GATED** Mod/Rule：验证依赖/Patch/哈希锁定、Parameter、Event Option、Rule 预算和资源限制。
+- [x] [Mod/Rule Spike](../spikes/0006-mod-rule.md)：验证并冻结目录包格式、依赖/Patch/哈希锁定、
+  Parameter、Event Option、Gameplay Action、Rule 预算、ModLock 和资源限制。
 
 ## 后续协议与实现
 
 - [ ] 冻结 Stable ID 与 Command/Event 重建权威关系；
 - [ ] 冻结领域 record Schema 与领域迁移协议；提交、后端和物理恢复顺序已由 Store Spike 冻结；
 - [ ] 冻结角色、物品、技能、属性、资源、Condition 和正交状态 Schema；
-- [ ] 冻结 Content/Mod/Event/Rule/Parameter/Gameplay Action Schema；
+- [ ] 冻结 Character/Scene/Item/Skill 等 Content Definition 的完整 JSON 字段与迁移版本；
+- [x] 冻结 Mod Manifest/ModLock、Parameter、Event、Gameplay Action 与声明式 Rule 协议边界；
 - [x] 冻结 NarratorPlan/NpcTurnRequest/NpcTurnResult/NarratorSynthesis 与预算配置；
 - [ ] 实现最小可玩 Runtime、World、Agent、Store、TUI 纵向切片；
 - [ ] 满足 Active Spec 第 17 节全部验收条件。

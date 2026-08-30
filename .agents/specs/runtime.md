@@ -545,7 +545,8 @@ Command/System 间接改变这些状态。
 
 ### 6.5 模组参数、事件与声明式规则
 
-模组可扩展状态使用 Definition + Instance，不创建运行时 Rust Component 类型。候选参数协议：
+模组可扩展状态使用 Definition + Instance，不创建运行时 Rust Component 类型。第一阶段逻辑参数
+协议为：
 
 ```rust
 pub struct ParameterDefinition {
@@ -576,6 +577,11 @@ pub struct ParameterSet {
 Bevy Entity、函数、Provider 类型或未验证对象引用。缺省值、范围、枚举/标签集合、引用种类、
 对 Actor 的可见性和保存策略都由 Definition 决定。改变参数只能经领域 Command/System，不能由
 Mod 文本或 LLM 直接 Patch `ParameterSet`。
+
+Parameter Type 第一阶段固定为 Bool、Fixed、Counter、Enum、TagSet 和 ObjectRef：Fixed 必须与
+Definition 的 scale 完全相同并在范围内；Enum/TagSet 只能取声明项且 TagSet 有 cardinality 上限；
+ObjectRef 同时校验 Stable ObjectId 存在和 ObjectKind 白名单。类型不匹配、未知 tagged variant、
+额外控制字段和任意 JSON object 均拒绝。Fixed 的最终位宽/舍入仍服从第 6.4 节门禁。
 
 事件必须区分静态 Definition 与运行实例：
 
@@ -609,7 +615,7 @@ pub struct EventInstance {
 World 必须在 current Revision 重新求值 visible/enabled Predicate；旧 UiSnapshot 或 Observation 中
 曾经可选不代表当前仍可执行。成功 Effect 形成带 Mod/Rule provenance 的 WorldCommand/Event，
 失败不得推进 Event Instance。一个 Option 的 Effect plan 与节点推进必须作为一个复合
-WorldCommand 形成 all-or-reject 领域结果；具体 durable commit 策略仍由第 11.4 节阻塞。
+WorldCommand 形成 all-or-reject 领域结果，并按第 11.4 节形成一个 durable unit。
 
 第一阶段 Rule Bundle 只允许注册引擎支持的有限节点：
 
@@ -621,9 +627,17 @@ WorldCommand 形成 all-or-reject 领域结果；具体 durable commit 策略仍
 
 编译后的规则按规范化 `priority -> definition_id -> instance_id` 顺序执行，并具有最大触发数、
 Predicate 节点数、Effect 数和级联深度预算。第一阶段拒绝递归规则和静态可检测循环；超过预算时
-返回结构化 Rule 错误，不继续猜测。规则随机性必须使用可记录 RNG Context。Runtime/World 为
+返回结构化 Rule 错误并丢弃完整 candidate cascade，不发布前半段 Effect。默认预算为单 Rule 最多
+64 个 Predicate 节点、32 个 Effect；单次 cascade 最多触发 128 个 Rule、求值 1,024 个 Predicate、
+应用 512 个 Effect、深度 8。Host 配置可以收紧，Mod 不可扩大。规则随机性必须使用可记录 RNG
+Context。Runtime/World 为
 每次执行注入可信 rule initiator、Mod/Rule ID、source Event/Clock/Scene 和 Action provenance；
 数据 Mod 参数不能覆盖 Actor、System principal、ActionId 或 Revision。
+
+Gameplay Action Definition 只声明稳定 ID、有界 typed parameter Schema、Capability 和已编译 Effect
+plan。第一阶段 Runtime 只注册 `list_gameplay_actions`/`perform_gameplay_action` 等引擎通用 Tool；
+Definition ID 不是动态 Tool 名。参数缺失、额外参数、类型/范围错误或任一 Effect 失败均不推进
+Revision。
 
 Definition Registry 在一个活动世界版本内不可被隐式替换。启停 Mod、应用 Patch 或热重载会
 改变规则/Schema，只能通过未来明确的迁移与世界重建边界执行，不能在 Schedule 中间替换。
@@ -1174,20 +1188,48 @@ Manifest
   └── bounded package resources
 ```
 
-Manifest 至少声明 Mod ID、版本、Engine/Schema compatibility、必需/可选依赖、内容哈希、显式
-Patch 和请求的 Capability。具体序列化格式、签名和分发方式为 **OPEN**。
+第一阶段只支持显式配置的**目录包**，不支持 archive 自动解压。内置 Mod 通过相同的 virtual
+directory pipeline 加载。目录布局固定为：
+
+```text
+mod.toml
+content/*.json
+rules/*.json
+locales/*.json       # optional display-only data
+assets/**            # optional bounded opaque resources
+```
+
+`mod.toml` 是 UTF-8 TOML，Manifest Schema v1 至少声明 reverse-DNS lowercase Mod ID、SemVer
+version、Engine SemVer requirement、Content Schema version、required/optional dependencies、
+`content | rules` capability、payload SHA-256 与显式 Patch。JSON 文件为 versioned tagged Schema，
+拒绝未知控制字段。第一阶段没有 package signature/authenticity 承诺；包来源信任由用户配置表达，
+SHA-256 只提供内容完整性和存档精确锁定。
+
+payload hash 输入为把 `content_hash` 清空后规范序列化的 Manifest，以及按相对 path byte-order 排序
+的全部 payload；每个 path 长度/path bytes/内容长度/原始内容 bytes 都进入 SHA-256。Manifest TOML
+空白不影响 hash，JSON/asset 原始 bytes 或路径变化会改变 hash。
+
+包路径统一使用 `/` 的相对路径。加载器在解析内容前拒绝 absolute、反斜杠、NUL、空/`.`/`..`
+segment、symlink 和重复规范路径。Host 默认上限为 256 个 payload 文件、单文件 1 MiB、总 payload
+16 MiB、路径深度 8、Manifest 256 KiB；内置与外部包相同，Host 可收紧，Manifest 不可扩大。
 
 Runtime/Content 加载顺序必须是：
 
-1. 从明确配置的来源发现包，规范化包内路径并执行文件数量、单文件/总大小、递归，以及适用时
-   的解压上限；
+1. 从明确配置的来源发现目录包，规范化包内路径并执行文件数量、单文件/总大小和深度上限；
 2. 在不修改 World 前解析全部 Manifest，验证兼容范围、内容哈希和依赖闭包；
-3. 生成确定性的依赖拓扑顺序，循环、缺失依赖和不兼容版本直接失败；
+3. required dependency 缺失即失败；optional dependency 缺失可忽略，但若已安装仍必须满足 SemVer；
+   生成确定性的依赖拓扑顺序，零入度 tie 按 Mod ID byte-order，循环和不兼容版本直接失败；
 4. 验证所有 Definition/Rule/Patch，重复 Definition 默认失败；
-5. 显式 Patch 只有目标 Mod、Definition 和版本约束匹配时按规范顺序应用；
+5. 显式 Patch 只有 patching Mod 直接依赖 target Mod，且 target Mod、Definition 和版本约束匹配时
+   才能按 `dependency topology -> patch ID` 顺序应用；普通 Definition 不能靠加载顺序覆盖；
 6. 纯编译不可变 Definition Registry、Spawn plan 和 Rule plan；
 7. Runtime 在一个初始化提交边界内安装 Registry 并物化初始世界；
 8. 成功后生成保存 Mod ID、版本、内容哈希、依赖与 Patch 的 `ModLock`。
+
+ModLock 每项固定保存 Mod ID、resolved SemVer、content hash、Manifest/Content Schema version、
+`builtin | directory` source kind、已解析 dependency ID/version/optional flag 和按序 applied Patch ID；
+不保存机器绝对路径。打开存档必须重新构建 candidate lock 并精确比较；不一致时迁移或拒绝，失败不
+替换已发布 Registry/lock。
 
 包内文本、Agent Profile 和展示资源均视为不可信数据，不能改变系统 Prompt 优先级、Tool
 Capability 或日志/Secret 策略。Content/Rule Mod 没有包外文件、网络、Shell、Provider 或 Secret
@@ -1554,8 +1596,9 @@ UiSnapshot 是拥有所有权且不可变的 View Model。TUI 不能通过 Widge
 5. **Content/NpcFactory Spike（已通过）**：验证预设 Definition 与运行时 Draft 汇入同一 CharacterSpawnSpec、
    双阶段引用解析、全包失败回滚、GeneratedOrigin 保存和加载不重新调用模型；证据入口为
    [Spike 0005](../spikes/0005-content-npc-factory.md)；
-6. **Mod/Rule Spike**：验证内置/外部包共用加载管线、依赖/Patch/哈希锁定、类型化 Parameter、
-   Event Option stale Revision、Rule 预算、包路径/资源限制和保存后精确重开。
+6. **Mod/Rule Spike（已通过）**：验证内置/外部包共用加载管线、依赖/Patch/哈希锁定、类型化 Parameter、
+   Event Option stale Revision、Rule 预算、包路径/资源限制和保存后精确重开；证据入口为
+   [Spike 0006](../spikes/0006-mod-rule.md)。
 
 Spike 只生成 `.agents/spikes/` 证据，不提前创建产品 API。
 
@@ -1674,13 +1717,14 @@ RFC 0001 已于 2026-08-30 被项目方接受。以下事项继续阻塞对应�
 - 第一阶段 PlayerInput 的“说话/行动”解释模式、NarratorNpcDecision、Materialization/Lifetime/
   Controller 与 promotion/cleanup 冻结；Narrator 已明确不存在绕过 Tool 的特权 Scene Directive；
 - Known Fact/Belief/Transcript 的最小 Schema 冻结；
-- Content Pack 的物理文件布局/编码、Manifest 与 Definition ID 的最终编码冻结；Character/Scene、
-  CharacterSpawnSpec、NpcFactory、Content/Generated Origin 和导入事务的逻辑边界已由 P0 Spike
-  冻结；
-- Mod Manifest/ID/版本/兼容范围、依赖图、内容哈希、包来源/资源限制、显式 Patch、冲突策略和
-  ModLock/迁移语义冻结；
-- Event Definition/Instance、Option、Parameter Definition/Set、Gameplay Action、
-  Trigger/Predicate/Effect 白名单、可信 rule initiator/provenance、执行顺序和预算冻结；
+- Content Pack 的目录布局、Manifest 与加载边界已冻结；Definition ID 的最终编码和各领域完整 JSON
+  字段/迁移版本仍受对应门禁。CharacterSpawnSpec、NpcFactory、Content/Generated Origin 和导入
+  transaction 的逻辑边界已由 P0 Spike 冻结；
+- Mod Manifest/ID/版本/兼容范围、目录布局、依赖图、内容哈希、包来源/资源限制、显式 Patch、冲突
+  策略和 ModLock 已由 P0 Spike 冻结；第一阶段明确不承诺 package signature；
+- Event Definition/Instance、Option、Parameter Definition/Set、Gameplay Action、Trigger/Predicate/
+  Effect 白名单、可信 rule initiator/provenance、执行顺序和预算边界已冻结；Fixed 的底层数值编码
+  仍由第 6.4 节门禁决定；
 - 第一阶段明确排除 Extension Mod；WASM Host API、Capability、配额与签名拆到独立后续 RFC；
 - Content 与 Core 之间的 Draft/SpawnSpec/Definition 输入类型归属、运行时 Draft 是否复用 Content
   编译器冻结；
