@@ -191,6 +191,9 @@ Backend、Runtime 与 TUI 装配，以及进程退出顺序。
 - 依赖默认使用实现时最新且相互兼容的稳定版本；安全或兼容问题必须更新 lockfile 并验证。
 - Armillae 依赖使用 registry 版本，或公开 Git URL 与明确 tag/revision；项目构建不得依赖
   未提交的外部状态。
+- Agent Loop Spike 固定使用公开 `https://github.com/mmstudio-games/armillae` revision
+  `c9896fc4eb3a4f37918c0cabcefc84f8dcd69137` 的 `armillae-core`、启用 `mock` feature 的
+  `armillae-llm` 与 `armillae-tools`（package version `0.1.0-alpha.1`）；不得使用本地路径。
 - Toasty/SurrealDB Store 候选同样只能使用 registry release，或公开 Git URL 与明确 tag/revision；
   未进入公开来源的本地提交不构成 Loreloom 可采用的依赖版本。
 - `bevy_ecs` 版本必须与选定 `armillae-simulate-bevy` 发布线精确兼容。
@@ -871,9 +874,13 @@ lock 和当前 Observation 决定是否投影相应 Event/Action。
 - Command Tool 严格串行；
 - 每个 Narrator/NPC Turn 有 ToolCall、Model Call、Token、耗时和输出预算，完整 PlayerInput 编排
   另有总预算与最大轮数；
-- ToolResult 必须关联原 ToolCall ID；
-- 重复提交 ActionId 的幂等语义为 **OPEN**，持久化前必须冻结；
-- 多 Command Tool 的原子性为 **OPEN**。
+- ToolResult 必须关联原 ToolCall ID，并在同一 assistant message 之后按原 ToolCall 顺序逐条写入
+  canonical history；未知、无权限、参数错误与执行失败也必须生成关联原 ID 的 error result；
+- ActionId 重复提交遵循第 11.4 节：相同 digest 返回已保存 outcome，不产生第二次世界修改；不同
+  digest 返回 identity conflict；
+- 一个模型响应中的多个 Command ToolCall **不构成跨调用原子事务**。每个成功 Command 是独立
+  durable unit；后续 Tool 失败或取消不回滚先前已提交结果。需要原子修改多个领域对象时，必须由
+  一个领域 Command Tool/World System 在单一 durable unit 内表达，不能依赖 Agent Loop 补偿。
 
 ## 10. Agent Runtime
 
@@ -931,7 +938,7 @@ pub struct NpcTurnResult {
     pub status: NpcTurnStatus,
     pub utterance: Option<BoundedText>,
     pub intent: Option<BoundedText>,
-    pub action_description: Option<BoundedText>,
+    pub claimed_action_description: Option<BoundedText>,
     pub tool_results: Vec<ToolResultRef>,
     pub world_events: Vec<WorldEventId>,
 }
@@ -940,10 +947,12 @@ pub enum NarratorSynthesis {
     Final {
         based_on_revision: Revision,
         narration: BoundedText,
+        supporting_events: Vec<WorldEventId>,
     },
     Continue {
         based_on_revision: Revision,
         narration: Option<BoundedText>,
+        supporting_events: Vec<WorldEventId>,
         next_plan: NarratorPlan,
     },
 }
@@ -974,6 +983,9 @@ pub enum NarratorSynthesis {
   ToolContext 和 WorldGateway；
 - NpcTurnResult 的发言、意图和动作描述是 NPC 输出，不是 World Fact；只有成功 ToolCall /
   WorldCommand 对应的 ToolResult/WorldEvent 能证明世界动作已经发生；
+- Synthesis 输入必须把 NPC utterance/intent/claimed action 明确标为 claim，并把 committed
+  WorldEvent 独立投影；Final/Continue 的 `supporting_events` 只能引用 current committed Revision
+  可见的事件。未知、未提交或不可见事件引用使 Synthesis 失败；
 - 当前 Plan 的请求全部完成、取消或失败后，Runtime 才把有序 NpcTurnResult 和届时已提交的
   WorldEvent 投影给 NarratorSynthesis；NPC 不得反向直接调度 Narrator；
 - 每个已接受的 NpcTurnRequest 都必须产生同 request ID 的 NpcTurnResult；未开始即被取消、预算
@@ -984,8 +996,25 @@ pub enum NarratorSynthesis {
   约束；
 - NpcAgent 完成后即丢弃；角色长期状态只保存在 ECS、Transcript、WorldEvent 和 AgentBinding。
 
-Narrator Scene Directive、NarratorPlan/NpcTurnRequest/NpcTurnResult/NarratorSynthesis 的精确
-Schema，以及预算字段、配置层级、默认值与最大编排轮数仍为 **OPEN**。
+P0 Agent Loop Spike 冻结以下第一阶段 wire 语义，但不冻结 Rust 内存布局：
+
+- `NarratorPlan` 只含 plan provenance Revision 与有序 `npc_turns`；Narrator 需要改变世界时必须
+  使用 Command Tool，不存在绕过 Tool 的特权 Scene Directive；
+- `NpcTurnRequest` 必含唯一 request ID、Actor ID、Scene ID、plan provenance Revision 与有界
+  assignment；不含 priority、Provider、Component、预算扩张或递归 Agent callback；
+- `NpcTurnResult` 必含同 request ID/Actor、可选 observed Revision、final committed Revision、
+  `completed | stale | rejected | cancelled | budget_exhausted | failed` 状态、可选 utterance/intent/
+  claimed action、按序 ToolResult ref 和 committed WorldEvent ID；未开始的结果没有 observed
+  Revision；
+- `NarratorSynthesis` 是上面代码中的 Final/Continue tagged union；Continue 的 next plan 必须基于
+  current committed Revision 并重新经过轮次预算；
+- 默认 text 上限为 assignment/intent 4 KiB、utterance 16 KiB、claimed action 8 KiB、单次
+  narration 64 KiB；UTF-8 byte 超限在进入下一阶段前结构化拒绝，配置只能收紧；
+- 模型输出 Schema 拒绝缺失必需字段、重复 request ID、空 Stable ID 和越界集合；未知字段策略在
+  canonical model protocol 第一阶段为拒绝，避免模型伪造尚未定义的控制字段。
+
+自由文本的语义真实性不能由字符串验证器完全证明；`supporting_events` 提供状态变化叙述的可验证
+provenance，而任何 narration/NPC claim 本身仍不成为 ECS 或存档世界事实。
 
 ### 10.2 Mod/Content Package、SpawnSpec 与运行时生成
 
@@ -1191,10 +1220,50 @@ PlayerInput
 重叠运行 Model Call/Tool Loop；前一个 Turn 达到 Completed/Cancelled/Failed 并释放槽位后，下一个
 才能开始。NPC 不得反向调度 Narrator。
 
-Runtime 配置必须同时形成完整 PlayerInput 编排和单个 Agent Turn 两级资源限制，至少覆盖 Model
-Call、ToolCall、Token、输出大小、墙钟时间和最大编排轮数。配置来源可以分为 Runtime 全局、
-World/Save 与 Agent Profile；有效限制取适用上限中最严格者，模型与 Mod 只能请求更少资源，不能
-扩大上限。具体字段、覆盖规则、默认值和最大轮数仍为 **OPEN**。
+Runtime 配置必须同时形成单个 Agent Turn 与完整 PlayerInput 编排两级资源限制。第一阶段字段与
+默认值如下；这些是可配置默认值，不是 NPC 内容数量规则：
+
+| Agent Turn 字段 | 默认值 |
+|---|---:|
+| `max_model_calls` | 8 |
+| `max_tool_calls` | 16 |
+| `max_input_tokens` | 131,072 |
+| `max_output_tokens` | 16,384 |
+| `max_total_tokens` | 147,456 |
+| `max_model_output_bytes` | 262,144 |
+| `max_elapsed_ms` | 180,000 |
+| `require_reported_tokens` | false |
+
+| PlayerInput 编排字段 | 默认值 |
+|---|---:|
+| `max_started_agent_turns` | 24 |
+| `max_orchestration_rounds` | 4 |
+| `max_model_calls` | 64 |
+| `max_tool_calls` | 128 |
+| `max_input_tokens` | 1,048,576 |
+| `max_output_tokens` | 131,072 |
+| `max_total_tokens` | 1,179,648 |
+| `max_model_output_bytes` | 2,097,152 |
+| `max_elapsed_ms` | 900,000 |
+| `require_reported_tokens` | false |
+
+`max_started_agent_turns` 统计 planning、每个实际启动的 NPC Turn 与 synthesis；未启动即 stale、取消
+或预算拒绝的 Request 不消耗 started turn，但仍产生结果。NpcTurnRequest 数量不另设固定常量，实际
+可执行量自然受 plan byte limit、started turn、Model/Tool/Token/time 与轮次预算共同约束。
+
+配置来源为 Runtime 全局、World/Save 与 Agent Profile。每轮开始时生成不可变 effective budget：
+每个数值字段取所有适用层中最小值，`require_reported_tokens` 使用逻辑 OR；缺失层不扩大已存在上限。
+模型与 Mod 只能请求更小限制。下一轮配置变更不得追溯扩大已开始 PlayerInput 的快照。
+
+Provider usage 缺失必须计为 `unknown`，不能加成 0；`require_reported_tokens = false` 时继续依靠
+Model/Tool Call、输出 byte 与 monotonic deadline 硬限制，设为 true 时缺失 usage 立即以
+`budget_exhausted/missing_token_usage` 停止。已报告 usage 在每次 response 后累计，超限时不得执行
+该 response 中尚未开始的 Tool；请求的 `max_output_tokens` 还必须收紧到剩余预算。
+
+取消使用可唤醒的 Runtime cancellation token 与在途 Model future 竞速；取消获胜时丢弃 future 和
+暂存 streaming item，忽略迟到结果。每个 Model Call 前、每个 ToolCall 前和 NpcTurnRequest 出队时
+再次检查取消。已进入 Store commit critical section 的 Command 按第 11.4 节解析，不能被普通取消
+打断；已提交 Tool 不回滚。
 
 Narrator 决定 NpcTurnRequest 的数量与语义顺序，Runtime 不设置固定 NPC 数量、叙事优先级或公平性
 算法。NarratorSynthesis 若返回下一轮 Plan，必须重新经过总预算与当前 Revision 校验。
@@ -1457,10 +1526,11 @@ UiSnapshot 是拥有所有权且不可变的 View Model。TUI 不能通过 Widge
 3. **TUI Spike（已通过）**：以 registry `ratatui 0.30.2`、`crossterm 0.29.0` 为固定输入，已验证
    双栏、多行 Unicode 输入、streaming 更新、resize、窄屏降级和终端恢复；证据见
    [Spike 0003](../spikes/0003-tui.md)；
-4. **Agent Loop Spike**：用 Armillae Mock Bridge 验证多 ToolCall 顺序、ToolResult correlation、
+4. **Agent Loop Spike（已通过）**：固定使用与 World Spike 相同的 Armillae public Git revision，并用其
+   `armillae-llm` Mock Bridge 与 `armillae-tools` ToolExecutor contract 验证多 ToolCall 顺序、ToolResult correlation、
    PlayerInput -> NarratorPlan -> 有序 NpcTurnRequest/NpcTurnResult -> NarratorSynthesis、单一执行槽
    无重叠、请求开始时重新投影、只叙述已提交事实、配置化整轮/单 Turn budget、cancel 和 stale
-   Revision；
+   Revision；证据入口为 [Spike 0004](../spikes/0004-agent-loop.md)；
 5. **Content/NpcFactory Spike**：验证预设 Definition 与运行时 Draft 汇入同一 CharacterSpawnSpec、
    双阶段引用解析、全包失败回滚、GeneratedOrigin 保存和加载不重新调用模型；
 6. **Mod/Rule Spike**：验证内置/外部包共用加载管线、依赖/Patch/哈希锁定、类型化 Parameter、
@@ -1580,11 +1650,8 @@ RFC 0001 已于 2026-08-30 被项目方接受。以下事项继续阻塞对应�
 - Command/Event 的重建权威关系冻结；
 - Store driver 的 AGPL 兼容分发方式在发布前确认；后端、公开依赖 revision 与
   commit/failure/backup 协议已由 P0 Spike 冻结；
-- 多修改 ToolCall 原子性冻结；
-- 第一阶段 PlayerInput 的“说话/行动”解释模式、Narrator Scene Directive、NarratorNpcDecision、
-  Materialization/Lifetime/Controller 与 promotion/cleanup 冻结；
-- NarratorPlan、NpcTurnRequest、NpcTurnResult、NarratorSynthesis 的精确 Schema，以及整轮/单
-  Turn 预算字段、配置层级、覆盖规则、默认值和最大编排轮数冻结；
+- 第一阶段 PlayerInput 的“说话/行动”解释模式、NarratorNpcDecision、Materialization/Lifetime/
+  Controller 与 promotion/cleanup 冻结；Narrator 已明确不存在绕过 Tool 的特权 Scene Directive；
 - Known Fact/Belief/Transcript 的最小 Schema 冻结；
 - Content Pack/Definition ID、Character/Scene Definition、CharacterSpawnSpec、NpcFactory、
   Content/Generated Origin 和导入事务冻结；
