@@ -281,6 +281,18 @@ fn cancellation_wakes_and_drops_an_in_flight_provider_call() {
 }
 
 #[test]
+fn reset_rearms_the_same_shared_cancellation_identity() {
+    let token = CancellationToken::new();
+    let application_handle = token.clone();
+    application_handle.cancel();
+    assert!(token.is_cancelled());
+    token.reset();
+    assert!(!application_handle.is_cancelled());
+    application_handle.cancel();
+    assert!(token.is_cancelled());
+}
+
+#[test]
 fn canonical_agent_wire_rejects_unknown_fields_and_invalid_plans() {
     let unknown = json!({
         "based_on_revision": 1,

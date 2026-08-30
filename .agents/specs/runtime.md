@@ -172,6 +172,10 @@ View Model 和 Runtime Client，不依赖 Content/World/Agent/Store 实现。
 `loreloom` 二进制拥有配置读取、Secret 解析、Mod Package 来源、Provider Adapter、Store
 Backend、Runtime 与 TUI 装配，以及进程退出顺序。
 
+在外部 Provider/Mod 配置产品化前，二进制提供无 Secret 的本地 demo smoke path：默认打开 TUI，
+`--save PATH` 选择 SurrealKV 存档，`--headless INPUT` 对同一 Runtime 执行一个完整 Turn 供 CI/终端
+兼容诊断。该开发 demo 不替代第 10.4 节的 Mod package pipeline，也不能作为外部内容格式。
+
 ## 4. Rust、Cargo 与依赖策略
 
 - 根目录使用 Cargo virtual workspace，八个成员位于 `crates/`；七个 library crate 与一个
@@ -1499,6 +1503,9 @@ Model/Tool Call、输出 byte 与 monotonic deadline 硬限制，设为 true 时
 再次检查取消。已进入 Store commit critical section 的 Command 按第 11.4 节解析，不能被普通取消
 打断；已提交 Tool 不回滚。
 
+应用装配取得的 cancellation token 必须跨 PlayerInput 保持同一共享身份；新 Turn 只在没有旧 Turn
+运行时 reset 该状态，不能替换 token 导致 TUI 持有的 clone 失效。
+
 Narrator 决定 NpcTurnRequest 的数量与语义顺序，Runtime 不设置固定 NPC 数量、叙事优先级或公平性
 算法。NarratorSynthesis 若返回下一轮 Plan，必须重新经过总预算与当前 Revision 校验。
 
@@ -1831,6 +1838,54 @@ Event Option 在 current Revision 求值 `visible_if`，不可见项不进入列
 - 终端 session 初始化顺序为 raw mode、alternate screen、隐藏 cursor、bracketed paste、mouse
   capture；正常退出、部分初始化失败与 panic unwind 均按逆序尝试恢复所有已启用状态；
 - 渲染测试不得访问网络或真实 Provider。
+
+### 12.4 TUI 产品状态与 Runtime Client
+
+TUI 的公共产品边界冻结为同步、非阻塞 command/event adapter；这不是第二个 Runtime，也不允许在
+render callback 中等待模型：
+
+```rust
+pub enum UiIntent {
+    Submit(String),
+    Cancel,
+    Quit,
+}
+
+pub enum RuntimeUiEvent {
+    Snapshot(Box<UiSnapshot>),
+    StreamStarted,
+    StreamChunk(String),
+    StreamFinished(StreamState),
+}
+
+pub trait RuntimeClient {
+    fn submit(&mut self, input: String) -> Result<(), UiClientError>;
+    fn cancel(&mut self) -> Result<(), UiClientError>;
+    fn try_recv(&mut self) -> Result<Option<RuntimeUiEvent>, UiClientError>;
+    fn shutdown(&mut self) -> Result<(), UiClientError>;
+}
+```
+
+`Box` 只避免大 View Model 扩张整个 event enum，仍表示事件独占拥有 Snapshot；它没有共享可变状态或
+持久化语义。
+
+`submit` 只把输入加入 Runtime command queue，不能同步执行 Agent Turn；`try_recv` 不得阻塞。具体
+Runtime adapter 在应用装配层拥有 Tokio task/thread、`GameRuntime` 和可唤醒 cancellation token，
+TUI crate 不依赖 Runtime/World/Store/Provider。`UiClientError` 只暴露稳定安全 code，不携带 Prompt、
+输入、模型正文或 Tool 参数。第一阶段 adapter 只接受一个排队或运行中的 PlayerInput；重复提交返回
+`runtime_busy`。`shutdown` 必须幂等地停止接受新输入、触发同一 cancellation token 并唤醒 worker
+退出；之后提交返回 `runtime_shutdown`。worker/channel 故障只暴露 `runtime_start_failed`、
+`runtime_snapshot_failed` 或 `runtime_disconnected`。这里的 shutdown 只定义 UI command/event adapter
+生命周期，不解除第 11 节对 Store 确定性关闭、物理备份、恢复和存档切换的 driver 门禁。
+
+`TuiApp` 拥有 `UiSnapshot`、grapheme editor、输入历史、窄屏页面、transcript scroll 与 ephemeral
+stream。Snapshot 更新不得覆盖这些本地交互字段；resize 只重新 render。Editor 最大 UTF-8 bytes
+固定为 `LongText` 的 65,536 bytes，单次插入 all-or-reject。`TuiConfig.state_width_percent` 默认 30，
+只允许 25–35；event poll 默认 50 ms。
+
+产品 `run` loop 每轮先无阻塞 drain Runtime event、再 render，并使用有限 poll 等待 Crossterm event；
+因此等待 Provider 时仍可处理 cancel、quit、resize 和 stream。`RuntimeUiEvent::Snapshot` 是唯一能
+改变 committed transcript/世界状态的 UI 输入；stream event 只改变 ephemeral row。
 
 ## 13. 配置、Secret 与日志
 

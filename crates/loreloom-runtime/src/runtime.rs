@@ -99,16 +99,29 @@ impl GameRuntime {
             .await
     }
 
-    pub async fn handle_player_input(
+    pub fn handle_player_input(
         &mut self,
         input: impl Into<String>,
-    ) -> Result<PlayerTurnOutcome, RuntimeError> {
+    ) -> impl Future<Output = Result<PlayerTurnOutcome, RuntimeError>> + '_ {
         let input = input.into();
-        if input.trim().is_empty() {
-            return Err(RuntimeError::InvalidInput);
+        let input = if input.trim().is_empty() {
+            Err(RuntimeError::InvalidInput)
+        } else {
+            LongText::new(input).map_err(RuntimeError::from)
+        };
+        if input.is_ok() {
+            self.cancellation.reset();
         }
-        let input = LongText::new(input)?;
-        self.cancellation = CancellationToken::new();
+        async move {
+            let input = input?;
+            self.handle_valid_player_input(input).await
+        }
+    }
+
+    async fn handle_valid_player_input(
+        &mut self,
+        input: LongText,
+    ) -> Result<PlayerTurnOutcome, RuntimeError> {
         let started = Instant::now();
         let mut orchestration = OrchestrationState::default();
         let mut tool_activity = Vec::new();

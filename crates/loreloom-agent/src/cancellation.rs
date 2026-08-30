@@ -36,6 +36,16 @@ impl CancellationToken {
         }
     }
 
+    /// Re-arm the same shared token after the previous turn has fully stopped.
+    pub fn reset(&self) {
+        self.0.cancelled.store(false, Ordering::SeqCst);
+        self.0
+            .waiters
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
+    }
+
     #[must_use]
     pub fn is_cancelled(&self) -> bool {
         self.0.cancelled.load(Ordering::SeqCst)
