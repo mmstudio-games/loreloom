@@ -20,21 +20,23 @@ use loreloom_agent::{
     AgentDefinition, AgentToolContext, NarratorPlan, NpcModelOutput, NpcTurnRequest, NpcTurnStatus,
 };
 use loreloom_content::{
-    AgentProfileDefinition, AttributeDefinition, CONTENT_SCHEMA_V1, ContainerDefinition,
-    ContentDocument, ContentPackContext, Definition, DefinitionRegistry, EffectDefinition,
-    EventDefinition, EventNodeDefinition, EventOptionDefinition, GameplayActionDefinition,
-    ItemDefinition, ParameterDefinition, ParameterPersistence, ParameterType, ParameterVisibility,
-    PlaceDefinition, SceneDefinition, parse_content_hash,
+    AgentProfileDefinition, AttributeDefinition, CONTENT_SCHEMA_V1, ConditionDefinition,
+    ContainerDefinition, ContentDocument, ContentPackContext, Definition, DefinitionRegistry,
+    DurationPolicy, EffectDefinition, EventDefinition, EventNodeDefinition, EventOptionDefinition,
+    GameplayActionDefinition, ItemDefinition, ParameterDefinition, ParameterPersistence,
+    ParameterType, ParameterVisibility, PlaceDefinition, SceneDefinition, StackPolicy,
+    SymptomDefinition, TagDefinition, parse_content_hash,
 };
 use loreloom_core::{
     ActionId, ActionState, ActorId, AgentBinding, AttributeAdjustment, AttributeOperation,
     BaseAttributes, CharacterController, CharacterLifetime, CharacterProfile, CharacterRecord,
-    ContentDefinitionId, ContentOrigin, DisplayName, DomainRecord, EntityOrigin,
-    EventInstanceRecord, EventStatus, Fixed, LifeState, LockedMod, LongText, ModId, ModLock,
-    ModSourceKind, ObjectId, ParameterSetRecord, ParameterValue, PlaceRecord, Posture, Revision,
-    SAVE_FORMAT_V1, SaveId, SaveManifest, SceneRecord, SessionId, ShortText, StackState,
-    SystemIdGenerator, TranscriptSpeaker, WorldCommand, WorldCommandKind, WorldId,
-    WorldStateRecord, WorldTime,
+    ConditionRecord, ConditionSource, ContentDefinitionId, ContentOrigin,
+    DIAGNOSED_CONDITION_PREDICATE_ID, DisplayName, DomainRecord, EntityOrigin, EventInstanceRecord,
+    EventStatus, FactSource, FactSubject, FactValue, Fixed, IntensityPolicy, KnowledgeStatus,
+    KnownFactRecord, LifeState, LockedMod, LongText, ModId, ModLock, ModSourceKind, ObjectId,
+    ParameterSetRecord, ParameterValue, PlaceRecord, Posture, Revision, SAVE_FORMAT_V1, SaveId,
+    SaveManifest, SceneRecord, SessionId, ShortText, StackState, SystemIdGenerator,
+    TranscriptSpeaker, WorldCommand, WorldCommandKind, WorldId, WorldStateRecord, WorldTime,
 };
 use loreloom_runtime::{
     GameRuntime, RuntimeConfig, RuntimeError, RuntimeToolExecutor, WorldService,
@@ -81,6 +83,7 @@ struct Fixture {
     npc: ActorId,
     scene: ObjectId,
     profile_id: ContentDefinitionId,
+    condition_id: ContentDefinitionId,
 }
 
 fn fixture() -> Fixture {
@@ -96,131 +99,169 @@ fn fixture() -> Fixture {
     let event_node = definition_id("event_node", "rain_entry");
     let event_option = definition_id("event_option", "listen");
     let inventory_definition = definition_id("item", "inventory");
+    let condition_id = definition_id("condition", "shivering");
     let place_definition = definition_id("place", "hall");
     let scene_definition = definition_id("scene", "inn");
-    let registry = DefinitionRegistry::build(
-        ContentPackContext {
-            mod_id,
-            mod_version: Version::new(1, 0, 0),
-            pack_id: pack_id.clone(),
-            content_version: 1,
-            content_hash: parse_content_hash("b".repeat(64)).expect("content hash"),
-        },
-        [ContentDocument {
-            schema_version: CONTENT_SCHEMA_V1,
-            definitions: vec![
-                Definition::AgentProfile(AgentProfileDefinition {
-                    id: profile_id.clone(),
-                    display_name: name("Keeper"),
-                    system_style: text("Speak tersely and guard the inn."),
-                    model_alias: text("mock-npc"),
-                    tool_capabilities: BTreeSet::from([text("advance_time")]),
-                    autonomy: loreloom_core::AutonomyMode::Directed,
-                }),
-                Definition::Attribute(AttributeDefinition {
-                    id: attribute_id.clone(),
-                    display_name: name("Resolve"),
-                    minimum: Fixed::ZERO,
-                    maximum: Fixed::from_integer(20).expect("attribute maximum"),
-                    allowed_operations: BTreeSet::from([AttributeOperation::Flat]),
-                }),
-                Definition::Parameter(ParameterDefinition {
-                    id: public_parameter.clone(),
-                    display_name: name("Rain count"),
-                    value_type: ParameterType::Counter {
-                        minimum: 0,
-                        maximum: 100,
-                    },
-                    default: ParameterValue::Counter(0),
-                    visibility: ParameterVisibility::Public,
-                    persistence: ParameterPersistence::Save,
-                }),
-                Definition::Parameter(ParameterDefinition {
-                    id: session_parameter.clone(),
-                    display_name: name("Hint seen"),
-                    value_type: ParameterType::Bool,
-                    default: ParameterValue::Bool(false),
-                    visibility: ParameterVisibility::Public,
-                    persistence: ParameterPersistence::Session,
-                }),
-                Definition::GameplayAction(GameplayActionDefinition {
-                    id: gameplay_action,
-                    display_name: name("Mark the rain"),
-                    capability: text("gameplay.weather"),
-                    parameters: Vec::new(),
-                    predicates: Vec::new(),
-                    effects: vec![
-                        EffectDefinition::SetParameter {
-                            parameter_id: public_parameter.clone(),
-                            value: ParameterValue::Counter(4),
-                        },
-                        EffectDefinition::SetParameter {
-                            parameter_id: session_parameter,
-                            value: ParameterValue::Bool(true),
-                        },
-                    ],
-                }),
-                Definition::Parameter(ParameterDefinition {
-                    id: hidden_parameter.clone(),
-                    display_name: name("Secret count"),
-                    value_type: ParameterType::Counter {
-                        minimum: 0,
-                        maximum: 100,
-                    },
-                    default: ParameterValue::Counter(0),
-                    visibility: ParameterVisibility::Hidden,
-                    persistence: ParameterPersistence::Save,
-                }),
-                Definition::Event(EventDefinition {
-                    id: event_definition.clone(),
-                    display_name: name("Rain at the Inn"),
-                    entry_node: event_node.clone(),
-                    nodes: vec![EventNodeDefinition {
-                        id: event_node.clone(),
-                        text: text("The rain asks for attention."),
-                        options: vec![EventOptionDefinition {
-                            id: event_option,
-                            display_name: name("Listen"),
-                            visible_if: Vec::new(),
-                            enabled_if: Vec::new(),
-                            effects: Vec::new(),
-                            next_node: None,
-                        }],
-                    }],
-                }),
-                Definition::Item(ItemDefinition {
-                    id: inventory_definition.clone(),
-                    display_name: name("Inventory"),
-                    description: text("A private inventory root."),
-                    tags: BTreeSet::new(),
-                    stack_limit: NonZeroU32::MIN,
-                    unit_weight_grams: Fixed::ZERO,
-                    durability: None,
-                    container: Some(ContainerDefinition {
-                        max_weight_grams: Fixed::from_integer(1_000).expect("weight"),
-                        max_children: 16,
+    let diagnosis_predicate = ContentDefinitionId::parse(DIAGNOSED_CONDITION_PREDICATE_ID)
+        .expect("diagnosis predicate ID");
+    let core_mod_id = ModId::parse("games.loreloom.core").expect("core mod id");
+    let registry = DefinitionRegistry::build_packages([
+        (
+            ContentPackContext {
+                mod_id: core_mod_id,
+                mod_version: Version::new(1, 0, 0),
+                pack_id: "games.loreloom.core:pack/core"
+                    .parse()
+                    .expect("core pack id"),
+                content_version: 1,
+                content_hash: parse_content_hash("c".repeat(64)).expect("core content hash"),
+            },
+            vec![ContentDocument {
+                schema_version: CONTENT_SCHEMA_V1,
+                definitions: vec![Definition::Tag(TagDefinition {
+                    id: diagnosis_predicate,
+                    display_name: name("Diagnosed condition"),
+                })],
+            }],
+        ),
+        (
+            ContentPackContext {
+                mod_id,
+                mod_version: Version::new(1, 0, 0),
+                pack_id: pack_id.clone(),
+                content_version: 1,
+                content_hash: parse_content_hash("b".repeat(64)).expect("content hash"),
+            },
+            vec![ContentDocument {
+                schema_version: CONTENT_SCHEMA_V1,
+                definitions: vec![
+                    Definition::AgentProfile(AgentProfileDefinition {
+                        id: profile_id.clone(),
+                        display_name: name("Keeper"),
+                        system_style: text("Speak tersely and guard the inn."),
+                        model_alias: text("mock-npc"),
+                        tool_capabilities: BTreeSet::from([text("advance_time")]),
+                        autonomy: loreloom_core::AutonomyMode::Directed,
                     }),
-                    equipment_slots: BTreeSet::new(),
-                    modifiers: Vec::new(),
-                }),
-                Definition::Place(PlaceDefinition {
-                    id: place_definition.clone(),
-                    display_name: name("Hall"),
-                    description: text("A quiet timber hall."),
-                    tags: BTreeSet::new(),
-                    edges: BTreeSet::new(),
-                }),
-                Definition::Scene(SceneDefinition {
-                    id: scene_definition.clone(),
-                    display_name: name("Old Inn"),
-                    framing: text("Rain taps on the shutters."),
-                    entry_place: place_definition.clone(),
-                    places: BTreeSet::from([place_definition.clone()]),
-                    characters: Vec::new(),
-                }),
-            ],
-        }],
-    )
+                    Definition::Attribute(AttributeDefinition {
+                        id: attribute_id.clone(),
+                        display_name: name("Resolve"),
+                        minimum: Fixed::ZERO,
+                        maximum: Fixed::from_integer(20).expect("attribute maximum"),
+                        allowed_operations: BTreeSet::from([AttributeOperation::Flat]),
+                    }),
+                    Definition::Parameter(ParameterDefinition {
+                        id: public_parameter.clone(),
+                        display_name: name("Rain count"),
+                        value_type: ParameterType::Counter {
+                            minimum: 0,
+                            maximum: 100,
+                        },
+                        default: ParameterValue::Counter(0),
+                        visibility: ParameterVisibility::Public,
+                        persistence: ParameterPersistence::Save,
+                    }),
+                    Definition::Parameter(ParameterDefinition {
+                        id: session_parameter.clone(),
+                        display_name: name("Hint seen"),
+                        value_type: ParameterType::Bool,
+                        default: ParameterValue::Bool(false),
+                        visibility: ParameterVisibility::Public,
+                        persistence: ParameterPersistence::Session,
+                    }),
+                    Definition::GameplayAction(GameplayActionDefinition {
+                        id: gameplay_action,
+                        display_name: name("Mark the rain"),
+                        capability: text("gameplay.weather"),
+                        parameters: Vec::new(),
+                        predicates: Vec::new(),
+                        effects: vec![
+                            EffectDefinition::SetParameter {
+                                parameter_id: public_parameter.clone(),
+                                value: ParameterValue::Counter(4),
+                            },
+                            EffectDefinition::SetParameter {
+                                parameter_id: session_parameter,
+                                value: ParameterValue::Bool(true),
+                            },
+                        ],
+                    }),
+                    Definition::Parameter(ParameterDefinition {
+                        id: hidden_parameter.clone(),
+                        display_name: name("Secret count"),
+                        value_type: ParameterType::Counter {
+                            minimum: 0,
+                            maximum: 100,
+                        },
+                        default: ParameterValue::Counter(0),
+                        visibility: ParameterVisibility::Hidden,
+                        persistence: ParameterPersistence::Save,
+                    }),
+                    Definition::Event(EventDefinition {
+                        id: event_definition.clone(),
+                        display_name: name("Rain at the Inn"),
+                        entry_node: event_node.clone(),
+                        nodes: vec![EventNodeDefinition {
+                            id: event_node.clone(),
+                            text: text("The rain asks for attention."),
+                            options: vec![EventOptionDefinition {
+                                id: event_option,
+                                display_name: name("Listen"),
+                                visible_if: Vec::new(),
+                                enabled_if: Vec::new(),
+                                effects: Vec::new(),
+                                next_node: None,
+                            }],
+                        }],
+                    }),
+                    Definition::Item(ItemDefinition {
+                        id: inventory_definition.clone(),
+                        display_name: name("Inventory"),
+                        description: text("A private inventory root."),
+                        tags: BTreeSet::new(),
+                        stack_limit: NonZeroU32::MIN,
+                        unit_weight_grams: Fixed::ZERO,
+                        durability: None,
+                        container: Some(ContainerDefinition {
+                            max_weight_grams: Fixed::from_integer(1_000).expect("weight"),
+                            max_children: 16,
+                        }),
+                        equipment_slots: BTreeSet::new(),
+                        modifiers: Vec::new(),
+                    }),
+                    Definition::Condition(ConditionDefinition {
+                        id: condition_id.clone(),
+                        display_name: name("Winter fever"),
+                        tags: BTreeSet::new(),
+                        stack_policy: StackPolicy::Unique,
+                        intensity_policy: IntensityPolicy::Keep,
+                        duration: DurationPolicy::Permanent,
+                        symptoms: vec![SymptomDefinition {
+                            text: text("Hands tremble."),
+                            minimum_intensity: Fixed::ONE,
+                        }],
+                        modifiers: Vec::new(),
+                        periodic: None,
+                    }),
+                    Definition::Place(PlaceDefinition {
+                        id: place_definition.clone(),
+                        display_name: name("Hall"),
+                        description: text("A quiet timber hall."),
+                        tags: BTreeSet::new(),
+                        edges: BTreeSet::new(),
+                    }),
+                    Definition::Scene(SceneDefinition {
+                        id: scene_definition.clone(),
+                        display_name: name("Old Inn"),
+                        framing: text("Rain taps on the shutters."),
+                        entry_place: place_definition.clone(),
+                        places: BTreeSet::from([place_definition.clone()]),
+                        characters: Vec::new(),
+                    }),
+                ],
+            }],
+        ),
+    ])
     .expect("registry");
 
     let player = ActorId::from(object_id("2b3c"));
@@ -315,6 +356,22 @@ fn fixture() -> Fixture {
             status: EventStatus::Active,
             committed_options: Vec::new(),
         }),
+        DomainRecord::Condition(ConditionRecord {
+            id: object_id("2b47"),
+            target_id: player,
+            condition_id: condition_id.clone(),
+            source: ConditionSource::System {
+                source_id: definition_id("system", "weather"),
+            },
+            stacks: NonZeroU32::MIN,
+            intensity: Fixed::ONE,
+            applied_at: WorldTime::ZERO,
+            expires_at: None,
+            next_periodic_at: None,
+            origin: EntityOrigin::Content {
+                origin: origin(&condition_id),
+            },
+        }),
     ];
     let DomainRecord::Character(player_record) = &mut records[3] else {
         unreachable!("player fixture record")
@@ -350,6 +407,7 @@ fn fixture() -> Fixture {
         npc,
         scene,
         profile_id,
+        condition_id,
     }
 }
 
@@ -419,6 +477,73 @@ fn text_response(text: impl Into<String>) -> CompletionResponse {
         finish_reason: Some(FinishReason::Stop),
         usage: None,
         provider_metadata: JsonValue::Null,
+    }
+}
+
+#[tokio::test]
+async fn condition_name_projection_requires_a_confirmed_diagnosis_fact() {
+    for diagnosed in [false, true] {
+        let directory = TempDir::new().expect("temporary save parent");
+        let mut fixture = fixture();
+        if diagnosed {
+            fixture
+                .records
+                .push(DomainRecord::KnownFact(KnownFactRecord {
+                    id: object_id("2b48"),
+                    owner_id: fixture.player,
+                    subject: FactSubject::Object {
+                        object_id: fixture.player.object_id(),
+                    },
+                    predicate_id: ContentDefinitionId::parse(DIAGNOSED_CONDITION_PREDICATE_ID)
+                        .expect("diagnosis predicate ID"),
+                    value: FactValue::Tag(fixture.condition_id.clone()),
+                    status: KnowledgeStatus::Confirmed,
+                    confidence: Fixed::ONE,
+                    source: FactSource::Content {
+                        definition_id: fixture.condition_id.clone(),
+                    },
+                    first_known_at: WorldTime::ZERO,
+                    last_confirmed_at: WorldTime::ZERO,
+                }));
+        }
+        let candidate_mod_lock = fixture.manifest.mod_lock.clone();
+        let store = SaveStore::create(
+            directory.path().join("save"),
+            fixture.manifest,
+            fixture.records,
+        )
+        .await
+        .expect("create diagnosis save");
+        let service = WorldService::open(
+            store,
+            fixture.registry,
+            &candidate_mod_lock,
+            fixture.world_config,
+        )
+        .await
+        .expect("open diagnosis service");
+        let snapshot = service
+            .snapshot(
+                parse("ses_01890f6a-2b49-7d4e-8f90-123456789abc"),
+                loreloom_core::RuntimePhase::Idle,
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+            )
+            .await
+            .expect("diagnosis snapshot");
+        let condition = snapshot
+            .player
+            .conditions
+            .first()
+            .expect("condition projection");
+        assert_eq!(
+            condition.display_name.as_ref().map(DisplayName::as_str),
+            diagnosed.then_some("Winter fever")
+        );
+        assert_eq!(condition.symptoms, vec![text("Hands tremble.")]);
+        let encoded = serde_json::to_string(&snapshot.player).expect("encode player context");
+        assert_eq!(encoded.contains("Winter fever"), diagnosed);
     }
 }
 

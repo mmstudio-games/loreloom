@@ -8,8 +8,9 @@ use loreloom_content::{
 };
 use loreloom_core::{
     ActionId, ActiveEventView, ActorId, AttributeAdjustment, AttributeOperation, AttributeView,
-    CharacterContext, CharacterController, ConditionView, ContentDefinitionId, DomainRecord,
-    EventId, EventOptionView, InventoryView, LongText, ModLock, ObjectId, ParameterSetView,
+    CharacterContext, CharacterController, ConditionRecord, ConditionView, ContentDefinitionId,
+    DIAGNOSED_CONDITION_PREDICATE_ID, DomainRecord, EventId, EventOptionView, FactSubject,
+    FactValue, InventoryView, KnowledgeStatus, LongText, ModLock, ObjectId, ParameterSetView,
     ParameterValue, ParameterValueView, ResourceView, Revision, RuntimePhase, SAVE_FORMAT_V1,
     SaveId, SaveManifest, SceneContext, SceneObservation, SessionId, SkillView, SystemIdGenerator,
     ToolActivity, TranscriptWindow, UiNotice, UiSnapshot, VisibleActorView, WorldCommand,
@@ -682,7 +683,8 @@ fn character_context(
             };
             Ok(ConditionView {
                 condition: condition.clone(),
-                display_name: definition.display_name.clone(),
+                display_name: condition_is_diagnosed(records, registry, actor_id, condition)?
+                    .then(|| definition.display_name.clone()),
                 symptoms: definition
                     .symptoms
                     .iter()
@@ -726,6 +728,35 @@ fn character_context(
         action_state: character.action_state,
         posture: character.posture,
     })
+}
+
+fn condition_is_diagnosed(
+    records: &[DomainRecord],
+    registry: &DefinitionRegistry,
+    observer_id: ActorId,
+    condition: &ConditionRecord,
+) -> Result<bool, RuntimeError> {
+    let predicate_id = ContentDefinitionId::parse(DIAGNOSED_CONDITION_PREDICATE_ID)
+        .map_err(|_| RuntimeError::Unavailable)?;
+    let diagnosed = records.iter().any(|record| match record {
+        DomainRecord::KnownFact(fact) => {
+            fact.owner_id == observer_id
+                && fact.subject
+                    == FactSubject::Object {
+                        object_id: condition.target_id.object_id(),
+                    }
+                && fact.predicate_id == predicate_id
+                && fact.value == FactValue::Tag(condition.condition_id.clone())
+                && fact.status == KnowledgeStatus::Confirmed
+        }
+        _ => false,
+    });
+    if diagnosed {
+        let Definition::Tag(_) = definition(registry, &predicate_id)? else {
+            return Err(RuntimeError::Unavailable);
+        };
+    }
+    Ok(diagnosed)
 }
 
 fn scene_context(

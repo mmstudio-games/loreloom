@@ -4,17 +4,17 @@ use loreloom_content::{
     AgentProfileDefinition, AttributeDefinition, CONTENT_SCHEMA_V1, CharacterCompileRequest,
     CharacterDefinition, ContentDocument, ContentError, ContentPackContext, Definition,
     DefinitionRegistry, DraftCompileRequest, EffectDefinition, GameplayActionDefinition,
-    GenerationPolicy, InitialCharacterController, InitialCharacterLifetime, InitialItem,
-    InitialResource, ItemDefinition, NpcDraft, ParameterDefinition, ParameterPersistence,
-    ParameterType, ParameterVisibility, PlaceDefinition, PredicateDefinition, ResourceCost,
-    ResourceDefinition, ResourceMaximumPolicy, RuleDefinition, SceneCharacterDefinition,
-    SceneDefinition, SkillDefinition, SkillKind, SkillTarget, TriggerDefinition,
-    parse_content_hash,
+    GenerationPolicy, InitialCharacterController, InitialCharacterLifetime, InitialFact,
+    InitialItem, InitialResource, ItemDefinition, NpcDraft, ParameterDefinition,
+    ParameterPersistence, ParameterType, ParameterVisibility, PlaceDefinition, PredicateDefinition,
+    ResourceCost, ResourceDefinition, ResourceMaximumPolicy, RuleDefinition,
+    SceneCharacterDefinition, SceneDefinition, SkillDefinition, SkillKind, SkillTarget,
+    TagDefinition, TriggerDefinition, parse_content_hash,
 };
 use loreloom_core::{
     AttributeOperation, AutonomyMode, BaseAttributes, CharacterController, CharacterLifetime,
-    CharacterProfile, ContentDefinitionId, DisplayName, EventId, Fixed, GeneratedOrigin,
-    GenerationId, ModId, ObjectId, ParameterValue, ShortText, SpawnConstraints,
+    CharacterProfile, ContentDefinitionId, DisplayName, EventId, FactSubject, FactValue, Fixed,
+    GeneratedOrigin, GenerationId, ModId, ObjectId, ParameterValue, ShortText, SpawnConstraints,
 };
 use semver::Version;
 
@@ -48,6 +48,7 @@ fn fixture_document() -> ContentDocument {
     let item_id = id("item", "coin");
     let skill_id = id("skill", "focus");
     let agent_id = id("agent_profile", "resident");
+    let fact_predicate = id("tag", "witnessed_rain");
     let character_id = id("character", "mara");
     let place_id = id("place", "quay");
     let scene_id = id("scene", "harbor");
@@ -98,7 +99,12 @@ fn fixture_document() -> ContentDocument {
                     proficiency: 0,
                     enabled: true,
                 }],
-                knowledge: Vec::new(),
+                knowledge: vec![InitialFact {
+                    subject: FactSubject::World,
+                    predicate_id: fact_predicate.clone(),
+                    value: FactValue::Bool(true),
+                    confidence: Fixed::ONE,
+                }],
                 goals: Vec::new(),
                 spawn_constraints: SpawnConstraints {
                     minimum_attributes: Default::default(),
@@ -162,6 +168,10 @@ fn fixture_document() -> ContentDocument {
                 tool_capabilities: BTreeSet::new(),
                 autonomy: AutonomyMode::Directed,
             }),
+            Definition::Tag(TagDefinition {
+                id: fact_predicate,
+                display_name: name("Witnessed rain"),
+            }),
             Definition::Place(PlaceDefinition {
                 id: place_id,
                 display_name: name("Quay"),
@@ -198,6 +208,7 @@ fn content_v1_builds_deterministic_registry_and_compiles_spawn_spec() {
     assert!(spec.agent_binding.is_some());
     assert_eq!(spec.inventory.len(), 1);
     assert_eq!(spec.skills.len(), 1);
+    assert_eq!(spec.knowledge.len(), 1);
     assert_eq!(spec.placement.place_id, place_id);
 
     let ids = registry

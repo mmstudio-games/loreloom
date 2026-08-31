@@ -782,6 +782,7 @@ impl GameWorld {
                     .ok_or(WorldError::WrongObjectKind {
                         id: value.0.owner_id.object_id(),
                     })?;
+                require_definition(registry, &value.0.predicate_id, "tag")?;
             } else if let Some(value) = self.world.get::<GoalComponent>(*entity) {
                 self.character(value.0.owner_id)
                     .ok_or(WorldError::WrongObjectKind {
@@ -1866,7 +1867,7 @@ fn materialize_character_records(
     }
 
     for fact in spec.knowledge {
-        require_definition(registry, &fact.predicate_id, "predicate")?;
+        require_definition(registry, &fact.predicate_id, "tag")?;
         records.push(DomainRecord::KnownFact(KnownFactRecord {
             id: ObjectId::generate_with(ids)?,
             owner_id: character_id,

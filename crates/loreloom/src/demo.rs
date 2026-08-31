@@ -10,15 +10,16 @@ use loreloom_content::{
     AgentProfileDefinition, AttributeDefinition, CONTENT_SCHEMA_V1, CharacterDefinition,
     ContainerDefinition, ContentDocument, Definition, DefinitionRegistry,
     InitialCharacterController, InitialCharacterLifetime, InitialResource, ItemDefinition,
-    LORELOOM_ENGINE_VERSION, MOD_MANIFEST_SCHEMA_V1, ModCapability, ModManifestDraft,
-    PackageCompiler, PackagePayload, PackageSource, PlaceDefinition, ResourceDefinition,
-    ResourceMaximumPolicy, SceneCharacterDefinition, SceneDefinition, VirtualPackage,
+    LORELOOM_ENGINE_VERSION, MOD_MANIFEST_SCHEMA_V1, ModCapability, ModDependency,
+    ModManifestDraft, PackageCompiler, PackagePayload, PackageSource, PlaceDefinition,
+    ResourceDefinition, ResourceMaximumPolicy, SceneCharacterDefinition, SceneDefinition,
+    TagDefinition, VirtualPackage,
 };
 use loreloom_core::{
     ActorId, AttributeOperation, AutonomyMode, BaseAttributes, CharacterController,
-    CharacterProfile, ContentDefinitionId, DisplayName, DomainRecord, EntityOrigin, Fixed,
-    LongText, ModId, ModLock, ObjectId, SaveId, SessionId, ShortText, SpawnConstraints,
-    SystemIdGenerator, UiSnapshot,
+    CharacterProfile, ContentDefinitionId, DIAGNOSED_CONDITION_PREDICATE_ID, DisplayName,
+    DomainRecord, EntityOrigin, Fixed, LongText, ModId, ModLock, ObjectId, SaveId, SessionId,
+    ShortText, SpawnConstraints, SystemIdGenerator, UiSnapshot,
 };
 use loreloom_runtime::{GameRuntime, RuntimeConfig, WorldService};
 use loreloom_store::SaveStore;
@@ -150,6 +151,7 @@ fn demo_content(
     mod_paths: &[PathBuf],
     rule_limits: loreloom_world::RuleLimits,
 ) -> Result<DemoContent, AppError> {
+    let core_mod_id = ModId::parse("games.loreloom.core")?;
     let mod_id = ModId::parse("games.loreloom.demo")?;
     let pack_id = definition_id("pack", "demo")?;
     let agent_profile_id = definition_id("agent_profile", "mira")?;
@@ -294,7 +296,12 @@ fn demo_content(
             engine: VersionReq::parse(&format!("={LORELOOM_ENGINE_VERSION}"))
                 .map_err(|_| AppError::Arguments("demo engine requirement is invalid"))?,
             content_schema: CONTENT_SCHEMA_V1,
-            dependencies: Vec::new(),
+            dependencies: vec![ModDependency {
+                mod_id: core_mod_id,
+                requirement: VersionReq::parse("=1.0.0")
+                    .map_err(|_| AppError::Arguments("core dependency requirement is invalid"))?,
+                optional: false,
+            }],
             capabilities: vec![ModCapability::Content],
             patches: Vec::new(),
         },
@@ -303,7 +310,10 @@ fn demo_content(
             serde_json::to_vec(&document).map_err(AppError::DemoCodec)?,
         )],
     )?;
-    let mut sources = vec![PackageSource::Builtin(package)];
+    let mut sources = vec![
+        PackageSource::Builtin(core_package()?),
+        PackageSource::Builtin(package),
+    ];
     sources.extend(mod_paths.iter().cloned().map(PackageSource::Directory));
     let (registry, mod_lock, _) = PackageCompiler::default().compile(sources)?.into_parts();
     let agent_profile = registry
@@ -337,6 +347,35 @@ fn demo_content(
     })
 }
 
+fn core_package() -> Result<VirtualPackage, AppError> {
+    let mod_id = ModId::parse("games.loreloom.core")?;
+    let document = ContentDocument {
+        schema_version: CONTENT_SCHEMA_V1,
+        definitions: vec![Definition::Tag(TagDefinition {
+            id: ContentDefinitionId::parse(DIAGNOSED_CONDITION_PREDICATE_ID)?,
+            display_name: display("Diagnosed condition")?,
+        })],
+    };
+    Ok(VirtualPackage::builtin(
+        ModManifestDraft {
+            schema_version: MOD_MANIFEST_SCHEMA_V1,
+            mod_id: mod_id.clone(),
+            version: Version::new(1, 0, 0),
+            pack_id: ContentDefinitionId::new(&mod_id, "pack", "core")?,
+            engine: VersionReq::parse(&format!("={LORELOOM_ENGINE_VERSION}"))
+                .map_err(|_| AppError::Arguments("core engine requirement is invalid"))?,
+            content_schema: CONTENT_SCHEMA_V1,
+            dependencies: Vec::new(),
+            capabilities: vec![ModCapability::Content],
+            patches: Vec::new(),
+        },
+        vec![PackagePayload::new(
+            "content/core.json",
+            serde_json::to_vec(&document).map_err(AppError::DemoCodec)?,
+        )],
+    )?)
+}
+
 fn profile(summary: &str) -> Result<CharacterProfile, AppError> {
     Ok(CharacterProfile {
         summary: short(summary)?,
@@ -364,8 +403,6 @@ fn short(value: &str) -> Result<ShortText, AppError> {
 mod tests {
     use std::fs;
 
-    use loreloom_content::{ModDependency, TagDefinition};
-
     use super::*;
 
     #[test]
@@ -377,7 +414,17 @@ mod tests {
 
         let content = demo_content(std::slice::from_ref(&package_root), Default::default())
             .expect("compiled demo Mods");
-        assert_eq!(content.mod_lock.mods.len(), 2);
+        assert_eq!(content.mod_lock.mods.len(), 3);
+        assert!(
+            content
+                .registry
+                .get(
+                    &DIAGNOSED_CONDITION_PREDICATE_ID
+                        .parse()
+                        .expect("diagnosis predicate ID"),
+                )
+                .is_some()
+        );
         assert!(
             content
                 .registry

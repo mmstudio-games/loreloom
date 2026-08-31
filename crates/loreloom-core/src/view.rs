@@ -7,6 +7,8 @@ use crate::{
     TranscriptItemId, TranscriptItemRecord, WorldEvent, WorldTime,
 };
 
+pub const DIAGNOSED_CONDITION_PREDICATE_ID: &str = "games.loreloom.core:tag/diagnosed_condition";
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AttributeView {
@@ -29,7 +31,8 @@ pub struct ResourceView {
 #[serde(deny_unknown_fields)]
 pub struct ConditionView {
     pub condition: ConditionRecord,
-    pub display_name: DisplayName,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<DisplayName>,
     pub symptoms: Vec<ShortText>,
 }
 

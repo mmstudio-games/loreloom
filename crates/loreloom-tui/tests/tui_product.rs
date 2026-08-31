@@ -1,15 +1,17 @@
 use std::{
     cell::RefCell,
+    num::NonZeroU32,
     panic::{AssertUnwindSafe, catch_unwind},
     rc::Rc,
 };
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use loreloom_core::{
-    ActionState, ActorId, AttributeView, CharacterContext, CharacterProfile, DisplayName, Fixed,
-    LifeState, LongText, NoticeKind, ObjectId, Posture, Revision, RuntimePhase, SceneContext,
-    SessionId, ShortText, ToolActivity, ToolActivityState, TranscriptItemId, TranscriptItemRecord,
-    TranscriptSpeaker, TranscriptState, TranscriptWindow, UiNotice, UiSnapshot, WorldTime,
+    ActionState, ActorId, AttributeView, CharacterContext, CharacterProfile, ConditionRecord,
+    ConditionSource, ConditionView, DisplayName, EntityOrigin, Fixed, LifeState, LongText,
+    NoticeKind, ObjectId, Posture, Revision, RuntimePhase, SceneContext, SessionId, ShortText,
+    ToolActivity, ToolActivityState, TranscriptItemId, TranscriptItemRecord, TranscriptSpeaker,
+    TranscriptState, TranscriptWindow, UiNotice, UiSnapshot, WorldTime,
 };
 use loreloom_tui::{
     EditorError, InputEditor, MAX_INPUT_BYTES, NarrowPage, RuntimeUiEvent, StreamItem, StreamState,
@@ -67,7 +69,26 @@ fn snapshot() -> UiSnapshot {
                 current: Fixed::from_integer(4).expect("current"),
                 maximum: Fixed::from_integer(12).expect("maximum"),
             }],
-            conditions: Vec::new(),
+            conditions: vec![ConditionView {
+                condition: ConditionRecord {
+                    id: parse("obj_01890f6a-2b42-7d4e-8f90-123456789abc"),
+                    target_id: player,
+                    condition_id: parse("games.loreloom.demo:condition/shivering"),
+                    source: ConditionSource::System {
+                        source_id: parse("games.loreloom.demo:system/weather"),
+                    },
+                    stacks: NonZeroU32::MIN,
+                    intensity: Fixed::ONE,
+                    applied_at: WorldTime::from_ticks(40),
+                    expires_at: None,
+                    next_periodic_at: None,
+                    origin: EntityOrigin::System {
+                        source: parse("games.loreloom.demo:system/weather"),
+                    },
+                },
+                display_name: None,
+                symptoms: vec![text("Hands tremble.")],
+            }],
             inventory: Vec::new(),
             skills: Vec::new(),
             known_facts: Vec::new(),
@@ -218,6 +239,7 @@ fn product_renderer_is_deterministic_for_wide_and_narrow_layouts() {
     let state = text_snapshot(render(&app, 48, 18).backend().buffer());
     assert!(state.contains("[State] | Story"));
     assert!(state.contains("Name: Aster"));
+    assert!(state.contains("Condition: Unknown condition Hands tremble."));
     assert!(state.contains("Look closer▏"));
 }
 

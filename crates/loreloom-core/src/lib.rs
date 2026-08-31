@@ -46,8 +46,8 @@ pub use record::{
 pub use revision::{Revision, RevisionError};
 pub use text::{BoundedText, DisplayName, LongText, ShortText, TextError};
 pub use view::{
-    ActiveEventView, AttributeView, CharacterContext, ConditionView, EventOptionView,
-    InventoryView, NoticeKind, ParameterSetView, ParameterValueView, ResourceView, RuntimePhase,
-    SceneContext, SceneObservation, SkillView, ToolActivity, ToolActivityState, TranscriptWindow,
-    UiNotice, UiSnapshot, VisibleActorView,
+    ActiveEventView, AttributeView, CharacterContext, ConditionView,
+    DIAGNOSED_CONDITION_PREDICATE_ID, EventOptionView, InventoryView, NoticeKind, ParameterSetView,
+    ParameterValueView, ResourceView, RuntimePhase, SceneContext, SceneObservation, SkillView,
+    ToolActivity, ToolActivityState, TranscriptWindow, UiNotice, UiSnapshot, VisibleActorView,
 };

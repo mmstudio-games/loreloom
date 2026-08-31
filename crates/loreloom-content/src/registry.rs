@@ -606,7 +606,7 @@ fn validate_draft_references(
         require_kind(definitions, &policy.id, &skill.skill_id, "skill")?;
     }
     for fact in &draft.knowledge {
-        require_kind(definitions, &policy.id, &fact.predicate_id, "predicate")?;
+        require_kind(definitions, &policy.id, &fact.predicate_id, "tag")?;
     }
     Ok(())
 }
@@ -1315,7 +1315,7 @@ fn validate_character_references(
         require_kind(definitions, owner, &skill.skill_id, "skill")?;
     }
     for fact in &character.knowledge {
-        require_kind(definitions, owner, &fact.predicate_id, "predicate")?;
+        require_kind(definitions, owner, &fact.predicate_id, "tag")?;
     }
     Ok(())
 }

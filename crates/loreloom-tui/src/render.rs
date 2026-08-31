@@ -111,13 +111,17 @@ fn render_state(frame: &mut Frame<'_>, snapshot: &UiSnapshot, area: Rect) {
         )));
     }
     for condition in &player.conditions {
+        let display_name = condition
+            .display_name
+            .as_ref()
+            .map_or("Unknown condition", loreloom_core::DisplayName::as_str);
         let symptom = condition
             .symptoms
             .first()
             .map_or("", loreloom_core::ShortText::as_str);
         lines.push(Line::from(format!(
             "Condition: {} {}",
-            condition.display_name, symptom
+            display_name, symptom
         )));
     }
     for item in &player.inventory {
