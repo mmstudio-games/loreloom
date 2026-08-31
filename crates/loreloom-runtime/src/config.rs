@@ -1,6 +1,10 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use loreloom_agent::ResourceBudget;
+use loreloom_content::GenerationPolicy;
+use loreloom_core::ContentDefinitionId;
+
+pub const NARRATOR_MATERIALIZE_NPC_CAPABILITY: &str = "narrator.materialize_npc";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OrchestrationBudget {
@@ -28,9 +32,40 @@ impl Default for OrchestrationBudget {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NpcResourcePolicy {
+    pub max_generated_per_orchestration: u32,
+    pub max_materialized_per_scene: u32,
+    pub max_persistent_generated: u32,
+}
+
+impl Default for NpcResourcePolicy {
+    fn default() -> Self {
+        Self {
+            max_generated_per_orchestration: 32,
+            max_materialized_per_scene: 256,
+            max_persistent_generated: 1_024,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeConfig {
     pub turn_budget: ResourceBudget,
     pub orchestration_budget: OrchestrationBudget,
     pub narrator_capabilities: BTreeSet<String>,
+    pub npc_resources: NpcResourcePolicy,
+    pub generation_policies: BTreeMap<ContentDefinitionId, GenerationPolicy>,
+}
+
+impl Default for RuntimeConfig {
+    fn default() -> Self {
+        Self {
+            turn_budget: ResourceBudget::default(),
+            orchestration_budget: OrchestrationBudget::default(),
+            narrator_capabilities: BTreeSet::from([NARRATOR_MATERIALIZE_NPC_CAPABILITY.to_owned()]),
+            npc_resources: NpcResourcePolicy::default(),
+            generation_policies: BTreeMap::new(),
+        }
+    }
 }

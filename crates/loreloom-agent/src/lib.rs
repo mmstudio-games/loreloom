@@ -9,8 +9,10 @@ pub use budget::{BudgetReason, ResourceBudget, ResourceUsage};
 pub use cancellation::CancellationToken;
 pub use protocol::{
     AgentDefinition, AgentError, AssignmentText, ClaimedActionText, IntentText, NarrationText,
-    NarratorPlan, NarratorSynthesis, NpcAgent, NpcAssignment, NpcContext, NpcModelOutput,
-    NpcTurnRequest, NpcTurnResult, NpcTurnStatus, UtteranceText,
+    NarrativeImportance, NarratorNpcDecision, NarratorPlan, NarratorSynthesis, NpcAgent,
+    NpcAssignment, NpcContext, NpcControllerKind, NpcGenerationRequest, NpcLifetime,
+    NpcModelOutput, NpcNarrativeAction, NpcTarget, NpcTurnRequest, NpcTurnResult, NpcTurnStatus,
+    UtteranceText,
 };
 pub use runner::{
     AgentRunner, AgentToolContext, ToolCallOutcome, TurnFailureStage, TurnInvocation, TurnOutcome,

@@ -100,6 +100,7 @@ pub async fn build_demo_with(
         ),
     };
     let mut runtime = GameRuntime::new(service, narrator, session_id, runtime_config);
+    runtime.set_default_npc_bridge(Arc::clone(&npc));
     runtime.register_npc(npc_id, content.agent_definition, npc);
     let initial_snapshot = runtime.initial_snapshot().await?;
     Ok(DemoSetup {

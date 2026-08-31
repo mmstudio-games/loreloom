@@ -87,6 +87,11 @@ impl AgentRunner {
             budget,
             cancellation,
         } = invocation;
+        let offered_tools = request
+            .tools
+            .iter()
+            .map(|definition| definition.name.clone())
+            .collect::<BTreeSet<_>>();
         let started = Instant::now();
         let mut usage = ResourceUsage::default();
         let mut tool_results = Vec::new();
@@ -217,15 +222,25 @@ impl AgentRunner {
                     );
                 }
                 let context = ToolContext::new().with_extension(tool_context.clone());
-                let result = match self.executor.execute(context, call.clone()).await {
-                    Ok(result) => result,
-                    Err(_) => ToolResult {
+                let result = if offered_tools.contains(call.name.as_str()) {
+                    match self.executor.execute(context, call.clone()).await {
+                        Ok(result) => result,
+                        Err(_) => ToolResult {
+                            call_id: call.id.clone(),
+                            content: vec![ToolResultContent::Json {
+                                value: json!({ "code": "tool_execution_error" }),
+                            }],
+                            is_error: true,
+                        },
+                    }
+                } else {
+                    ToolResult {
                         call_id: call.id.clone(),
                         content: vec![ToolResultContent::Json {
-                            value: json!({ "code": "tool_execution_error" }),
+                            value: json!({ "code": "tool_not_offered" }),
                         }],
                         is_error: true,
-                    },
+                    }
                 };
                 if !result.is_error {
                     collect_events(&result, &mut committed_events);

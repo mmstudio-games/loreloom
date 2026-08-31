@@ -1,4 +1,5 @@
 use loreloom_agent::{AgentError, BudgetReason};
+use loreloom_content::ContentError;
 use loreloom_core::{IdentityError, RevisionError, TextError};
 use loreloom_store::StoreError;
 use loreloom_world::WorldError;
@@ -25,6 +26,8 @@ pub enum RuntimeError {
     #[error(transparent)]
     Agent(#[from] AgentError),
     #[error(transparent)]
+    Content(#[from] ContentError),
+    #[error(transparent)]
     Identity(#[from] IdentityError),
     #[error(transparent)]
     Revision(#[from] RevisionError),
@@ -50,6 +53,7 @@ impl RuntimeError {
             Self::Unavailable => "unavailable",
             Self::ContentLockMismatch => "content_lock_mismatch",
             Self::ModelProtocol { .. } | Self::Agent(_) | Self::Json { .. } => "agent_error",
+            Self::Content(_) => "content_error",
             Self::BridgeUnavailable => "bridge_unavailable",
             Self::CapabilityDenied => "capability_denied",
             Self::Budget(_) => "budget_exhausted",

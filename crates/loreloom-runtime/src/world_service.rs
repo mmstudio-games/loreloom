@@ -2,26 +2,28 @@ use std::{collections::BTreeMap, path::Path, sync::Arc};
 
 use armillae_core::{ToolCall, ToolDefinition, ToolResult, ToolResultContent};
 use armillae_tools::{BoxFuture, ToolContext, ToolExecutionError, ToolExecutor};
-use loreloom_agent::AgentToolContext;
+use loreloom_agent::{AgentDefinition, AgentToolContext, NarratorNpcDecision};
 use loreloom_content::{
-    Definition, DefinitionRegistry, ParameterVisibility, PredicateDefinition, SceneSpawnPlan,
+    CharacterCompileRequest, Definition, DefinitionRegistry, DraftCompileRequest, GenerationPolicy,
+    NpcDraft, ParameterVisibility, PredicateDefinition, SceneSpawnPlan,
 };
 use loreloom_core::{
     ActionId, ActiveEventView, ActorId, AttributeAdjustment, AttributeOperation, AttributeView,
-    CharacterContext, CharacterController, ConditionRecord, ConditionView, ContentDefinitionId,
-    DIAGNOSED_CONDITION_PREDICATE_ID, DomainRecord, EventId, EventOptionView, FactSubject,
-    FactValue, InventoryView, KnowledgeStatus, LongText, ModLock, ObjectId, ParameterSetView,
-    ParameterValue, ParameterValueView, ResourceView, Revision, RuntimePhase, SAVE_FORMAT_V1,
-    SaveId, SaveManifest, SceneContext, SceneObservation, SessionId, SkillView, SystemIdGenerator,
-    ToolActivity, TranscriptWindow, UiNotice, UiSnapshot, VisibleActorView, WorldCommand,
-    WorldCommandKind, WorldEvent,
+    CharacterContext, CharacterController, CharacterLifetime, CharacterSpawnSpec, ConditionRecord,
+    ConditionView, ContentDefinitionId, DIAGNOSED_CONDITION_PREDICATE_ID, DomainRecord, EventId,
+    EventOptionView, FactSubject, FactValue, GeneratedOrigin, InventoryView, KnowledgeStatus,
+    LongText, ModLock, ObjectId, ParameterSetView, ParameterValue, ParameterValueView,
+    ResourceView, Revision, RuntimePhase, SAVE_FORMAT_V1, SaveId, SaveManifest, SceneContext,
+    SceneObservation, SessionId, SkillView, SystemIdGenerator, ToolActivity, TranscriptWindow,
+    UiNotice, UiSnapshot, VisibleActorView, WorldCommand, WorldCommandKind, WorldEvent,
+    WorldEventKind,
 };
 use loreloom_store::{ActionResolution, CommitRequest, CommitResult, CommittedAction, SaveStore};
 use loreloom_world::{GameWorld, WorldBootstrap, WorldConfig};
 use serde_json::{Value as JsonValue, json};
 use tokio::sync::Mutex;
 
-use crate::RuntimeError;
+use crate::{NARRATOR_MATERIALIZE_NPC_CAPABILITY, RuntimeError};
 
 const CONTEXT_TRANSCRIPT_LIMIT: usize = 64;
 const CONTEXT_EVENT_LIMIT: usize = 64;
@@ -37,6 +39,22 @@ struct RuntimeWorld {
 
 pub struct WorldService {
     inner: Mutex<RuntimeWorld>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct MaterializationCounts {
+    pub scene_characters: usize,
+    pub persistent_generated: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CharacterMaterializationRequest {
+    pub acting_actor: ActorId,
+    pub scene_id: ObjectId,
+    pub place_id: ObjectId,
+    pub controller: CharacterController,
+    pub lifetime: CharacterLifetime,
+    pub required_agent_profile: Option<ContentDefinitionId>,
 }
 
 impl std::fmt::Debug for WorldService {
@@ -123,6 +141,164 @@ impl WorldService {
             .and_then(|character| character.agent_binding.as_ref())
             .filter(|binding| binding.enabled)
             .map(|binding| binding.profile_id.clone())
+    }
+
+    pub(crate) async fn has_character(&self, actor_id: ActorId) -> bool {
+        self.inner.lock().await.world.character(actor_id).is_some()
+    }
+
+    pub async fn agent_definition(
+        &self,
+        actor_id: ActorId,
+    ) -> Result<AgentDefinition, RuntimeError> {
+        let inner = self.inner.lock().await;
+        let binding = inner
+            .world
+            .character(actor_id)
+            .filter(|character| character.controller == CharacterController::Agent)
+            .and_then(|character| character.agent_binding.as_ref())
+            .filter(|binding| binding.enabled)
+            .ok_or(RuntimeError::Unavailable)?;
+        let profile = inner
+            .registry
+            .get(&binding.profile_id)
+            .and_then(|entry| match &entry.definition {
+                Definition::AgentProfile(profile) => Some(profile),
+                _ => None,
+            })
+            .ok_or(RuntimeError::Unavailable)?;
+        Ok(AgentDefinition {
+            profile_id: profile.id.clone(),
+            system_style: LongText::new(profile.system_style.as_str())?,
+            model_alias: profile.model_alias.clone(),
+            allowed_tools: profile
+                .tool_capabilities
+                .iter()
+                .map(|capability| capability.as_str().to_owned())
+                .collect(),
+        })
+    }
+
+    pub(crate) async fn generation_definitions(
+        &self,
+        policy: &GenerationPolicy,
+    ) -> Result<Vec<Definition>, RuntimeError> {
+        let inner = self.inner.lock().await;
+        let ids = policy
+            .constraints
+            .allowed_definitions
+            .iter()
+            .chain(policy.allowed_agent_profiles.iter())
+            .collect::<std::collections::BTreeSet<_>>();
+        ids.into_iter()
+            .map(|id| {
+                inner
+                    .registry
+                    .get(id)
+                    .map(|entry| entry.definition.clone())
+                    .ok_or(RuntimeError::Unavailable)
+            })
+            .collect()
+    }
+
+    pub(crate) async fn materialization_counts(
+        &self,
+        scene_id: ObjectId,
+    ) -> Result<MaterializationCounts, RuntimeError> {
+        let inner = self.inner.lock().await;
+        let player = inner.world.world_state().player_actor;
+        let records = inner.world.project_records()?;
+        let places = records
+            .iter()
+            .filter_map(|record| match record {
+                DomainRecord::Place(place) => Some((place.id, place.scene_id)),
+                _ => None,
+            })
+            .collect::<BTreeMap<_, _>>();
+        let scene_characters = records
+            .iter()
+            .filter_map(|record| match record {
+                DomainRecord::Character(character) => Some(character),
+                _ => None,
+            })
+            .filter(|character| {
+                character.id != player && places.get(&character.location) == Some(&scene_id)
+            })
+            .count();
+        let persistent_generated = records
+            .iter()
+            .filter_map(|record| match record {
+                DomainRecord::Character(character) => Some(character),
+                _ => None,
+            })
+            .filter(|character| {
+                character.lifetime == CharacterLifetime::Persistent
+                    && matches!(
+                        character.origin,
+                        loreloom_core::EntityOrigin::Generated { .. }
+                    )
+            })
+            .count();
+        Ok(MaterializationCounts {
+            scene_characters,
+            persistent_generated,
+        })
+    }
+
+    pub(crate) async fn spawn_preset_character(
+        &self,
+        character_id: &ContentDefinitionId,
+        request: &CharacterMaterializationRequest,
+    ) -> Result<ActorId, RuntimeError> {
+        let mut inner = self.inner.lock().await;
+        let spec = inner.registry.compile_character(
+            character_id,
+            CharacterCompileRequest {
+                scene_id: request.scene_id,
+                place_id: request.place_id,
+                controller: request.controller,
+                lifetime: request.lifetime,
+            },
+        )?;
+        if spec
+            .agent_binding
+            .as_ref()
+            .map(|binding| &binding.profile_id)
+            != request.required_agent_profile.as_ref()
+        {
+            return Err(RuntimeError::Unavailable);
+        }
+        spawn_character(&mut inner, request.acting_actor, spec).await
+    }
+
+    pub(crate) async fn spawn_generated_character(
+        &self,
+        draft: &NpcDraft,
+        policy: &GenerationPolicy,
+        origin: GeneratedOrigin,
+        request: &CharacterMaterializationRequest,
+    ) -> Result<ActorId, RuntimeError> {
+        let mut inner = self.inner.lock().await;
+        let spec = inner.registry.compile_draft(
+            draft,
+            policy,
+            DraftCompileRequest {
+                origin,
+                scene_id: request.scene_id,
+                place_id: request.place_id,
+                controller: request.controller,
+                lifetime: request.lifetime,
+            },
+        )?;
+        if spec
+            .agent_binding
+            .as_ref()
+            .map(|binding| &binding.profile_id)
+            != request.required_agent_profile.as_ref()
+        {
+            return Err(RuntimeError::Unavailable);
+        }
+        spawn_character(&mut inner, request.acting_actor, spec).await
     }
 
     pub async fn observation(
@@ -353,12 +529,27 @@ impl WorldService {
 #[derive(Debug)]
 pub struct RuntimeToolExecutor {
     service: Arc<WorldService>,
+    pending_npc_decisions: Mutex<Vec<PendingNpcDecision>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PendingNpcDecision {
+    pub call_id: String,
+    pub revision: Revision,
+    pub decision: NarratorNpcDecision,
 }
 
 impl RuntimeToolExecutor {
     #[must_use]
     pub fn new(service: Arc<WorldService>) -> Self {
-        Self { service }
+        Self {
+            service,
+            pending_npc_decisions: Mutex::new(Vec::new()),
+        }
+    }
+
+    pub(crate) async fn take_pending_npc_decisions(&self) -> Vec<PendingNpcDecision> {
+        std::mem::take(&mut *self.pending_npc_decisions.lock().await)
     }
 }
 
@@ -434,6 +625,121 @@ impl ToolExecutor for RuntimeToolExecutor {
                     "additionalProperties": false
                 }),
             },
+            ToolDefinition {
+                name: "materialize_npc".to_owned(),
+                description: "Queue one bounded NPC decision. Preset/generated targets are materialized after this narrator turn, then planning restarts with the committed actor ID.".to_owned(),
+                input_schema: json!({
+                    "type": "object",
+                    "required": ["target", "action", "lifetime", "controller"],
+                    "properties": {
+                        "target": {
+                            "oneOf": [
+                                {
+                                    "type": "object",
+                                    "required": ["type", "actor_id"],
+                                    "properties": {
+                                        "type": { "const": "existing" },
+                                        "actor_id": { "type": "string" }
+                                    },
+                                    "additionalProperties": false
+                                },
+                                {
+                                    "type": "object",
+                                    "required": ["type", "character_id", "place_id"],
+                                    "properties": {
+                                        "type": { "const": "preset" },
+                                        "character_id": { "type": "string" },
+                                        "place_id": { "type": "string" }
+                                    },
+                                    "additionalProperties": false
+                                },
+                                {
+                                    "type": "object",
+                                    "required": ["type", "generation_policy_id", "place_id", "request"],
+                                    "properties": {
+                                        "type": { "const": "generated" },
+                                        "generation_policy_id": { "type": "string" },
+                                        "place_id": { "type": "string" },
+                                        "request": {
+                                            "type": "object",
+                                            "required": ["scene_id", "role", "purpose", "desired_traits", "importance"],
+                                            "properties": {
+                                                "scene_id": { "type": "string" },
+                                                "role": { "type": "string", "maxLength": 1024 },
+                                                "purpose": { "type": "string", "maxLength": 65536 },
+                                                "desired_traits": {
+                                                    "type": "array",
+                                                    "items": { "type": "string" },
+                                                    "uniqueItems": true,
+                                                    "maxItems": 256
+                                                },
+                                                "importance": {
+                                                    "type": "string",
+                                                    "enum": ["ambient", "supporting", "principal"]
+                                                }
+                                            },
+                                            "additionalProperties": false
+                                        }
+                                    },
+                                    "additionalProperties": false
+                                },
+                                {
+                                    "type": "object",
+                                    "required": ["type", "display_name"],
+                                    "properties": {
+                                        "type": { "const": "mentioned" },
+                                        "display_name": { "type": "string", "maxLength": 256 }
+                                    },
+                                    "additionalProperties": false
+                                }
+                            ]
+                        },
+                        "action": {
+                            "type": "string",
+                            "enum": ["mention_only", "materialize_lightweight", "request_npc_turn"]
+                        },
+                        "lifetime": {
+                            "type": "string",
+                            "enum": ["beat", "scene", "persistent"]
+                        },
+                        "controller": {
+                            "oneOf": [
+                                {
+                                    "type": "object",
+                                    "required": ["type"],
+                                    "properties": { "type": { "const": "narrator_proxy" } },
+                                    "additionalProperties": false
+                                },
+                                {
+                                    "type": "object",
+                                    "required": ["type"],
+                                    "properties": { "type": { "const": "rules" } },
+                                    "additionalProperties": false
+                                },
+                                {
+                                    "type": "object",
+                                    "required": ["type", "profile_id"],
+                                    "properties": {
+                                        "type": { "const": "agent" },
+                                        "profile_id": { "type": "string" }
+                                    },
+                                    "additionalProperties": false
+                                }
+                            ]
+                        },
+                        "assignment": {
+                            "type": "object",
+                            "required": ["text", "revision"],
+                            "properties": {
+                                "text": { "type": "string", "maxLength": 4096 },
+                                "revision": { "type": "integer", "minimum": 0 }
+                            },
+                            "additionalProperties": false
+                        }
+                    },
+                    "additionalProperties": false
+                }),
+            },
         ]
     }
 
@@ -497,6 +803,40 @@ impl ToolExecutor for RuntimeToolExecutor {
                         .map(committed_json),
                     _ => Err(RuntimeError::InvalidInput),
                 },
+                "materialize_npc" => {
+                    if !runtime
+                        .capabilities
+                        .contains(NARRATOR_MATERIALIZE_NPC_CAPABILITY)
+                        || self.service.player_actor().await != runtime.actor_id
+                    {
+                        Err(RuntimeError::CapabilityDenied)
+                    } else if self.service.revision().await != runtime.revision {
+                        Err(RuntimeError::Unavailable)
+                    } else {
+                        match serde_json::from_value::<NarratorNpcDecision>(call.arguments.clone())
+                        {
+                            Ok(decision) => match decision.validate() {
+                                Ok(()) => {
+                                    let requires_replanning = decision.requires_materialization();
+                                    self.pending_npc_decisions.lock().await.push(
+                                        PendingNpcDecision {
+                                            call_id: call.id.as_str().to_owned(),
+                                            revision: runtime.revision,
+                                            decision,
+                                        },
+                                    );
+                                    Ok(json!({
+                                        "status": "accepted_pending",
+                                        "revision": runtime.revision,
+                                        "requires_replanning_after_materialization": requires_replanning
+                                    }))
+                                }
+                                Err(error) => Err(RuntimeError::Agent(error)),
+                            },
+                            Err(_) => Err(RuntimeError::InvalidInput),
+                        }
+                    }
+                }
                 _ => {
                     return Err(ToolExecutionError::UnknownTool {
                         name: call.name.clone(),
@@ -509,6 +849,31 @@ impl ToolExecutor for RuntimeToolExecutor {
             })
         })
     }
+}
+
+async fn spawn_character(
+    inner: &mut RuntimeWorld,
+    acting_actor: ActorId,
+    spec: CharacterSpawnSpec,
+) -> Result<ActorId, RuntimeError> {
+    let command = WorldCommand {
+        action_id: ActionId::generate_with(&mut inner.ids)?,
+        actor_id: acting_actor,
+        expected_revision: inner.world.revision(),
+        kind: WorldCommandKind::SpawnCharacter {
+            spec: Box::new(spec),
+        },
+    };
+    let outcome = apply_command(inner, command).await?;
+    inner
+        .events
+        .iter()
+        .filter(|event| outcome.event_ids.contains(&event.id))
+        .find_map(|event| match event.kind {
+            WorldEventKind::CharacterSpawned { character_id } => Some(character_id),
+            _ => None,
+        })
+        .ok_or(RuntimeError::Unavailable)
 }
 
 async fn apply_command(

@@ -1,6 +1,6 @@
 schema_version = 1
 allowed_endpoint_hosts = []
-narrator_capabilities = []
+narrator_capabilities = ["narrator.materialize_npc"]
 
 [narrator]
 api_version = "armillae.llm/v1alpha1"
@@ -43,6 +43,23 @@ max_total_tokens = 1179648
 max_model_output_bytes = 2097152
 max_elapsed_ms = 900000
 require_reported_tokens = false
+
+[npc_resources]
+max_generated_per_orchestration = 32
+max_materialized_per_scene = 256
+max_persistent_generated = 1024
+
+[[generation_policies]]
+id = "games.loreloom.demo:generation_policy/default"
+allowed_agent_profiles = ["games.loreloom.demo:agent_profile/mira"]
+
+[generation_policies.constraints]
+minimum_attributes = {}
+maximum_attributes = {}
+maximum_attribute_points = 0
+maximum_items = 0
+maximum_skills = 0
+allowed_definitions = []
 
 [rule_limits]
 max_triggered_rules = 128

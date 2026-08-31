@@ -2,7 +2,7 @@ use std::collections::{BTreeSet, HashSet};
 
 use armillae_core::{CompletionRequest, ContentPart, Message, Role, ToolDefinition};
 use loreloom_core::{
-    ActorId, BoundedText, CharacterContext, ContentDefinitionId, EventId, LongText,
+    ActorId, BoundedText, CharacterContext, ContentDefinitionId, DisplayName, EventId, LongText,
     NpcTurnRequestId, ObjectId, Revision, SceneContext, ShortText, TranscriptItemRecord,
 };
 use serde::{Deserialize, Serialize};
@@ -23,6 +23,8 @@ pub enum AgentError {
     ContextRevision,
     #[error("narrator plan is invalid: {field}")]
     InvalidPlan { field: &'static str },
+    #[error("narrator NPC decision is invalid: {field}")]
+    InvalidNpcDecision { field: &'static str },
     #[error("agent context JSON encoding failed")]
     ContextEncoding(#[source] serde_json::Error),
 }
@@ -41,6 +43,151 @@ pub struct AgentDefinition {
 pub struct NpcAssignment {
     pub text: AssignmentText,
     pub revision: Revision,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NpcGenerationRequest {
+    pub scene_id: ObjectId,
+    pub role: ShortText,
+    pub purpose: LongText,
+    pub desired_traits: BTreeSet<ContentDefinitionId>,
+    pub importance: NarrativeImportance,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NarrativeImportance {
+    Ambient,
+    Supporting,
+    Principal,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum NpcTarget {
+    Existing {
+        actor_id: ActorId,
+    },
+    Preset {
+        character_id: ContentDefinitionId,
+        place_id: ObjectId,
+    },
+    Generated {
+        generation_policy_id: ContentDefinitionId,
+        place_id: ObjectId,
+        request: NpcGenerationRequest,
+    },
+    Mentioned {
+        display_name: DisplayName,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NpcNarrativeAction {
+    MentionOnly,
+    MaterializeLightweight,
+    RequestNpcTurn,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NpcLifetime {
+    Beat,
+    Scene,
+    Persistent,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(
+    tag = "type",
+    content = "profile_id",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
+pub enum NpcControllerKind {
+    NarratorProxy,
+    Rules,
+    Agent(ContentDefinitionId),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NarratorNpcDecision {
+    pub target: NpcTarget,
+    pub action: NpcNarrativeAction,
+    pub lifetime: NpcLifetime,
+    pub controller: NpcControllerKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assignment: Option<NpcAssignment>,
+}
+
+impl NarratorNpcDecision {
+    pub fn validate(&self) -> Result<(), AgentError> {
+        if self.lifetime == NpcLifetime::Beat && self.action != NpcNarrativeAction::MentionOnly {
+            return Err(AgentError::InvalidNpcDecision {
+                field: "beat_requires_mention_only",
+            });
+        }
+        if matches!(self.target, NpcTarget::Mentioned { .. })
+            && self.action != NpcNarrativeAction::MentionOnly
+        {
+            return Err(AgentError::InvalidNpcDecision {
+                field: "mentioned_requires_mention_only",
+            });
+        }
+        if matches!(self.target, NpcTarget::Existing { .. })
+            && self.action == NpcNarrativeAction::MaterializeLightweight
+        {
+            return Err(AgentError::InvalidNpcDecision {
+                field: "existing_is_already_materialized",
+            });
+        }
+        match self.action {
+            NpcNarrativeAction::MentionOnly => {
+                if self.assignment.is_some() {
+                    return Err(AgentError::InvalidNpcDecision {
+                        field: "mention_has_no_assignment",
+                    });
+                }
+            }
+            NpcNarrativeAction::MaterializeLightweight => {
+                if matches!(self.controller, NpcControllerKind::Agent(_)) {
+                    return Err(AgentError::InvalidNpcDecision {
+                        field: "lightweight_controller",
+                    });
+                }
+                if self.assignment.is_some() {
+                    return Err(AgentError::InvalidNpcDecision {
+                        field: "lightweight_has_no_assignment",
+                    });
+                }
+            }
+            NpcNarrativeAction::RequestNpcTurn => {
+                if !matches!(self.controller, NpcControllerKind::Agent(_)) {
+                    return Err(AgentError::InvalidNpcDecision {
+                        field: "npc_turn_requires_agent",
+                    });
+                }
+            }
+        }
+        if self.requires_materialization() && self.assignment.is_some() {
+            return Err(AgentError::InvalidNpcDecision {
+                field: "assignment_requires_materialized_actor",
+            });
+        }
+        Ok(())
+    }
+
+    #[must_use]
+    pub fn requires_materialization(&self) -> bool {
+        !matches!(self.action, NpcNarrativeAction::MentionOnly)
+            && matches!(
+                self.target,
+                NpcTarget::Preset { .. } | NpcTarget::Generated { .. }
+            )
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -215,4 +362,83 @@ pub enum NarratorSynthesis {
         supporting_events: Vec<EventId>,
         next_plan: NarratorPlan,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn object_id() -> ObjectId {
+        "obj_01890f6a-2b3e-7d4e-8f90-123456789abc"
+            .parse()
+            .expect("object ID")
+    }
+
+    fn profile_id() -> ContentDefinitionId {
+        "games.loreloom.test:agent_profile/keeper"
+            .parse()
+            .expect("profile ID")
+    }
+
+    #[test]
+    fn generated_npc_decision_round_trips_strictly() {
+        let decision = NarratorNpcDecision {
+            target: NpcTarget::Generated {
+                generation_policy_id: "games.loreloom.test:generation_policy/default"
+                    .parse()
+                    .expect("policy ID"),
+                place_id: object_id(),
+                request: NpcGenerationRequest {
+                    scene_id: object_id(),
+                    role: ShortText::new("innkeeper").expect("role"),
+                    purpose: LongText::new("Answer the traveler without inventing world facts.")
+                        .expect("purpose"),
+                    desired_traits: BTreeSet::new(),
+                    importance: NarrativeImportance::Supporting,
+                },
+            },
+            action: NpcNarrativeAction::RequestNpcTurn,
+            lifetime: NpcLifetime::Scene,
+            controller: NpcControllerKind::Agent(profile_id()),
+            assignment: None,
+        };
+
+        decision.validate().expect("valid decision");
+        let encoded = serde_json::to_value(&decision).expect("encode decision");
+        assert_eq!(
+            serde_json::from_value::<NarratorNpcDecision>(encoded.clone())
+                .expect("decode decision"),
+            decision
+        );
+        let mut unknown = encoded.as_object().expect("decision object").clone();
+        unknown.insert("priority".to_owned(), serde_json::json!(999));
+        assert!(
+            serde_json::from_value::<NarratorNpcDecision>(serde_json::Value::Object(unknown))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn invalid_lifetime_and_controller_combinations_are_rejected() {
+        let lightweight_agent = NarratorNpcDecision {
+            target: NpcTarget::Preset {
+                character_id: "games.loreloom.test:character/keeper"
+                    .parse()
+                    .expect("character ID"),
+                place_id: object_id(),
+            },
+            action: NpcNarrativeAction::MaterializeLightweight,
+            lifetime: NpcLifetime::Scene,
+            controller: NpcControllerKind::Agent(profile_id()),
+            assignment: None,
+        };
+        assert!(lightweight_agent.validate().is_err());
+
+        let beat_entity = NarratorNpcDecision {
+            controller: NpcControllerKind::NarratorProxy,
+            lifetime: NpcLifetime::Beat,
+            ..lightweight_agent
+        };
+        assert!(beat_entity.validate().is_err());
+    }
 }

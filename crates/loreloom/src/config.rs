@@ -1,11 +1,18 @@
-use std::{collections::BTreeSet, net::IpAddr, path::Path, sync::Arc, time::Duration};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    net::IpAddr,
+    path::Path,
+    sync::Arc,
+    time::Duration,
+};
 
 use armillae_llm::{
     BridgeConfig, BridgeFactory, BridgeResolveContext, CredentialRef, EndpointPolicy, LlmBridge,
 };
 use armillae_llm_rig::RigBridgeFactory;
 use loreloom_agent::ResourceBudget;
-use loreloom_runtime::{OrchestrationBudget, RuntimeConfig};
+use loreloom_content::GenerationPolicy;
+use loreloom_runtime::{NpcResourcePolicy, OrchestrationBudget, RuntimeConfig};
 use loreloom_tui::TuiConfig;
 use loreloom_world::RuleLimits;
 use serde::Deserialize;
@@ -30,6 +37,10 @@ pub struct ProductConfig {
     #[serde(default)]
     orchestration_budget: OrchestrationConfig,
     #[serde(default)]
+    npc_resources: NpcResourceConfig,
+    #[serde(default)]
+    generation_policies: Vec<GenerationPolicy>,
+    #[serde(default)]
     rule_limits: RuleLimitConfig,
     #[serde(default)]
     tui: TuiProductConfig,
@@ -50,6 +61,35 @@ impl Default for OrchestrationConfig {
             resources: value.resources,
             max_started_agent_turns: value.max_started_agent_turns,
             max_orchestration_rounds: value.max_orchestration_rounds,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct NpcResourceConfig {
+    max_generated_per_orchestration: u32,
+    max_materialized_per_scene: u32,
+    max_persistent_generated: u32,
+}
+
+impl Default for NpcResourceConfig {
+    fn default() -> Self {
+        let value = NpcResourcePolicy::default();
+        Self {
+            max_generated_per_orchestration: value.max_generated_per_orchestration,
+            max_materialized_per_scene: value.max_materialized_per_scene,
+            max_persistent_generated: value.max_persistent_generated,
+        }
+    }
+}
+
+impl From<NpcResourceConfig> for NpcResourcePolicy {
+    fn from(value: NpcResourceConfig) -> Self {
+        Self {
+            max_generated_per_orchestration: value.max_generated_per_orchestration,
+            max_materialized_per_scene: value.max_materialized_per_scene,
+            max_persistent_generated: value.max_persistent_generated,
         }
     }
 }
@@ -149,6 +189,12 @@ impl ProductConfig {
                             .max_orchestration_rounds,
                     },
                     narrator_capabilities: self.narrator_capabilities,
+                    npc_resources: self.npc_resources.into(),
+                    generation_policies: self
+                        .generation_policies
+                        .into_iter()
+                        .map(|policy| (policy.id.clone(), policy))
+                        .collect::<BTreeMap<_, _>>(),
                 },
                 rules: self.rule_limits.into(),
             },
@@ -171,6 +217,14 @@ impl ProductConfig {
         };
         self.narrator.validate(Some(&policy))?;
         self.npc.validate(Some(&policy))?;
+        let mut generation_policy_ids = BTreeSet::new();
+        if self
+            .generation_policies
+            .iter()
+            .any(|policy| !generation_policy_ids.insert(policy.id.clone()))
+        {
+            return Err(AppError::ConfigPolicy("duplicate generation policy"));
+        }
         let configured_limits: RuleLimits = self.rule_limits.into();
         let maximum = RuleLimits::default();
         if configured_limits.max_triggered_rules > maximum.max_triggered_rules

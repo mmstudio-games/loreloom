@@ -958,6 +958,11 @@ Orchestration Tool 只构造当前 Agent 编排的 Runtime 临时请求，不形
 Capability、Revision 与整轮预算约束。`request_npc_turn` 只向当前 NarratorPlan 追加请求；只有
 Narrator Turn 完成并释放执行槽后，Runtime 才能按 Plan 顺序启动对应 NpcAgent。
 
+`materialize_npc` 同样是 Orchestration Tool，而不是在 Narrator Turn 内同步生成角色的 Command
+Tool。它只校验并暂存 `NarratorNpcDecision`；Preset 编译、`npc_generation` Agent Turn 与最终
+`SpawnCharacter` Command 都必须等当前 Narrator Turn 完成并释放唯一执行槽后开始。ToolResult 只能
+表示请求已进入本轮待处理队列，不能在角色提交前返回成功的 ActorId。
+
 ### 9.4 角色状态、物品与技能 Tool 面
 
 第一阶段使用少量稳定的领域 Tool，不为每一种 Item/Skill 动态注册任意可变 Tool：
@@ -987,7 +992,7 @@ Narrator 可以使用：
 
 | 分类 | Tool 候选 | 责任 |
 |---|---|---|
-| Command | `materialize_npc` | 提交受约束 NarratorNpcDecision/NpcGenerationRequest |
+| Orchestration | `materialize_npc` | 暂存受约束 NarratorNpcDecision/NpcGenerationRequest，待当前 Narrator Turn 结束后物化 |
 | Command | `promote_npc` | 在持久副作用前请求提升已有 Narrative/Scene NPC |
 | Orchestration | `request_npc_turn` | 向当前 NarratorPlan 追加一个已有 AgentBinding NPC 的 NpcTurnRequest |
 
@@ -1013,6 +1018,9 @@ lock 和当前 Observation 决定是否投影相应 Event/Action。
 ### 9.7 Tool 顺序与预算
 
 - ToolCall ID 和模型返回顺序必须保持；
+- AgentRunner 只能执行当前 CompletionRequest 实际投影的 ToolDefinition；即使名称属于 Runtime
+  全局已注册 Tool，未向该 Turn 提供的 ToolCall 也必须返回关联的 `tool_not_offered` error result，
+  不得进入 ToolExecutor；因此无 Tool 的 `npc_generation` stage 不能读取或修改世界；
 - Query Tool 第一阶段也按顺序执行，后续有证据后才能并发；
 - Command Tool 严格串行；
 - 每个 Narrator/NPC Turn 有 ToolCall、Model Call、Token、耗时和输出预算，完整 PlayerInput 编排
@@ -1174,6 +1182,8 @@ Believed/disputed/forgotten、其它 owner、其它 target 或其它 Condition I
   调用 NpcAgent；
 - NarratorPlan 中 NpcTurnRequest 的列表顺序就是语义执行顺序；Request 不携带 `priority`，Runtime
   不重新计算叙事优先级或公平性；
+- NarratorPlan 只能引用 planning 开始前已经提交的 ActorId；未物化的 Preset/Generated/Mentioned
+  target 不进入 `NpcTurnRequest`，也不把 `actor_id` 改成 optional 或 target union；
 - Runtime 必须验证请求中的 Actor、Scene membership、Revision 和 Capability，并在独立预算配置
   下确认仍有资源后才排队；模型或 Mod 不能通过 Request 扩大预算；
 - `based_on_revision` 记录 Narrator 制定计划时的 provenance，不是后续世界写入可沿用的
@@ -1434,6 +1444,35 @@ Narrator 可以在玩家明确交互时选择 NarratorProxy 或独立 NpcAgent�
 PlayerInput 的 Model/Token/byte/time 预算，不新增 generator Provider 配置。`Mentioned` 只可与
 MentionOnly 组合。Preset/Generated 的 place 必须属于决定中的 Scene；request scene、当前 Scene 与
 place scene 必须一致。
+
+尚未物化的 target 使用统一、质量优先的两阶段编排，不按 `importance` 或 controller 增加不同复核
+分支：
+
+1. Narrator 在 planning Turn 中调用 `materialize_npc`；Tool 只把合法决定加入 Runtime 临时队列；
+2. planning Turn 必须先结束并释放唯一 Agent 执行槽；该 Turn 返回的 NarratorPlan 是物化前的
+   provisional plan，只要队列含 Preset/Generated 物化请求就不得执行；
+3. Runtime 按 ToolCall 顺序处理队列。Preset 使用 `compile_character`；Generated 先启动独立
+   `npc_generation` Turn，再用授权 GenerationPolicy 调用 `compile_draft`；
+4. 两种来源都只通过 `CharacterSpawnSpec -> SpawnCharacter` 提交，并从 committed
+   `CharacterSpawned` Event 取得 ActorId；失败不得发布 ActorId、注册 Agent 或遗留部分领域记录；
+5. Runtime 把每项成功 ActorId 或结构化拒绝原因、更新后的 Scene Observation 作为下一次 planning
+   输入，在同一次 PlayerInput 内重新调用 Narrator；该次重规划计入最大编排轮数和整轮资源预算；
+6. 只有重新规划后的 NarratorPlan 可以用 committed ActorId 形成 NpcTurnRequest。若新角色具有
+   enabled AgentBinding，Runtime 从当前 Registry 解析 AgentProfile 并绑定 Host 已配置的 NPC
+   Bridge；NpcAgent 开始时仍从届时 committed Revision 重新投影完整 Character/Scene Context。
+
+Preset/Generated 决定在物化前不得携带最终 assignment；`NarratorNpcDecision.assignment` 对这两种
+target 必须为 `None`。具体 assignment 只能由物化后重新规划产生的 `NpcTurnRequest` 给出，避免把
+不了解最终 Profile 时生成的任务文本沿用到新角色。
+
+该物化后重规划是所有 Preset/Generated target 的唯一流程：不设置 `ReviewRequired`、关键角色
+等级或可选复核状态。Narrator 因而能在决定具体 NPC assignment 前看到生成后的姓名、Profile、
+属性、关系和当前状态；额外调用只发生在首次物化，Load 已保存 Generated NPC 时不得重新生成。
+MentionOnly 不创建 Entity，也不触发物化后重规划。
+
+同一 PlayerInput 内结构完全相同的 Preset/Generated `NarratorNpcDecision` 具有编排幂等语义：首次
+成功物化后，后续相同 ToolCall 返回既有 ActorId，不再次编译、生成或提交。需要创建多个同类角色
+时，Narrator 必须给出可区分的 role/purpose/target 决定；该编排去重不替代 Store 的 ActionId 幂等。
 
 Runtime 只执行受约束决定：
 
@@ -2191,50 +2230,52 @@ CI 使用最新 stable，不执行 MSRV Job，不允许 manifest 出现 `rust-ve
 12. 预设 Definition 与运行时 Draft 汇入同一 CharacterSpawnSpec/NpcFactory/SpawnNpcCommand；
 13. Content Pack 跨引用错误不会留下部分 Scene，Generated NPC 加载时不重新调用模型；
 14. Scene-scoped NPC 在 Scene 活跃时可存档恢复，产生持久引用前完成 Persistent promotion；
-15. NarratorPlan 中的 NpcTurnRequest 经 Runtime 校验后才按 Narrator 给出的顺序创建一次性
+15. Preset/Generated NPC 只在 planning Turn 结束后物化，并在同一玩家输入内把 committed ActorId
+    与完整角色投影交给 Narrator 重新规划；物化前的 provisional plan 不会启动 NpcAgent；
+16. NarratorPlan 中的 NpcTurnRequest 经 Runtime 校验后才按 Narrator 给出的顺序创建一次性
     NpcAgent；
-16. NpcAgent 的 CharacterContext、SceneContext 和 Assignment 绑定该 Turn 开始时的同一
+17. NpcAgent 的 CharacterContext、SceneContext 和 Assignment 绑定该 Turn 开始时的同一
     committed Revision；
-17. NpcAgent 不持有 Provider/World，也不能把 Character Snapshot 直接写回 ECS；
-18. EffectiveAttributes 按 Base、Flat、Multiply、Override、Clamp 与稳定 source 顺序重建；
-19. Resource current 和 Condition Instance 保存后等价恢复，effective maximum 可重新计算；
-20. Condition stack、duration、source、periodic effect 和 World Clock expiry 符合 Definition；
-21. LifeState、ActionState 和 Posture 可以并存，不能由单一 CharacterState 互相覆盖；
-22. 未诊断 Condition 只投影允许感知的症状，不泄漏真实 Condition 名称；
-23. Narrator 初始 Attribute/Condition Hint 经 NpcFactory 校验，创建后不能直接 set 状态；
-24. NPC Observation 不包含未授权世界事实或完整物品/技能内容库；
-25. Agent Tool 顺序、预算、取消和过期 Revision 行为符合本 Spec；
-26. 保存、关闭、重开后 Stable ID 与领域状态等价，不依赖旧 Bevy Entity；
-27. 回放固定记录不访问 Provider 并获得等价世界结果；
-28. Store 写入故障不会让 Runtime 把不确定状态继续当作已提交；
-29. Provider 失败后世界可继续或进入明确可恢复状态；
-30. Mock Bridge 的完整纵向切片无需网络通过；
-31. 宽屏双栏和窄屏降级都能完成查看、输入、取消与退出；
-32. 日志、错误、存档和测试快照不含 Secret；
-33. 最新 stable 的全部质量门禁通过且无 `rust-version`；
-34. 内置内容和外部 Mod 通过同一 Package/Registry/Factory/提交路径加载；
-35. Mod 依赖缺失、循环、哈希不匹配、重复 Definition 或无效 Patch 在 World 修改前失败；
-36. 模组 Parameter 值按 Schema、范围、引用和可见性校验，并可等价保存恢复；
-37. Event Option 在 current Revision 重新验证，过期或不满足 Predicate 时不产生 Effect；
-38. Rule Trigger/Predicate/Effect 按稳定顺序和预算执行，只能产生白名单 WorldCommand；
-39. `choose_event_option`/`perform_gameplay_action` 使用引擎通用 Tool，数据 Mod 不能注入 Handler；
-40. 包路径逃逸、超限文件/递归/解压和对文件、网络、Shell、Secret 的访问被拒绝；
-41. 存档使用精确 ModLock 重开，缺失或内容哈希不同的包不会被同名近似版本替代；
-42. 相同 ModLock、初始状态与规则记录无需 Provider 即可重建等价 Event/Parameter/世界状态；
-43. RecordOp、WorldEvent、Transcript 和 Revision 在故障注入下始终同成同败；
-44. 双连接从同一 expected Revision 竞争提交时恰好一个成功，重复 ActionId 不产生第二份结果；
-45. 提交前/中/后崩溃并重开时只出现完整 Revision N 或 N+1，不发布不确定 UiSnapshot；
-46. 一致备份可恢复到可加载 Revision，关闭、立即重开和存档切换不会串扰数据；
-47. Store 依赖可由干净 checkout 从公开来源解析，许可证、构建体积和性能满足发布门槛；
-48. NarratorAgent 与所有 NpcAgent Turn 不重叠执行，排队请求只在获得单一执行槽后从当前
+18. NpcAgent 不持有 Provider/World，也不能把 Character Snapshot 直接写回 ECS；
+19. EffectiveAttributes 按 Base、Flat、Multiply、Override、Clamp 与稳定 source 顺序重建；
+20. Resource current 和 Condition Instance 保存后等价恢复，effective maximum 可重新计算；
+21. Condition stack、duration、source、periodic effect 和 World Clock expiry 符合 Definition；
+22. LifeState、ActionState 和 Posture 可以并存，不能由单一 CharacterState 互相覆盖；
+23. 未诊断 Condition 只投影允许感知的症状，不泄漏真实 Condition 名称；
+24. Narrator 初始 Attribute/Condition Hint 经 NpcFactory 校验，创建后不能直接 set 状态；
+25. NPC Observation 不包含未授权世界事实或完整物品/技能内容库；
+26. Agent Tool 顺序、预算、取消和过期 Revision 行为符合本 Spec；
+27. 保存、关闭、重开后 Stable ID 与领域状态等价，不依赖旧 Bevy Entity；
+28. 回放固定记录不访问 Provider 并获得等价世界结果；
+29. Store 写入故障不会让 Runtime 把不确定状态继续当作已提交；
+30. Provider 失败后世界可继续或进入明确可恢复状态；
+31. Mock Bridge 的完整纵向切片无需网络通过；
+32. 宽屏双栏和窄屏降级都能完成查看、输入、取消与退出；
+33. 日志、错误、存档和测试快照不含 Secret；
+34. 最新 stable 的全部质量门禁通过且无 `rust-version`；
+35. 内置内容和外部 Mod 通过同一 Package/Registry/Factory/提交路径加载；
+36. Mod 依赖缺失、循环、哈希不匹配、重复 Definition 或无效 Patch 在 World 修改前失败；
+37. 模组 Parameter 值按 Schema、范围、引用和可见性校验，并可等价保存恢复；
+38. Event Option 在 current Revision 重新验证，过期或不满足 Predicate 时不产生 Effect；
+39. Rule Trigger/Predicate/Effect 按稳定顺序和预算执行，只能产生白名单 WorldCommand；
+40. `choose_event_option`/`perform_gameplay_action` 使用引擎通用 Tool，数据 Mod 不能注入 Handler；
+41. 包路径逃逸、超限文件/递归/解压和对文件、网络、Shell、Secret 的访问被拒绝；
+42. 存档使用精确 ModLock 重开，缺失或内容哈希不同的包不会被同名近似版本替代；
+43. 相同 ModLock、初始状态与规则记录无需 Provider 即可重建等价 Event/Parameter/世界状态；
+44. RecordOp、WorldEvent、Transcript 和 Revision 在故障注入下始终同成同败；
+45. 双连接从同一 expected Revision 竞争提交时恰好一个成功，重复 ActionId 不产生第二份结果；
+46. 提交前/中/后崩溃并重开时只出现完整 Revision N 或 N+1，不发布不确定 UiSnapshot；
+47. 一致备份可恢复到可加载 Revision，关闭、立即重开和存档切换不会串扰数据；
+48. Store 依赖可由干净 checkout 从公开来源解析，许可证、构建体积和性能满足发布门槛；
+49. NarratorAgent 与所有 NpcAgent Turn 不重叠执行，排队请求只在获得单一执行槽后从当前
     committed Revision 重新校验和投影；
-49. 玩家自然语言只进入 NarratorAgent，NpcTurnRequest 的数量和语义顺序由 NarratorPlan 决定，
+50. 玩家自然语言只进入 NarratorAgent，NpcTurnRequest 的数量和语义顺序由 NarratorPlan 决定，
     Runtime 不增加叙事优先级或公平性判断；
-50. NpcTurnResult 中的发言、意图和动作描述不会直接成为世界事实，NarratorSynthesis 只把成功
+51. NpcTurnResult 中的发言、意图和动作描述不会直接成为世界事实，NarratorSynthesis 只把成功
     ToolCall/WorldCommand 对应的 ToolResult/WorldEvent 叙述为已经发生；
-51. NarratorSynthesis 可以结束编排或在总预算内生成下一轮 NarratorPlan；不存在固定 NPC 数量
+52. NarratorSynthesis 可以结束编排或在总预算内生成下一轮 NarratorPlan；不存在固定 NPC 数量
     常量，配置化整轮/单 Turn 预算和最大编排轮数能终止循环；
-52. 等待 Provider 时 TUI 的流式显示、取消和退出保持响应，逻辑 World Clock 不随墙钟时间隐式
+53. 等待 Provider 时 TUI 的流式显示、取消和退出保持响应，逻辑 World Clock 不随墙钟时间隐式
     推进。
 
 ## 18. Active Spec 下的范围化实施门禁

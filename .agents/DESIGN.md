@@ -187,6 +187,11 @@ Loreloom Runtime ───────────────► Persistence
 45. Condition Clock 在 periodic 与 expiry 同 tick 时先执行 periodic，再重新校验并执行 expiry；周期
     Effect 作用于 Condition target。诊断不写回 Condition，而使用观察者拥有、以目标 Actor 为 subject、
     Condition Definition 为 value 的 confirmed KnownFact 决定是否投影真实名称。
+46. `NarratorPlan` 只调度已经提交且具有 `ActorId` 的角色。Narrator 请求 Preset/Generated NPC 时，
+    当前 planning Turn 先结束，Runtime 才能串行完成编译或 `npc_generation`、经统一
+    `CharacterSpawnSpec -> SpawnCharacter` 路径提交；随后 Runtime 在同一次玩家输入中把物化结果和
+    更新后的 Scene Observation 交给 Narrator 重新规划。Narrator 看过完整角色投影后才生成
+    `NpcTurnRequest`；不增加角色重要度、可选复核或未物化 target 的 Plan wire。
 
 项目方已于 2026-08-29 明确确认第 18–23 项的 Mod 子系统方向。该确认把 Content Mod、Rule Mod、
 统一导入路径、类型化参数、结构化 Event Option、通用 Gameplay Tool、ModLock 和 Extension Mod

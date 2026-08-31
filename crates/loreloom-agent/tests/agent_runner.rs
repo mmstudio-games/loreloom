@@ -50,6 +50,17 @@ fn tool_response(calls: Vec<ToolCall>) -> CompletionResponse {
     }
 }
 
+fn tool_definitions() -> Vec<ToolDefinition> {
+    ["commit_first", "inspect_after"]
+        .into_iter()
+        .map(|name| ToolDefinition {
+            name: name.to_owned(),
+            description: name.to_owned(),
+            input_schema: json!({ "type": "object", "additionalProperties": false }),
+        })
+        .collect()
+}
+
 #[derive(Default)]
 struct RecordingExecutor {
     calls: Mutex<Vec<(String, Revision)>>,
@@ -66,14 +77,7 @@ impl RecordingExecutor {
 
 impl ToolExecutor for RecordingExecutor {
     fn definitions(&self) -> Vec<ToolDefinition> {
-        ["commit_first", "inspect_after"]
-            .into_iter()
-            .map(|name| ToolDefinition {
-                name: name.to_owned(),
-                description: name.to_owned(),
-                input_schema: json!({ "type": "object", "additionalProperties": false }),
-            })
-            .collect()
+        tool_definitions()
     }
 
     fn execute<'a>(
@@ -122,6 +126,7 @@ fn invocation<'a>(
         bridge,
         request: CompletionRequest {
             messages: vec![Message::user("act")],
+            tools: tool_definitions(),
             ..CompletionRequest::default()
         },
         tool_context: AgentToolContext {
@@ -133,6 +138,29 @@ fn invocation<'a>(
         budget,
         cancellation,
     }
+}
+
+#[test]
+fn product_runner_rejects_a_known_tool_that_was_not_offered_to_the_model() {
+    let executor = Arc::new(RecordingExecutor::default());
+    let runner = AgentRunner::new(executor.clone());
+    let bridge = MockBridge::scripted([
+        MockResponse::completion(tool_response(vec![call("hidden-call", "commit_first")])),
+        MockResponse::text("done"),
+    ]);
+    let cancellation = CancellationToken::new();
+    let mut invocation = invocation(&bridge, &cancellation, ResourceBudget::default());
+    invocation.request.tools.clear();
+
+    let outcome = block_on(runner.run_turn(invocation));
+
+    assert_eq!(outcome.status, TurnStatus::Completed);
+    assert!(executor.calls().is_empty());
+    assert!(outcome.tool_results[0].is_error);
+    assert!(matches!(
+        &outcome.tool_results[0].content[..],
+        [ToolResultContent::Json { value }] if value["code"] == json!("tool_not_offered")
+    ));
 }
 
 #[test]

@@ -68,5 +68,6 @@ OPEN 项、后续 RFC 或 P0 Spike；空 crate 不代表相关协议已经实现
 - [x] 实现 Condition periodic/expiry scheduler、同 tick periodic-first、target Effect 与原子 Rule
   cascade；
 - [x] 实现 confirmed KnownFact 驱动的 Condition 诊断投影，未诊断视图不得包含真实名称；
-- [ ] 实现 Existing/Preset/Generated/Mentioned NpcTarget、Narrator generation stage 与统一物化路径；
+- [x] 实现 Existing/Preset/Generated/Mentioned NpcTarget、Narrator generation stage、统一物化路径，
+  并在 Preset/Generated 提交后于同一玩家输入内使用完整角色投影重新规划；
 - [ ] 满足 Active Spec 第 17 节全部验收条件。

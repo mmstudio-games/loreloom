@@ -17,26 +17,29 @@ use armillae_llm::{
 };
 use armillae_tools::{ToolContext, ToolExecutor};
 use loreloom_agent::{
-    AgentDefinition, AgentToolContext, NarratorPlan, NpcModelOutput, NpcTurnRequest, NpcTurnStatus,
+    AgentDefinition, AgentToolContext, NarrativeImportance, NarratorNpcDecision, NarratorPlan,
+    NpcControllerKind, NpcGenerationRequest, NpcLifetime, NpcModelOutput, NpcNarrativeAction,
+    NpcTarget, NpcTurnRequest, NpcTurnStatus,
 };
 use loreloom_content::{
-    AgentProfileDefinition, AttributeDefinition, CONTENT_SCHEMA_V1, ConditionDefinition,
-    ContainerDefinition, ContentDocument, ContentPackContext, Definition, DefinitionRegistry,
-    DurationPolicy, EffectDefinition, EventDefinition, EventNodeDefinition, EventOptionDefinition,
-    GameplayActionDefinition, ItemDefinition, ParameterDefinition, ParameterPersistence,
-    ParameterType, ParameterVisibility, PlaceDefinition, SceneDefinition, StackPolicy,
-    SymptomDefinition, TagDefinition, parse_content_hash,
+    AgentProfileDefinition, AttributeDefinition, CONTENT_SCHEMA_V1, CharacterDefinition,
+    ConditionDefinition, ContainerDefinition, ContentDocument, ContentPackContext, Definition,
+    DefinitionRegistry, DurationPolicy, EffectDefinition, EventDefinition, EventNodeDefinition,
+    EventOptionDefinition, GameplayActionDefinition, GenerationPolicy, ItemDefinition, NpcDraft,
+    ParameterDefinition, ParameterPersistence, ParameterType, ParameterVisibility, PlaceDefinition,
+    SceneDefinition, StackPolicy, SymptomDefinition, TagDefinition, parse_content_hash,
 };
 use loreloom_core::{
     ActionId, ActionState, ActorId, AgentBinding, AttributeAdjustment, AttributeOperation,
     BaseAttributes, CharacterController, CharacterLifetime, CharacterProfile, CharacterRecord,
     ConditionRecord, ConditionSource, ContentDefinitionId, ContentOrigin,
     DIAGNOSED_CONDITION_PREDICATE_ID, DisplayName, DomainRecord, EntityOrigin, EventInstanceRecord,
-    EventStatus, FactSource, FactSubject, FactValue, Fixed, IntensityPolicy, KnowledgeStatus,
-    KnownFactRecord, LifeState, LockedMod, LongText, ModId, ModLock, ModSourceKind, ObjectId,
-    ParameterSetRecord, ParameterValue, PlaceRecord, Posture, Revision, SAVE_FORMAT_V1, SaveId,
-    SaveManifest, SceneRecord, SessionId, ShortText, StackState, SystemIdGenerator,
-    TranscriptSpeaker, WorldCommand, WorldCommandKind, WorldId, WorldStateRecord, WorldTime,
+    EventStatus, FactSource, FactSubject, FactValue, Fixed, GenerationSource, IntensityPolicy,
+    KnowledgeStatus, KnownFactRecord, LifeState, LockedMod, LongText, ModId, ModLock,
+    ModSourceKind, ObjectId, ParameterSetRecord, ParameterValue, PlaceRecord, Posture, Revision,
+    SAVE_FORMAT_V1, SaveId, SaveManifest, SceneRecord, SessionId, ShortText, SpawnConstraints,
+    StackState, SystemIdGenerator, TranscriptSpeaker, WorldCommand, WorldCommandKind, WorldId,
+    WorldStateRecord, WorldTime,
 };
 use loreloom_runtime::{
     GameRuntime, RuntimeConfig, RuntimeError, RuntimeToolExecutor, WorldService,
@@ -82,7 +85,9 @@ struct Fixture {
     player: ActorId,
     npc: ActorId,
     scene: ObjectId,
+    place: ObjectId,
     profile_id: ContentDefinitionId,
+    preset_id: ContentDefinitionId,
     condition_id: ContentDefinitionId,
 }
 
@@ -90,6 +95,7 @@ fn fixture() -> Fixture {
     let mod_id = ModId::parse("games.loreloom.runtime").expect("mod id");
     let pack_id = definition_id("pack", "runtime");
     let profile_id = definition_id("agent_profile", "keeper");
+    let preset_id = definition_id("character", "watcher");
     let attribute_id = definition_id("attribute", "resolve");
     let public_parameter = definition_id("parameter", "rain_count");
     let hidden_parameter = definition_id("parameter", "secret_count");
@@ -142,6 +148,32 @@ fn fixture() -> Fixture {
                         model_alias: text("mock-npc"),
                         tool_capabilities: BTreeSet::from([text("advance_time")]),
                         autonomy: loreloom_core::AutonomyMode::Directed,
+                    }),
+                    Definition::Character(CharacterDefinition {
+                        id: preset_id.clone(),
+                        display_name: name("Orin"),
+                        profile: CharacterProfile {
+                            summary: text("A prepared witness from the content pack."),
+                            values: Vec::new(),
+                            speaking_style: text("Patient and exact."),
+                            narrative_tags: BTreeSet::new(),
+                        },
+                        agent_profile: Some(profile_id.clone()),
+                        base_attributes: BaseAttributes::default(),
+                        resources: Vec::new(),
+                        conditions: Vec::new(),
+                        inventory: Vec::new(),
+                        skills: Vec::new(),
+                        knowledge: Vec::new(),
+                        goals: Vec::new(),
+                        spawn_constraints: SpawnConstraints {
+                            minimum_attributes: BTreeMap::new(),
+                            maximum_attributes: BTreeMap::new(),
+                            maximum_attribute_points: Fixed::ZERO,
+                            maximum_items: 0,
+                            maximum_skills: 0,
+                            allowed_definitions: BTreeSet::new(),
+                        },
                     }),
                     Definition::Attribute(AttributeDefinition {
                         id: attribute_id.clone(),
@@ -406,7 +438,9 @@ fn fixture() -> Fixture {
         player,
         npc,
         scene,
+        place,
         profile_id,
+        preset_id,
         condition_id,
     }
 }
@@ -475,6 +509,17 @@ fn text_response(text: impl Into<String>) -> CompletionResponse {
         model: Some("mock-narrator".to_owned()),
         content: vec![AssistantContent::Text(TextContent::new(text))],
         finish_reason: Some(FinishReason::Stop),
+        usage: None,
+        provider_metadata: JsonValue::Null,
+    }
+}
+
+fn tool_response(call: ToolCall) -> CompletionResponse {
+    CompletionResponse {
+        id: None,
+        model: Some("mock-narrator".to_owned()),
+        content: vec![AssistantContent::ToolCall(call)],
+        finish_reason: Some(FinishReason::ToolCall),
         usage: None,
         provider_metadata: JsonValue::Null,
     }
@@ -640,6 +685,648 @@ impl LlmBridge for NarratorBridge {
     }
 }
 
+struct GeneratedNarratorBridge {
+    scene_id: ObjectId,
+    place_id: ObjectId,
+    profile_id: ContentDefinitionId,
+    policy_id: ContentDefinitionId,
+    calls: AtomicUsize,
+    saw_materialized_profile: std::sync::atomic::AtomicBool,
+    repeat_materialization: bool,
+    materialized_actor: std::sync::Mutex<Option<(ActorId, Revision)>>,
+}
+
+impl GeneratedNarratorBridge {
+    fn new(
+        scene_id: ObjectId,
+        place_id: ObjectId,
+        profile_id: ContentDefinitionId,
+        policy_id: ContentDefinitionId,
+    ) -> Self {
+        Self {
+            scene_id,
+            place_id,
+            profile_id,
+            policy_id,
+            calls: AtomicUsize::new(0),
+            saw_materialized_profile: std::sync::atomic::AtomicBool::new(false),
+            repeat_materialization: false,
+            materialized_actor: std::sync::Mutex::new(None),
+        }
+    }
+
+    fn repeating(
+        scene_id: ObjectId,
+        place_id: ObjectId,
+        profile_id: ContentDefinitionId,
+        policy_id: ContentDefinitionId,
+    ) -> Self {
+        Self {
+            repeat_materialization: true,
+            ..Self::new(scene_id, place_id, profile_id, policy_id)
+        }
+    }
+
+    fn decision(&self) -> NarratorNpcDecision {
+        NarratorNpcDecision {
+            target: NpcTarget::Generated {
+                generation_policy_id: self.policy_id.clone(),
+                place_id: self.place_id,
+                request: NpcGenerationRequest {
+                    scene_id: self.scene_id,
+                    role: text("witness"),
+                    purpose: LongText::new(
+                        "Create a witness who can answer the player's question.",
+                    )
+                    .expect("generation purpose"),
+                    desired_traits: BTreeSet::new(),
+                    importance: NarrativeImportance::Supporting,
+                },
+            },
+            action: NpcNarrativeAction::RequestNpcTurn,
+            lifetime: NpcLifetime::Scene,
+            controller: NpcControllerKind::Agent(self.profile_id.clone()),
+            assignment: None,
+        }
+    }
+
+    fn plan_response(&self, actor_id: ActorId, revision: Revision) -> CompletionResponse {
+        text_response(
+            serde_json::to_string(&NarratorPlan {
+                based_on_revision: revision,
+                npc_turns: vec![NpcTurnRequest {
+                    request_id: parse("ntr_01890f6a-2ba0-7d4e-8f90-123456789abc"),
+                    actor_id,
+                    scene_id: self.scene_id,
+                    based_on_revision: revision,
+                    assignment: loreloom_agent::AssignmentText::new(
+                        "Answer according to the character that now exists.",
+                    )
+                    .expect("generated assignment"),
+                }],
+            })
+            .expect("replanned plan"),
+        )
+    }
+}
+
+impl LlmBridge for GeneratedNarratorBridge {
+    fn capabilities(&self) -> BridgeCapabilities {
+        BridgeCapabilities::all()
+    }
+
+    fn project(&self, _request: &CompletionRequest) -> Result<ProjectionReport, BridgeError> {
+        Ok(ProjectionReport::exact("runtime-generation-test"))
+    }
+
+    fn complete<'a>(
+        &'a self,
+        request: CompletionRequest,
+    ) -> BridgeFuture<'a, Result<CompletionResponse, BridgeError>> {
+        Box::pin(async move {
+            let call = self.calls.fetch_add(1, Ordering::SeqCst);
+            match call {
+                0 => Ok(tool_response(ToolCall {
+                    id: ToolCallId::new("materialize-witness").expect("tool call ID"),
+                    name: "materialize_npc".to_owned(),
+                    arguments: serde_json::to_value(self.decision())
+                        .expect("materialization arguments"),
+                })),
+                1 => Ok(text_response(
+                    serde_json::to_string(&NarratorPlan {
+                        based_on_revision: Revision::new(1),
+                        npc_turns: Vec::new(),
+                    })
+                    .expect("provisional plan"),
+                )),
+                2 => Ok(text_response(
+                    serde_json::to_string(&NpcDraft {
+                        display_name: name("Ilya"),
+                        profile: CharacterProfile {
+                            summary: text("A rain-soaked witness with a careful memory."),
+                            values: Vec::new(),
+                            speaking_style: text("Careful and concrete."),
+                            narrative_tags: BTreeSet::new(),
+                        },
+                        agent_profile: Some(self.profile_id.clone()),
+                        base_attributes: BaseAttributes::default(),
+                        resources: Vec::new(),
+                        conditions: Vec::new(),
+                        inventory: Vec::new(),
+                        skills: Vec::new(),
+                        knowledge: Vec::new(),
+                        goals: Vec::new(),
+                    })
+                    .expect("generated draft"),
+                )),
+                3 => {
+                    let payload = request
+                        .messages
+                        .iter()
+                        .rev()
+                        .find_map(|message| {
+                            message.content.iter().find_map(|part| match part {
+                                armillae_core::ContentPart::Text(text) => {
+                                    serde_json::from_str::<JsonValue>(&text.text).ok()
+                                }
+                                _ => None,
+                            })
+                        })
+                        .ok_or_else(|| BridgeError::InvalidRequest {
+                            message: "missing replanning payload".to_owned(),
+                        })?;
+                    let result = &payload["payload"]["materialization_results"][0];
+                    let actor_id = serde_json::from_value::<ActorId>(result["actor_id"].clone())
+                        .map_err(|_| BridgeError::InvalidRequest {
+                            message: "missing materialized actor".to_owned(),
+                        })?;
+                    let revision = serde_json::from_value::<Revision>(result["revision"].clone())
+                        .map_err(|_| BridgeError::InvalidRequest {
+                        message: "missing materialized revision".to_owned(),
+                    })?;
+                    let visible = payload["payload"]["observation"]["scene"]["visible_actors"]
+                        .as_array()
+                        .is_some_and(|actors| {
+                            actors.iter().any(|actor| {
+                                actor["actor_id"] == json!(actor_id)
+                                    && actor["display_name"] == json!("Ilya")
+                            })
+                        });
+                    self.saw_materialized_profile
+                        .store(visible, Ordering::SeqCst);
+                    if self.repeat_materialization {
+                        *self
+                            .materialized_actor
+                            .lock()
+                            .expect("materialized actor lock") = Some((actor_id, revision));
+                        Ok(tool_response(ToolCall {
+                            id: ToolCallId::new("repeat-materialize-witness")
+                                .expect("repeat tool call ID"),
+                            name: "materialize_npc".to_owned(),
+                            arguments: serde_json::to_value(self.decision())
+                                .expect("repeated materialization arguments"),
+                        }))
+                    } else {
+                        Ok(self.plan_response(actor_id, revision))
+                    }
+                }
+                4 => {
+                    if self.repeat_materialization {
+                        let (actor_id, revision) = self
+                            .materialized_actor
+                            .lock()
+                            .expect("materialized actor lock")
+                            .expect("materialized actor");
+                        return Ok(self.plan_response(actor_id, revision));
+                    }
+                    let payload = request
+                        .messages
+                        .iter()
+                        .rev()
+                        .find_map(|message| {
+                            message.content.iter().find_map(|part| match part {
+                                armillae_core::ContentPart::Text(text) => {
+                                    serde_json::from_str::<JsonValue>(&text.text).ok()
+                                }
+                                _ => None,
+                            })
+                        })
+                        .ok_or_else(|| BridgeError::InvalidRequest {
+                            message: "missing synthesis payload".to_owned(),
+                        })?;
+                    Ok(text_response(
+                        serde_json::to_string(&json!({
+                            "kind": "final",
+                            "based_on_revision": payload["payload"]["revision"],
+                            "narration": "Ilya answers only after becoming part of the world.",
+                            "supporting_events": []
+                        }))
+                        .expect("generated synthesis"),
+                    ))
+                }
+                5 if self.repeat_materialization => {
+                    let payload = request
+                        .messages
+                        .iter()
+                        .rev()
+                        .find_map(|message| {
+                            message.content.iter().find_map(|part| match part {
+                                armillae_core::ContentPart::Text(text) => {
+                                    serde_json::from_str::<JsonValue>(&text.text).ok()
+                                }
+                                _ => None,
+                            })
+                        })
+                        .ok_or_else(|| BridgeError::InvalidRequest {
+                            message: "missing repeated synthesis payload".to_owned(),
+                        })?;
+                    Ok(text_response(
+                        serde_json::to_string(&json!({
+                            "kind": "final",
+                            "based_on_revision": payload["payload"]["revision"],
+                            "narration": "Ilya answers only after becoming part of the world.",
+                            "supporting_events": []
+                        }))
+                        .expect("repeated generated synthesis"),
+                    ))
+                }
+                _ => Err(BridgeError::InvalidRequest {
+                    message: "unexpected narrator call".to_owned(),
+                }),
+            }
+        })
+    }
+
+    fn stream<'a>(
+        &'a self,
+        _request: CompletionRequest,
+    ) -> BridgeFuture<'a, Result<CompletionStream, BridgeError>> {
+        Box::pin(async {
+            Err(BridgeError::InvalidRequest {
+                message: "streaming is not used".to_owned(),
+            })
+        })
+    }
+}
+
+struct PresetNarratorBridge {
+    scene_id: ObjectId,
+    place_id: ObjectId,
+    character_id: ContentDefinitionId,
+    profile_id: ContentDefinitionId,
+    calls: AtomicUsize,
+    saw_materialized_profile: std::sync::atomic::AtomicBool,
+}
+
+impl PresetNarratorBridge {
+    fn new(
+        scene_id: ObjectId,
+        place_id: ObjectId,
+        character_id: ContentDefinitionId,
+        profile_id: ContentDefinitionId,
+    ) -> Self {
+        Self {
+            scene_id,
+            place_id,
+            character_id,
+            profile_id,
+            calls: AtomicUsize::new(0),
+            saw_materialized_profile: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+}
+
+impl LlmBridge for PresetNarratorBridge {
+    fn capabilities(&self) -> BridgeCapabilities {
+        BridgeCapabilities::all()
+    }
+
+    fn project(&self, _request: &CompletionRequest) -> Result<ProjectionReport, BridgeError> {
+        Ok(ProjectionReport::exact("runtime-preset-test"))
+    }
+
+    fn complete<'a>(
+        &'a self,
+        request: CompletionRequest,
+    ) -> BridgeFuture<'a, Result<CompletionResponse, BridgeError>> {
+        Box::pin(async move {
+            let call = self.calls.fetch_add(1, Ordering::SeqCst);
+            match call {
+                0 => Ok(tool_response(ToolCall {
+                    id: ToolCallId::new("materialize-preset").expect("tool call ID"),
+                    name: "materialize_npc".to_owned(),
+                    arguments: serde_json::to_value(NarratorNpcDecision {
+                        target: NpcTarget::Preset {
+                            character_id: self.character_id.clone(),
+                            place_id: self.place_id,
+                        },
+                        action: NpcNarrativeAction::RequestNpcTurn,
+                        lifetime: NpcLifetime::Persistent,
+                        controller: NpcControllerKind::Agent(self.profile_id.clone()),
+                        assignment: None,
+                    })
+                    .expect("preset decision"),
+                })),
+                1 => Ok(text_response(
+                    serde_json::to_string(&NarratorPlan {
+                        based_on_revision: Revision::new(1),
+                        npc_turns: Vec::new(),
+                    })
+                    .expect("preset provisional plan"),
+                )),
+                2 => {
+                    let payload = request
+                        .messages
+                        .iter()
+                        .rev()
+                        .find_map(|message| {
+                            message.content.iter().find_map(|part| match part {
+                                armillae_core::ContentPart::Text(text) => {
+                                    serde_json::from_str::<JsonValue>(&text.text).ok()
+                                }
+                                _ => None,
+                            })
+                        })
+                        .ok_or_else(|| BridgeError::InvalidRequest {
+                            message: "missing preset replanning payload".to_owned(),
+                        })?;
+                    let result = &payload["payload"]["materialization_results"][0];
+                    let actor_id = serde_json::from_value::<ActorId>(result["actor_id"].clone())
+                        .map_err(|_| BridgeError::InvalidRequest {
+                            message: "missing preset actor".to_owned(),
+                        })?;
+                    let revision = serde_json::from_value::<Revision>(result["revision"].clone())
+                        .map_err(|_| BridgeError::InvalidRequest {
+                        message: "missing preset revision".to_owned(),
+                    })?;
+                    let visible = payload["payload"]["observation"]["scene"]["visible_actors"]
+                        .as_array()
+                        .is_some_and(|actors| {
+                            actors.iter().any(|actor| {
+                                actor["actor_id"] == json!(actor_id)
+                                    && actor["display_name"] == json!("Orin")
+                            })
+                        });
+                    self.saw_materialized_profile
+                        .store(visible, Ordering::SeqCst);
+                    Ok(text_response(
+                        serde_json::to_string(&NarratorPlan {
+                            based_on_revision: revision,
+                            npc_turns: vec![NpcTurnRequest {
+                                request_id: parse("ntr_01890f6a-2ba2-7d4e-8f90-123456789abc"),
+                                actor_id,
+                                scene_id: self.scene_id,
+                                based_on_revision: revision,
+                                assignment: loreloom_agent::AssignmentText::new(
+                                    "Respond as the fully loaded preset character.",
+                                )
+                                .expect("preset assignment"),
+                            }],
+                        })
+                        .expect("preset replanned plan"),
+                    ))
+                }
+                3 => {
+                    let payload = request
+                        .messages
+                        .iter()
+                        .rev()
+                        .find_map(|message| {
+                            message.content.iter().find_map(|part| match part {
+                                armillae_core::ContentPart::Text(text) => {
+                                    serde_json::from_str::<JsonValue>(&text.text).ok()
+                                }
+                                _ => None,
+                            })
+                        })
+                        .ok_or_else(|| BridgeError::InvalidRequest {
+                            message: "missing preset synthesis payload".to_owned(),
+                        })?;
+                    Ok(text_response(
+                        serde_json::to_string(&json!({
+                            "kind": "final",
+                            "based_on_revision": payload["payload"]["revision"],
+                            "narration": "Orin joins the conversation from the prepared cast.",
+                            "supporting_events": []
+                        }))
+                        .expect("preset synthesis"),
+                    ))
+                }
+                _ => Err(BridgeError::InvalidRequest {
+                    message: "unexpected preset narrator call".to_owned(),
+                }),
+            }
+        })
+    }
+
+    fn stream<'a>(
+        &'a self,
+        _request: CompletionRequest,
+    ) -> BridgeFuture<'a, Result<CompletionStream, BridgeError>> {
+        Box::pin(async {
+            Err(BridgeError::InvalidRequest {
+                message: "streaming is not used".to_owned(),
+            })
+        })
+    }
+}
+
+#[derive(Clone, Copy)]
+enum GenerationRejectionMode {
+    ResourceLimit,
+    ProviderFailure,
+}
+
+struct RejectedGenerationBridge {
+    scene_id: ObjectId,
+    place_id: ObjectId,
+    profile_id: ContentDefinitionId,
+    policy_id: ContentDefinitionId,
+    mode: GenerationRejectionMode,
+    calls: AtomicUsize,
+    saw_rejection: std::sync::atomic::AtomicBool,
+}
+
+impl RejectedGenerationBridge {
+    fn new(
+        fixture: &Fixture,
+        policy_id: ContentDefinitionId,
+        mode: GenerationRejectionMode,
+    ) -> Self {
+        Self {
+            scene_id: fixture.scene,
+            place_id: fixture.place,
+            profile_id: fixture.profile_id.clone(),
+            policy_id,
+            mode,
+            calls: AtomicUsize::new(0),
+            saw_rejection: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+
+    fn decision(&self) -> NarratorNpcDecision {
+        NarratorNpcDecision {
+            target: NpcTarget::Generated {
+                generation_policy_id: self.policy_id.clone(),
+                place_id: self.place_id,
+                request: NpcGenerationRequest {
+                    scene_id: self.scene_id,
+                    role: text("witness"),
+                    purpose: LongText::new("Create one bounded witness.")
+                        .expect("generation purpose"),
+                    desired_traits: BTreeSet::new(),
+                    importance: NarrativeImportance::Supporting,
+                },
+            },
+            action: NpcNarrativeAction::RequestNpcTurn,
+            lifetime: NpcLifetime::Scene,
+            controller: NpcControllerKind::Agent(self.profile_id.clone()),
+            assignment: None,
+        }
+    }
+}
+
+impl LlmBridge for RejectedGenerationBridge {
+    fn capabilities(&self) -> BridgeCapabilities {
+        BridgeCapabilities::all()
+    }
+
+    fn project(&self, _request: &CompletionRequest) -> Result<ProjectionReport, BridgeError> {
+        Ok(ProjectionReport::exact("runtime-rejected-generation"))
+    }
+
+    fn complete<'a>(
+        &'a self,
+        request: CompletionRequest,
+    ) -> BridgeFuture<'a, Result<CompletionResponse, BridgeError>> {
+        Box::pin(async move {
+            let call = self.calls.fetch_add(1, Ordering::SeqCst);
+            if call == 0 {
+                return Ok(tool_response(ToolCall {
+                    id: ToolCallId::new("rejected-generation").expect("tool call ID"),
+                    name: "materialize_npc".to_owned(),
+                    arguments: serde_json::to_value(self.decision()).expect("generation decision"),
+                }));
+            }
+            if call == 1 {
+                return Ok(text_response(
+                    serde_json::to_string(&NarratorPlan {
+                        based_on_revision: Revision::new(1),
+                        npc_turns: Vec::new(),
+                    })
+                    .expect("provisional rejection plan"),
+                ));
+            }
+            if matches!(self.mode, GenerationRejectionMode::ProviderFailure) && call == 2 {
+                return Err(BridgeError::InvalidRequest {
+                    message: "injected generation failure".to_owned(),
+                });
+            }
+            let replanning_call = match self.mode {
+                GenerationRejectionMode::ResourceLimit => 2,
+                GenerationRejectionMode::ProviderFailure => 3,
+            };
+            if call == replanning_call {
+                let payload = request
+                    .messages
+                    .iter()
+                    .rev()
+                    .find_map(|message| {
+                        message.content.iter().find_map(|part| match part {
+                            armillae_core::ContentPart::Text(text) => {
+                                serde_json::from_str::<JsonValue>(&text.text).ok()
+                            }
+                            _ => None,
+                        })
+                    })
+                    .ok_or_else(|| BridgeError::InvalidRequest {
+                        message: "missing rejection replanning payload".to_owned(),
+                    })?;
+                let result = &payload["payload"]["materialization_results"][0];
+                let expected_reason = match self.mode {
+                    GenerationRejectionMode::ResourceLimit => "generation_limit",
+                    GenerationRejectionMode::ProviderFailure => "bridge_unavailable",
+                };
+                self.saw_rejection.store(
+                    result["status"] == json!("rejected")
+                        && result["reason"] == json!(expected_reason)
+                        && result.get("actor_id").is_none(),
+                    Ordering::SeqCst,
+                );
+                return Ok(text_response(
+                    serde_json::to_string(&NarratorPlan {
+                        based_on_revision: Revision::new(1),
+                        npc_turns: Vec::new(),
+                    })
+                    .expect("recovery plan"),
+                ));
+            }
+            if call == replanning_call + 1 {
+                return Ok(text_response(
+                    serde_json::to_string(&json!({
+                        "kind": "final",
+                        "based_on_revision": 1,
+                        "narration": "No new witness enters the scene.",
+                        "supporting_events": []
+                    }))
+                    .expect("rejection synthesis"),
+                ));
+            }
+            Err(BridgeError::InvalidRequest {
+                message: "unexpected rejected generation call".to_owned(),
+            })
+        })
+    }
+
+    fn stream<'a>(
+        &'a self,
+        _request: CompletionRequest,
+    ) -> BridgeFuture<'a, Result<CompletionStream, BridgeError>> {
+        Box::pin(async {
+            Err(BridgeError::InvalidRequest {
+                message: "streaming is not used".to_owned(),
+            })
+        })
+    }
+}
+
+struct CancellableGenerationBridge {
+    decision: NarratorNpcDecision,
+    calls: AtomicUsize,
+    entered_generation: Arc<tokio::sync::Notify>,
+}
+
+impl LlmBridge for CancellableGenerationBridge {
+    fn capabilities(&self) -> BridgeCapabilities {
+        BridgeCapabilities::all()
+    }
+
+    fn project(&self, _request: &CompletionRequest) -> Result<ProjectionReport, BridgeError> {
+        Ok(ProjectionReport::exact("runtime-cancellable-generation"))
+    }
+
+    fn complete<'a>(
+        &'a self,
+        _request: CompletionRequest,
+    ) -> BridgeFuture<'a, Result<CompletionResponse, BridgeError>> {
+        Box::pin(async move {
+            match self.calls.fetch_add(1, Ordering::SeqCst) {
+                0 => Ok(tool_response(ToolCall {
+                    id: ToolCallId::new("cancelled-generation").expect("tool call ID"),
+                    name: "materialize_npc".to_owned(),
+                    arguments: serde_json::to_value(&self.decision)
+                        .expect("cancelled generation decision"),
+                })),
+                1 => Ok(text_response(
+                    serde_json::to_string(&NarratorPlan {
+                        based_on_revision: Revision::new(1),
+                        npc_turns: Vec::new(),
+                    })
+                    .expect("cancel provisional plan"),
+                )),
+                2 => {
+                    self.entered_generation.notify_one();
+                    std::future::pending::<Result<CompletionResponse, BridgeError>>().await
+                }
+                _ => Err(BridgeError::InvalidRequest {
+                    message: "unexpected cancellation call".to_owned(),
+                }),
+            }
+        })
+    }
+
+    fn stream<'a>(
+        &'a self,
+        _request: CompletionRequest,
+    ) -> BridgeFuture<'a, Result<CompletionStream, BridgeError>> {
+        Box::pin(async {
+            Err(BridgeError::InvalidRequest {
+                message: "streaming is not used".to_owned(),
+            })
+        })
+    }
+}
+
 fn request(actor_id: ActorId, scene_id: ObjectId) -> NpcTurnRequest {
     NpcTurnRequest {
         request_id: parse("ntr_01890f6a-2b60-7d4e-8f90-123456789abc"),
@@ -681,6 +1368,24 @@ fn npc_bridge() -> Arc<MockBridge> {
             .expect("npc output"),
         ),
     ]))
+}
+
+fn generation_policy(
+    policy_id: ContentDefinitionId,
+    profile_id: ContentDefinitionId,
+) -> GenerationPolicy {
+    GenerationPolicy {
+        id: policy_id,
+        constraints: SpawnConstraints {
+            minimum_attributes: BTreeMap::new(),
+            maximum_attributes: BTreeMap::new(),
+            maximum_attribute_points: Fixed::ZERO,
+            maximum_items: 0,
+            maximum_skills: 0,
+            allowed_definitions: BTreeSet::new(),
+        },
+        allowed_agent_profiles: BTreeSet::from([profile_id]),
+    }
 }
 
 #[tokio::test]
@@ -804,6 +1509,494 @@ async fn player_narrator_npc_and_surreal_store_form_a_durable_vertical_slice() {
     .expect("rebuild without a provider");
     assert_eq!(rebuilt.world_state().clock, WorldTime::from_ticks(1));
     drop((runtime, service, observer));
+}
+
+#[tokio::test]
+async fn generated_npc_is_committed_before_narrator_replans_and_dispatches_it() {
+    let directory = TempDir::new().expect("temporary save parent");
+    let fixture = fixture();
+    let store = SaveStore::create(
+        directory.path().join("save"),
+        fixture.manifest.clone(),
+        fixture.records.clone(),
+    )
+    .await
+    .expect("create save");
+    let mut observer = store.connect().await.expect("observer connection");
+    let service = WorldService::open(
+        store,
+        fixture.registry.clone(),
+        &fixture.manifest.mod_lock,
+        fixture.world_config.clone(),
+    )
+    .await
+    .expect("open service");
+    let policy_id = definition_id("generation_policy", "witness");
+    let policy = GenerationPolicy {
+        id: policy_id.clone(),
+        constraints: SpawnConstraints {
+            minimum_attributes: BTreeMap::new(),
+            maximum_attributes: BTreeMap::new(),
+            maximum_attribute_points: Fixed::ZERO,
+            maximum_items: 0,
+            maximum_skills: 0,
+            allowed_definitions: BTreeSet::new(),
+        },
+        allowed_agent_profiles: BTreeSet::from([fixture.profile_id.clone()]),
+    };
+    let narrator = Arc::new(GeneratedNarratorBridge::new(
+        fixture.scene,
+        fixture.place,
+        fixture.profile_id.clone(),
+        policy_id.clone(),
+    ));
+    let npc = Arc::new(MockBridge::scripted([MockResponse::text(
+        serde_json::to_string(&NpcModelOutput {
+            utterance: Some(
+                loreloom_agent::UtteranceText::new("I saw the lantern before the rain.")
+                    .expect("utterance"),
+            ),
+            intent: Some(loreloom_agent::IntentText::new("answer truthfully").expect("intent")),
+            claimed_action_description: None,
+        })
+        .expect("NPC output"),
+    )]));
+    let mut config = RuntimeConfig::default();
+    config.generation_policies.insert(policy_id, policy);
+    let mut runtime = GameRuntime::new(
+        Arc::clone(&service),
+        narrator.clone(),
+        parse("ses_01890f6a-2ba1-7d4e-8f90-123456789abc"),
+        config,
+    );
+    runtime.set_default_npc_bridge(npc.clone());
+
+    let outcome = runtime
+        .handle_player_input("Ask whether anyone saw the lantern.")
+        .await
+        .expect("complete generated NPC turn");
+
+    assert!(narrator.saw_materialized_profile.load(Ordering::SeqCst));
+    assert_eq!(narrator.calls.load(Ordering::SeqCst), 5);
+    assert_eq!(npc.requests().expect("NPC request log").len(), 1);
+    assert_eq!(outcome.npc_results.len(), 1);
+    assert_eq!(outcome.npc_results[0].status, NpcTurnStatus::Completed);
+    assert_eq!(
+        outcome.npc_results[0].observed_revision,
+        Some(Revision::new(2))
+    );
+    assert_eq!(outcome.snapshot.revision, Revision::new(3));
+    assert_eq!(
+        outcome.narration.as_str(),
+        "Ilya answers only after becoming part of the world."
+    );
+
+    let loaded = observer.load().await.expect("load generated save");
+    let generated = loaded
+        .records
+        .iter()
+        .find_map(|record| match record {
+            DomainRecord::Character(character) if character.display_name.as_str() == "Ilya" => {
+                Some(character)
+            }
+            _ => None,
+        })
+        .expect("generated character is durable");
+    assert_eq!(
+        generated.lifetime,
+        CharacterLifetime::Scene {
+            scene_id: fixture.scene
+        }
+    );
+    let EntityOrigin::Generated { origin } = &generated.origin else {
+        panic!("generated provenance")
+    };
+    assert!(matches!(
+        origin.source,
+        GenerationSource::PlayerInput { transcript_id }
+            if transcript_id == loaded.transcripts[0].id
+    ));
+    GameWorld::from_records(
+        loaded.revision,
+        loaded.records,
+        fixture.world_config,
+        &fixture.registry,
+    )
+    .expect("generated save rebuilds without a provider");
+}
+
+#[tokio::test]
+async fn repeated_materialization_request_does_not_generate_a_second_character() {
+    let directory = TempDir::new().expect("temporary save parent");
+    let fixture = fixture();
+    let store = SaveStore::create(
+        directory.path().join("save"),
+        fixture.manifest.clone(),
+        fixture.records.clone(),
+    )
+    .await
+    .expect("create save");
+    let mut observer = store.connect().await.expect("observer connection");
+    let service = WorldService::open(
+        store,
+        fixture.registry,
+        &fixture.manifest.mod_lock,
+        fixture.world_config,
+    )
+    .await
+    .expect("open service");
+    let policy_id = definition_id("generation_policy", "deduplicated");
+    let narrator = Arc::new(GeneratedNarratorBridge::repeating(
+        fixture.scene,
+        fixture.place,
+        fixture.profile_id.clone(),
+        policy_id.clone(),
+    ));
+    let npc = Arc::new(MockBridge::scripted([MockResponse::text(
+        serde_json::to_string(&NpcModelOutput {
+            utterance: Some(
+                loreloom_agent::UtteranceText::new("There is still only one of me.")
+                    .expect("utterance"),
+            ),
+            intent: None,
+            claimed_action_description: None,
+        })
+        .expect("NPC output"),
+    )]));
+    let mut config = RuntimeConfig::default();
+    config.generation_policies.insert(
+        policy_id.clone(),
+        generation_policy(policy_id, fixture.profile_id),
+    );
+    let mut runtime = GameRuntime::new(
+        service,
+        narrator.clone(),
+        parse("ses_01890f6a-2ba7-7d4e-8f90-123456789abc"),
+        config,
+    );
+    runtime.set_default_npc_bridge(npc.clone());
+
+    runtime
+        .handle_player_input("Find the same witness twice, then ask once.")
+        .await
+        .expect("complete deduplicated NPC turn");
+
+    assert_eq!(narrator.calls.load(Ordering::SeqCst), 6);
+    assert_eq!(npc.requests().expect("NPC requests").len(), 1);
+    let loaded = observer.load().await.expect("load deduplicated save");
+    assert_eq!(
+        loaded
+            .records
+            .iter()
+            .filter(|record| matches!(
+                record,
+                DomainRecord::Character(CharacterRecord {
+                    origin: EntityOrigin::Generated { .. },
+                    ..
+                })
+            ))
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn preset_npc_uses_the_same_spawn_event_and_post_commit_replanning_barrier() {
+    let directory = TempDir::new().expect("temporary save parent");
+    let fixture = fixture();
+    let store = SaveStore::create(
+        directory.path().join("save"),
+        fixture.manifest.clone(),
+        fixture.records.clone(),
+    )
+    .await
+    .expect("create save");
+    let mut observer = store.connect().await.expect("observer connection");
+    let service = WorldService::open(
+        store,
+        fixture.registry.clone(),
+        &fixture.manifest.mod_lock,
+        fixture.world_config.clone(),
+    )
+    .await
+    .expect("open service");
+    let narrator = Arc::new(PresetNarratorBridge::new(
+        fixture.scene,
+        fixture.place,
+        fixture.preset_id.clone(),
+        fixture.profile_id.clone(),
+    ));
+    let npc = Arc::new(MockBridge::scripted([MockResponse::text(
+        serde_json::to_string(&NpcModelOutput {
+            utterance: Some(
+                loreloom_agent::UtteranceText::new("I was already expected.")
+                    .expect("preset utterance"),
+            ),
+            intent: None,
+            claimed_action_description: None,
+        })
+        .expect("preset NPC output"),
+    )]));
+    let mut runtime = GameRuntime::new(
+        Arc::clone(&service),
+        narrator.clone(),
+        parse("ses_01890f6a-2ba3-7d4e-8f90-123456789abc"),
+        RuntimeConfig::default(),
+    );
+    runtime.set_default_npc_bridge(npc.clone());
+
+    let outcome = runtime
+        .handle_player_input("Invite the expected witness into the conversation.")
+        .await
+        .expect("complete preset NPC turn");
+
+    assert!(narrator.saw_materialized_profile.load(Ordering::SeqCst));
+    assert_eq!(narrator.calls.load(Ordering::SeqCst), 4);
+    assert_eq!(npc.requests().expect("preset NPC requests").len(), 1);
+    assert_eq!(outcome.npc_results.len(), 1);
+    assert_eq!(
+        outcome.npc_results[0].observed_revision,
+        Some(Revision::new(2))
+    );
+    assert_eq!(outcome.snapshot.revision, Revision::new(3));
+
+    let loaded = observer.load().await.expect("load preset save");
+    let preset = loaded
+        .records
+        .iter()
+        .find_map(|record| match record {
+            DomainRecord::Character(character) if character.display_name.as_str() == "Orin" => {
+                Some(character)
+            }
+            _ => None,
+        })
+        .expect("preset character is durable");
+    assert_eq!(preset.lifetime, CharacterLifetime::Persistent);
+    assert!(matches!(preset.origin, EntityOrigin::Content { .. }));
+    assert!(service.events().await.iter().any(|event| {
+        matches!(
+            event.kind,
+            loreloom_core::WorldEventKind::CharacterSpawned { character_id }
+                if character_id == preset.id
+        )
+    }));
+}
+
+#[tokio::test]
+async fn generation_limits_and_provider_failures_return_to_narrator_without_partial_npcs() {
+    for (index, mode) in [
+        GenerationRejectionMode::ResourceLimit,
+        GenerationRejectionMode::ProviderFailure,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let directory = TempDir::new().expect("temporary save parent");
+        let fixture = fixture();
+        let store = SaveStore::create(
+            directory.path().join("save"),
+            fixture.manifest.clone(),
+            fixture.records.clone(),
+        )
+        .await
+        .expect("create save");
+        let mut observer = store.connect().await.expect("observer connection");
+        let service = WorldService::open(
+            store,
+            fixture.registry.clone(),
+            &fixture.manifest.mod_lock,
+            fixture.world_config.clone(),
+        )
+        .await
+        .expect("open service");
+        let policy_id = definition_id("generation_policy", "rejected");
+        let narrator = Arc::new(RejectedGenerationBridge::new(
+            &fixture,
+            policy_id.clone(),
+            mode,
+        ));
+        let mut config = RuntimeConfig::default();
+        config.generation_policies.insert(
+            policy_id.clone(),
+            generation_policy(policy_id, fixture.profile_id),
+        );
+        if matches!(mode, GenerationRejectionMode::ResourceLimit) {
+            config.npc_resources.max_generated_per_orchestration = 0;
+        }
+        let mut runtime = GameRuntime::new(
+            service,
+            narrator.clone(),
+            parse(&format!(
+                "ses_01890f6a-2ba{}-7d4e-8f90-123456789abc",
+                index + 4
+            )),
+            config,
+        );
+
+        let outcome = runtime
+            .handle_player_input("Find a witness, or continue without one.")
+            .await
+            .expect("narrator recovers from rejected generation");
+
+        assert!(narrator.saw_rejection.load(Ordering::SeqCst));
+        assert!(outcome.npc_results.is_empty());
+        assert_eq!(outcome.snapshot.revision, Revision::new(2));
+        let loaded = observer
+            .load()
+            .await
+            .expect("load rejected generation save");
+        assert!(!loaded.records.iter().any(|record| {
+            matches!(
+                record,
+                DomainRecord::Character(CharacterRecord {
+                    origin: EntityOrigin::Generated { .. },
+                    ..
+                })
+            )
+        }));
+    }
+}
+
+#[tokio::test]
+async fn cancellation_during_npc_generation_does_not_publish_a_character() {
+    let directory = TempDir::new().expect("temporary save parent");
+    let fixture = fixture();
+    let store = SaveStore::create(
+        directory.path().join("save"),
+        fixture.manifest.clone(),
+        fixture.records,
+    )
+    .await
+    .expect("create save");
+    let mut observer = store.connect().await.expect("observer connection");
+    let service = WorldService::open(
+        store,
+        fixture.registry,
+        &fixture.manifest.mod_lock,
+        fixture.world_config,
+    )
+    .await
+    .expect("open service");
+    let policy_id = definition_id("generation_policy", "cancelled");
+    let policy = generation_policy(policy_id.clone(), fixture.profile_id.clone());
+    let entered_generation = Arc::new(tokio::sync::Notify::new());
+    let narrator = Arc::new(CancellableGenerationBridge {
+        decision: NarratorNpcDecision {
+            target: NpcTarget::Generated {
+                generation_policy_id: policy_id.clone(),
+                place_id: fixture.place,
+                request: NpcGenerationRequest {
+                    scene_id: fixture.scene,
+                    role: text("delayed witness"),
+                    purpose: LongText::new("Wait until cancelled.").expect("purpose"),
+                    desired_traits: BTreeSet::new(),
+                    importance: NarrativeImportance::Supporting,
+                },
+            },
+            action: NpcNarrativeAction::RequestNpcTurn,
+            lifetime: NpcLifetime::Scene,
+            controller: NpcControllerKind::Agent(fixture.profile_id),
+            assignment: None,
+        },
+        calls: AtomicUsize::new(0),
+        entered_generation: Arc::clone(&entered_generation),
+    });
+    let mut config = RuntimeConfig::default();
+    config.generation_policies.insert(policy_id, policy);
+    let mut runtime = GameRuntime::new(
+        service,
+        narrator,
+        parse("ses_01890f6a-2ba6-7d4e-8f90-123456789abc"),
+        config,
+    );
+    let cancellation = runtime.cancellation_token();
+    let task = tokio::spawn(async move {
+        runtime
+            .handle_player_input("Wait for a witness who may never arrive.")
+            .await
+    });
+
+    entered_generation.notified().await;
+    cancellation.cancel();
+    let error = task
+        .await
+        .expect("runtime task")
+        .expect_err("generation is cancelled");
+    assert!(matches!(error, RuntimeError::Cancelled));
+
+    let loaded = observer.load().await.expect("load after cancellation");
+    assert_eq!(loaded.revision, Revision::new(1));
+    assert!(!loaded.records.iter().any(|record| {
+        matches!(
+            record,
+            DomainRecord::Character(CharacterRecord {
+                origin: EntityOrigin::Generated { .. },
+                ..
+            })
+        )
+    }));
+}
+
+#[tokio::test]
+async fn npc_generation_consumes_the_shared_started_agent_turn_budget() {
+    let directory = TempDir::new().expect("temporary save parent");
+    let fixture = fixture();
+    let store = SaveStore::create(
+        directory.path().join("save"),
+        fixture.manifest.clone(),
+        fixture.records,
+    )
+    .await
+    .expect("create save");
+    let mut observer = store.connect().await.expect("observer connection");
+    let service = WorldService::open(
+        store,
+        fixture.registry,
+        &fixture.manifest.mod_lock,
+        fixture.world_config,
+    )
+    .await
+    .expect("open service");
+    let policy_id = definition_id("generation_policy", "turn_budget");
+    let narrator = Arc::new(GeneratedNarratorBridge::new(
+        fixture.scene,
+        fixture.place,
+        fixture.profile_id.clone(),
+        policy_id.clone(),
+    ));
+    let mut config = RuntimeConfig::default();
+    config.orchestration_budget.max_started_agent_turns = 1;
+    config.generation_policies.insert(
+        policy_id.clone(),
+        generation_policy(policy_id, fixture.profile_id),
+    );
+    let mut runtime = GameRuntime::new(
+        service,
+        narrator.clone(),
+        parse("ses_01890f6a-2ba8-7d4e-8f90-123456789abc"),
+        config,
+    );
+
+    let error = runtime
+        .handle_player_input("Generate beyond this orchestration's turn budget.")
+        .await
+        .expect_err("generation cannot start outside the shared budget");
+
+    assert!(matches!(
+        error,
+        RuntimeError::Budget(loreloom_agent::BudgetReason::AgentTurns)
+    ));
+    assert_eq!(narrator.calls.load(Ordering::SeqCst), 2);
+    let loaded = observer.load().await.expect("load budget-limited save");
+    assert!(!loaded.records.iter().any(|record| {
+        matches!(
+            record,
+            DomainRecord::Character(CharacterRecord {
+                origin: EntityOrigin::Generated { .. },
+                ..
+            })
+        )
+    }));
 }
 
 #[tokio::test]

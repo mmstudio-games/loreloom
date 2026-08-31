@@ -7,17 +7,25 @@ use std::{
 use armillae_core::{CompletionRequest, ContentPart, Message, Role};
 use armillae_llm::LlmBridge;
 use loreloom_agent::{
-    AgentDefinition, AgentRunner, AgentToolContext, BudgetReason, CancellationToken, NarratorPlan,
-    NarratorSynthesis, NpcAgent, NpcAssignment, NpcModelOutput, NpcTurnRequest, NpcTurnResult,
-    NpcTurnStatus, ResourceUsage, ToolCallOutcome, TurnInvocation, TurnOutcome, TurnStatus,
+    AgentDefinition, AgentRunner, AgentToolContext, BudgetReason, CancellationToken,
+    NarratorNpcDecision, NarratorPlan, NarratorSynthesis, NpcAgent, NpcAssignment,
+    NpcControllerKind, NpcLifetime, NpcModelOutput, NpcNarrativeAction, NpcTarget, NpcTurnRequest,
+    NpcTurnResult, NpcTurnStatus, ResourceUsage, ToolCallOutcome, TurnInvocation, TurnOutcome,
+    TurnStatus,
 };
+use loreloom_content::NpcDraft;
 use loreloom_core::{
-    ActorId, LongText, RuntimePhase, SessionId, ToolActivity, ToolActivityState, TranscriptSpeaker,
-    UiSnapshot,
+    ActorId, CharacterController, CharacterLifetime, ContentDefinitionId, GeneratedOrigin,
+    GenerationId, GenerationSource, LongText, Revision, RuntimePhase, SessionId, ShortText,
+    ToolActivity, ToolActivityState, TranscriptItemId, TranscriptSpeaker, UiSnapshot,
 };
+use serde::Serialize;
 use serde_json::json;
 
-use crate::{OrchestrationBudget, RuntimeConfig, RuntimeError, RuntimeToolExecutor, WorldService};
+use crate::{
+    OrchestrationBudget, RuntimeConfig, RuntimeError, RuntimeToolExecutor, WorldService,
+    world_service::{CharacterMaterializationRequest, PendingNpcDecision},
+};
 
 struct NpcRegistration {
     definition: AgentDefinition,
@@ -26,8 +34,10 @@ struct NpcRegistration {
 
 pub struct GameRuntime {
     service: Arc<WorldService>,
+    executor: Arc<RuntimeToolExecutor>,
     runner: AgentRunner,
     narrator: Arc<dyn LlmBridge>,
+    default_npc_bridge: Arc<dyn LlmBridge>,
     npcs: BTreeMap<ActorId, NpcRegistration>,
     session_id: SessionId,
     config: RuntimeConfig,
@@ -63,8 +73,10 @@ impl GameRuntime {
         let executor = Arc::new(RuntimeToolExecutor::new(Arc::clone(&service)));
         Self {
             service,
+            executor: Arc::clone(&executor),
             runner: AgentRunner::new(executor),
-            narrator,
+            narrator: Arc::clone(&narrator),
+            default_npc_bridge: narrator,
             npcs: BTreeMap::new(),
             session_id,
             config,
@@ -80,6 +92,10 @@ impl GameRuntime {
     ) {
         self.npcs
             .insert(actor_id, NpcRegistration { definition, bridge });
+    }
+
+    pub fn set_default_npc_bridge(&mut self, bridge: Arc<dyn LlmBridge>) {
+        self.default_npc_bridge = bridge;
     }
 
     #[must_use]
@@ -126,12 +142,14 @@ impl GameRuntime {
         let mut orchestration = OrchestrationState::default();
         let mut tool_activity = Vec::new();
         let mut npc_results = Vec::new();
+        let _ = self.executor.take_pending_npc_decisions().await;
 
         let before = self
             .service
             .observation(self.session_id, input.clone())
             .await?;
-        self.service
+        let player_transcript = self
+            .service
             .append_transcript(
                 before.player.actor_id,
                 self.session_id,
@@ -144,48 +162,90 @@ impl GameRuntime {
             )
             .await?;
 
-        orchestration.start_round(self.config.orchestration_budget, started)?;
-        orchestration.start_turn(self.config.orchestration_budget, started)?;
-        let observation = self
-            .service
-            .observation(self.session_id, input.clone())
-            .await?;
-        let planning_request = narrator_request(
-            "narrator_planning",
-            json!({
-                "observation": observation,
-                "output_contract": "NarratorPlan"
-            }),
-            self.runner.definitions(),
-        )?;
-        let planning = self
-            .runner
-            .run_turn(TurnInvocation {
-                bridge: self.narrator.as_ref(),
-                request: planning_request,
-                tool_context: AgentToolContext {
-                    actor_id: before.player.actor_id,
-                    revision: self.service.revision().await,
-                    session_id: self.session_id,
-                    capabilities: self.config.narrator_capabilities.clone(),
-                },
-                budget: self.config.turn_budget,
-                cancellation: &self.cancellation,
-            })
-            .await;
-        append_tool_activity(&mut tool_activity, &planning.tool_calls);
-        orchestration.merge(&planning.usage, self.config.orchestration_budget, started)?;
-        let planning_text = require_text(&planning)?;
-        let mut plan: NarratorPlan =
-            serde_json::from_str(&planning_text).map_err(|_| RuntimeError::ModelProtocol {
-                stage: "narrator_plan",
-            })?;
-        plan.validate()?;
-        if plan.based_on_revision != self.service.revision().await {
-            return Err(RuntimeError::ModelProtocol {
-                stage: "stale_narrator_plan",
+        let mut materialization_results = Vec::new();
+        let mut settled_materializations = Vec::new();
+        let mut generated_attempts = 0_u32;
+        let mut plan = loop {
+            orchestration.start_round(self.config.orchestration_budget, started)?;
+            orchestration.start_turn(self.config.orchestration_budget, started)?;
+            let observation = self
+                .service
+                .observation(self.session_id, input.clone())
+                .await?;
+            let planning_request = narrator_request(
+                "narrator_planning",
+                json!({
+                    "observation": observation,
+                    "materialization_results": materialization_results,
+                    "materialization_rule": "Preset/generated NPCs must be committed first. After a successful materialization, plan with the returned actor_id and do not repeat the request.",
+                    "output_contract": "NarratorPlan"
+                }),
+                self.runner.definitions(),
+            )?;
+            let planning = self
+                .runner
+                .run_turn(TurnInvocation {
+                    bridge: self.narrator.as_ref(),
+                    request: planning_request,
+                    tool_context: AgentToolContext {
+                        actor_id: before.player.actor_id,
+                        revision: self.service.revision().await,
+                        session_id: self.session_id,
+                        capabilities: self.config.narrator_capabilities.clone(),
+                    },
+                    budget: self.config.turn_budget,
+                    cancellation: &self.cancellation,
+                })
+                .await;
+            append_tool_activity(&mut tool_activity, &planning.tool_calls);
+            orchestration.merge(&planning.usage, self.config.orchestration_budget, started)?;
+            let pending = self.executor.take_pending_npc_decisions().await;
+            let planning_text = require_text(&planning)?;
+            let candidate: NarratorPlan =
+                serde_json::from_str(&planning_text).map_err(|_| RuntimeError::ModelProtocol {
+                    stage: "narrator_plan",
+                })?;
+            candidate.validate()?;
+            if candidate.based_on_revision != self.service.revision().await {
+                return Err(RuntimeError::ModelProtocol {
+                    stage: "stale_narrator_plan",
+                });
+            }
+            let requires_replanning = pending.iter().any(|pending| {
+                pending.decision.requires_materialization()
+                    && !settled_materializations.iter().any(
+                        |(decision, _): &(NarratorNpcDecision, ActorId)| {
+                            decision == &pending.decision
+                        },
+                    )
             });
-        }
+            if !pending.is_empty() {
+                let resolved = self
+                    .resolve_npc_decisions(
+                        pending,
+                        &settled_materializations,
+                        before.player.actor_id,
+                        player_transcript.id,
+                        &input,
+                        &mut generated_attempts,
+                        &mut orchestration,
+                        &mut tool_activity,
+                        started,
+                    )
+                    .await?;
+                settled_materializations.extend(resolved.iter().filter_map(|result| {
+                    (result.status == NpcMaterializationStatus::Materialized)
+                        .then_some(result.actor_id)
+                        .flatten()
+                        .map(|actor_id| (result.decision.clone(), actor_id))
+                }));
+                materialization_results.extend(resolved);
+            }
+            if requires_replanning {
+                continue;
+            }
+            break candidate;
+        };
 
         loop {
             let mut budget_failure = None;
@@ -205,6 +265,17 @@ impl GameRuntime {
                         NpcTurnStatus::BudgetExhausted(reason),
                     ));
                     continue;
+                }
+                if !self.npcs.contains_key(&request.actor_id)
+                    && let Ok(definition) = self.service.agent_definition(request.actor_id).await
+                {
+                    self.npcs.insert(
+                        request.actor_id,
+                        NpcRegistration {
+                            definition,
+                            bridge: Arc::clone(&self.default_npc_bridge),
+                        },
+                    );
                 }
                 let Some(registration) = self.npcs.get(&request.actor_id) else {
                     npc_results.push(unstarted_result(
@@ -325,10 +396,15 @@ impl GameRuntime {
                     "revision": revision,
                     "npc_outputs_are_claims": true,
                     "npc_results": npc_results,
+                    "npc_materialization_results": materialization_results,
                     "committed_events": committed_events,
                     "output_contract": "NarratorSynthesis"
                 }),
-                self.runner.definitions(),
+                self.runner
+                    .definitions()
+                    .into_iter()
+                    .filter(|definition| definition.name != "materialize_npc")
+                    .collect(),
             )?;
             let synthesis = self
                 .runner
@@ -347,6 +423,11 @@ impl GameRuntime {
                 .await;
             append_tool_activity(&mut tool_activity, &synthesis.tool_calls);
             orchestration.merge(&synthesis.usage, self.config.orchestration_budget, started)?;
+            if !self.executor.take_pending_npc_decisions().await.is_empty() {
+                return Err(RuntimeError::ModelProtocol {
+                    stage: "materialization_outside_planning",
+                });
+            }
             let synthesis_text = require_text(&synthesis)?;
             let envelope: NarratorSynthesis =
                 serde_json::from_str(&synthesis_text).map_err(|_| RuntimeError::ModelProtocol {
@@ -430,6 +511,432 @@ impl GameRuntime {
                 }
             }
         }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn resolve_npc_decisions(
+        &mut self,
+        pending: Vec<PendingNpcDecision>,
+        settled_materializations: &[(NarratorNpcDecision, ActorId)],
+        acting_actor: ActorId,
+        source_transcript: TranscriptItemId,
+        player_input: &LongText,
+        generated_attempts: &mut u32,
+        orchestration: &mut OrchestrationState,
+        tool_activity: &mut Vec<ToolActivity>,
+        started: Instant,
+    ) -> Result<Vec<NpcMaterializationResult>, RuntimeError> {
+        let mut outcomes = Vec::with_capacity(pending.len());
+        for pending in pending {
+            if self.cancellation.is_cancelled() {
+                return Err(RuntimeError::Cancelled);
+            }
+            if pending.revision != self.service.revision().await {
+                outcomes.push(NpcMaterializationResult::rejected(
+                    pending,
+                    self.service.revision().await,
+                    "stale_revision",
+                ));
+                continue;
+            }
+            let decision = pending.decision.clone();
+            if let Some((_, actor_id)) = settled_materializations
+                .iter()
+                .find(|(settled, _)| settled == &decision)
+                .map(|(settled, actor_id)| (settled, *actor_id))
+                .or_else(|| {
+                    outcomes
+                        .iter()
+                        .find_map(|outcome: &NpcMaterializationResult| {
+                            (outcome.decision == decision
+                                && matches!(
+                                    outcome.status,
+                                    NpcMaterializationStatus::Materialized
+                                        | NpcMaterializationStatus::Existing
+                                ))
+                            .then_some(outcome.actor_id)
+                            .flatten()
+                            .map(|actor_id| (&outcome.decision, actor_id))
+                        })
+                })
+            {
+                outcomes.push(NpcMaterializationResult::settled(
+                    pending,
+                    NpcMaterializationStatus::Existing,
+                    Some(actor_id),
+                    self.service.revision().await,
+                ));
+                continue;
+            }
+            match &decision.target {
+                NpcTarget::Mentioned { .. } => {
+                    outcomes.push(NpcMaterializationResult::settled(
+                        pending,
+                        NpcMaterializationStatus::Mentioned,
+                        None,
+                        self.service.revision().await,
+                    ));
+                }
+                NpcTarget::Existing { actor_id } => {
+                    let valid = self.service.has_character(*actor_id).await
+                        && match &decision.controller {
+                            NpcControllerKind::Agent(profile_id)
+                                if decision.action == NpcNarrativeAction::RequestNpcTurn =>
+                            {
+                                self.service.agent_profile(*actor_id).await.as_ref()
+                                    == Some(profile_id)
+                            }
+                            _ => true,
+                        };
+                    if valid {
+                        outcomes.push(NpcMaterializationResult::settled(
+                            pending,
+                            NpcMaterializationStatus::Existing,
+                            Some(*actor_id),
+                            self.service.revision().await,
+                        ));
+                    } else {
+                        outcomes.push(NpcMaterializationResult::rejected(
+                            pending,
+                            self.service.revision().await,
+                            "existing_target_unavailable",
+                        ));
+                    }
+                }
+                NpcTarget::Preset {
+                    character_id,
+                    place_id,
+                } => {
+                    let observation = self
+                        .service
+                        .observation(self.session_id, player_input.clone())
+                        .await?;
+                    let scene_id = observation.scene.scene_id;
+                    if let Some(reason) = self.materialization_limit(scene_id, false).await? {
+                        outcomes.push(NpcMaterializationResult::rejected(
+                            pending,
+                            self.service.revision().await,
+                            reason,
+                        ));
+                        continue;
+                    }
+                    let (controller, required_profile) = controller(&decision.controller);
+                    let lifetime = lifetime(decision.lifetime, scene_id)?;
+                    let materialization = CharacterMaterializationRequest {
+                        acting_actor,
+                        scene_id,
+                        place_id: *place_id,
+                        controller,
+                        lifetime,
+                        required_agent_profile: required_profile.cloned(),
+                    };
+                    match self
+                        .service
+                        .spawn_preset_character(character_id, &materialization)
+                        .await
+                    {
+                        Ok(actor_id) => {
+                            self.register_materialized_agent(actor_id).await?;
+                            outcomes.push(NpcMaterializationResult::settled(
+                                pending,
+                                NpcMaterializationStatus::Materialized,
+                                Some(actor_id),
+                                self.service.revision().await,
+                            ));
+                        }
+                        Err(error) => outcomes.push(NpcMaterializationResult::rejected(
+                            pending,
+                            self.service.revision().await,
+                            error.code(),
+                        )),
+                    }
+                }
+                NpcTarget::Generated {
+                    generation_policy_id,
+                    place_id,
+                    request,
+                } => {
+                    if *generated_attempts
+                        >= self.config.npc_resources.max_generated_per_orchestration
+                    {
+                        outcomes.push(NpcMaterializationResult::rejected(
+                            pending,
+                            self.service.revision().await,
+                            "generation_limit",
+                        ));
+                        continue;
+                    }
+                    let Some(policy) = self
+                        .config
+                        .generation_policies
+                        .get(generation_policy_id)
+                        .cloned()
+                    else {
+                        outcomes.push(NpcMaterializationResult::rejected(
+                            pending,
+                            self.service.revision().await,
+                            "generation_policy_unavailable",
+                        ));
+                        continue;
+                    };
+                    let observation = self
+                        .service
+                        .observation(self.session_id, player_input.clone())
+                        .await?;
+                    let scene_id = observation.scene.scene_id;
+                    if request.scene_id != scene_id
+                        || !request
+                            .desired_traits
+                            .is_subset(&policy.constraints.allowed_definitions)
+                    {
+                        outcomes.push(NpcMaterializationResult::rejected(
+                            pending,
+                            self.service.revision().await,
+                            "generation_request_not_authorized",
+                        ));
+                        continue;
+                    }
+                    let persistent = decision.lifetime == NpcLifetime::Persistent;
+                    if let Some(reason) = self.materialization_limit(scene_id, persistent).await? {
+                        outcomes.push(NpcMaterializationResult::rejected(
+                            pending,
+                            self.service.revision().await,
+                            reason,
+                        ));
+                        continue;
+                    }
+                    *generated_attempts += 1;
+                    orchestration.start_turn(self.config.orchestration_budget, started)?;
+                    let definitions = match self.service.generation_definitions(&policy).await {
+                        Ok(definitions) => definitions,
+                        Err(error) => {
+                            outcomes.push(NpcMaterializationResult::rejected(
+                                pending,
+                                self.service.revision().await,
+                                error.code(),
+                            ));
+                            continue;
+                        }
+                    };
+                    let generation_request = narrator_request(
+                        "npc_generation",
+                        json!({
+                            "observation": observation,
+                            "request": request,
+                            "generation_policy": policy,
+                            "allowed_definitions": definitions,
+                            "required_agent_profile": match &decision.controller {
+                                NpcControllerKind::Agent(profile_id) => Some(profile_id),
+                                _ => None,
+                            },
+                            "output_contract": npc_draft_contract()
+                        }),
+                        Vec::new(),
+                    )?;
+                    let generation = self
+                        .runner
+                        .run_turn(TurnInvocation {
+                            bridge: self.narrator.as_ref(),
+                            request: generation_request,
+                            tool_context: AgentToolContext {
+                                actor_id: acting_actor,
+                                revision: self.service.revision().await,
+                                session_id: self.session_id,
+                                capabilities: BTreeSet::new(),
+                            },
+                            budget: self.config.turn_budget,
+                            cancellation: &self.cancellation,
+                        })
+                        .await;
+                    append_tool_activity(tool_activity, &generation.tool_calls);
+                    orchestration.merge(
+                        &generation.usage,
+                        self.config.orchestration_budget,
+                        started,
+                    )?;
+                    let draft = match require_text(&generation) {
+                        Ok(text) => match serde_json::from_str::<NpcDraft>(&text) {
+                            Ok(draft) => draft,
+                            Err(_) => {
+                                outcomes.push(NpcMaterializationResult::rejected(
+                                    pending,
+                                    self.service.revision().await,
+                                    "invalid_npc_draft",
+                                ));
+                                continue;
+                            }
+                        },
+                        Err(RuntimeError::Cancelled) => return Err(RuntimeError::Cancelled),
+                        Err(RuntimeError::Budget(reason)) => {
+                            return Err(RuntimeError::Budget(reason));
+                        }
+                        Err(error) => {
+                            outcomes.push(NpcMaterializationResult::rejected(
+                                pending,
+                                self.service.revision().await,
+                                error.code(),
+                            ));
+                            continue;
+                        }
+                    };
+                    let required_profile = match &decision.controller {
+                        NpcControllerKind::Agent(profile_id) => Some(profile_id),
+                        _ => None,
+                    };
+                    if draft.agent_profile.as_ref() != required_profile {
+                        outcomes.push(NpcMaterializationResult::rejected(
+                            pending,
+                            self.service.revision().await,
+                            "generated_agent_profile_mismatch",
+                        ));
+                        continue;
+                    }
+                    let (controller, _) = controller(&decision.controller);
+                    let lifetime = lifetime(decision.lifetime, scene_id)?;
+                    let materialization = CharacterMaterializationRequest {
+                        acting_actor,
+                        scene_id,
+                        place_id: *place_id,
+                        controller,
+                        lifetime,
+                        required_agent_profile: required_profile.cloned(),
+                    };
+                    let origin = GeneratedOrigin {
+                        generation_id: GenerationId::new(),
+                        generator_version: ShortText::new("npc_generation.v1")?,
+                        source: GenerationSource::PlayerInput {
+                            transcript_id: source_transcript,
+                        },
+                    };
+                    match self
+                        .service
+                        .spawn_generated_character(&draft, &policy, origin, &materialization)
+                        .await
+                    {
+                        Ok(actor_id) => {
+                            self.register_materialized_agent(actor_id).await?;
+                            outcomes.push(NpcMaterializationResult::settled(
+                                pending,
+                                NpcMaterializationStatus::Materialized,
+                                Some(actor_id),
+                                self.service.revision().await,
+                            ));
+                        }
+                        Err(error) => outcomes.push(NpcMaterializationResult::rejected(
+                            pending,
+                            self.service.revision().await,
+                            error.code(),
+                        )),
+                    }
+                }
+            }
+        }
+        Ok(outcomes)
+    }
+
+    async fn materialization_limit(
+        &self,
+        scene_id: loreloom_core::ObjectId,
+        persistent_generated: bool,
+    ) -> Result<Option<&'static str>, RuntimeError> {
+        let counts = self.service.materialization_counts(scene_id).await?;
+        let scene_limit = usize::try_from(self.config.npc_resources.max_materialized_per_scene)
+            .unwrap_or(usize::MAX);
+        let persistent_limit = usize::try_from(self.config.npc_resources.max_persistent_generated)
+            .unwrap_or(usize::MAX);
+        if counts.scene_characters >= scene_limit {
+            Ok(Some("scene_materialization_limit"))
+        } else if persistent_generated && counts.persistent_generated >= persistent_limit {
+            Ok(Some("persistent_generation_limit"))
+        } else {
+            Ok(None)
+        }
+    }
+
+    async fn register_materialized_agent(&mut self, actor_id: ActorId) -> Result<(), RuntimeError> {
+        if let Some(profile_id) = self.service.agent_profile(actor_id).await {
+            let definition = self.service.agent_definition(actor_id).await?;
+            if definition.profile_id != profile_id {
+                return Err(RuntimeError::Unavailable);
+            }
+            self.npcs.insert(
+                actor_id,
+                NpcRegistration {
+                    definition,
+                    bridge: Arc::clone(&self.default_npc_bridge),
+                },
+            );
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum NpcMaterializationStatus {
+    Mentioned,
+    Existing,
+    Materialized,
+    Rejected,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct NpcMaterializationResult {
+    call_id: String,
+    decision: NarratorNpcDecision,
+    status: NpcMaterializationStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    actor_id: Option<ActorId>,
+    revision: Revision,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<String>,
+}
+
+impl NpcMaterializationResult {
+    fn settled(
+        pending: PendingNpcDecision,
+        status: NpcMaterializationStatus,
+        actor_id: Option<ActorId>,
+        revision: Revision,
+    ) -> Self {
+        Self {
+            call_id: pending.call_id,
+            decision: pending.decision,
+            status,
+            actor_id,
+            revision,
+            reason: None,
+        }
+    }
+
+    fn rejected(pending: PendingNpcDecision, revision: Revision, reason: &str) -> Self {
+        Self {
+            call_id: pending.call_id,
+            decision: pending.decision,
+            status: NpcMaterializationStatus::Rejected,
+            actor_id: None,
+            revision,
+            reason: Some(reason.to_owned()),
+        }
+    }
+}
+
+fn controller(kind: &NpcControllerKind) -> (CharacterController, Option<&ContentDefinitionId>) {
+    match kind {
+        NpcControllerKind::NarratorProxy => (CharacterController::NarratorProxy, None),
+        NpcControllerKind::Rules => (CharacterController::Rules, None),
+        NpcControllerKind::Agent(profile_id) => (CharacterController::Agent, Some(profile_id)),
+    }
+}
+
+fn lifetime(
+    kind: NpcLifetime,
+    scene_id: loreloom_core::ObjectId,
+) -> Result<CharacterLifetime, RuntimeError> {
+    match kind {
+        NpcLifetime::Beat => Err(RuntimeError::InvalidInput),
+        NpcLifetime::Scene => Ok(CharacterLifetime::Scene { scene_id }),
+        NpcLifetime::Persistent => Ok(CharacterLifetime::Persistent),
     }
 }
 
@@ -521,6 +1028,61 @@ fn narrator_request(
         ],
         tools,
         ..CompletionRequest::default()
+    })
+}
+
+fn npc_draft_contract() -> serde_json::Value {
+    json!({
+        "type": "NpcDraft",
+        "encoding": "Return only one JSON object. Unknown fields are rejected.",
+        "required": [
+            "display_name",
+            "profile",
+            "agent_profile",
+            "base_attributes",
+            "resources",
+            "conditions",
+            "inventory",
+            "skills",
+            "knowledge",
+            "goals"
+        ],
+        "shape": {
+            "display_name": "string",
+            "profile": {
+                "summary": "string",
+                "values": ["string"],
+                "speaking_style": "string",
+                "narrative_tags": ["ContentDefinitionId"]
+            },
+            "agent_profile": "ContentDefinitionId or null; must equal required_agent_profile",
+            "base_attributes": { "ContentDefinitionId": "Fixed integer" },
+            "resources": [{
+                "resource_id": "ContentDefinitionId",
+                "current": "Fixed integer",
+                "base_maximum": "Fixed integer"
+            }],
+            "conditions": [{
+                "condition_id": "ContentDefinitionId",
+                "stacks": "positive integer",
+                "intensity": "Fixed integer"
+            }],
+            "inventory": [{
+                "local_key": "string",
+                "item_id": "ContentDefinitionId",
+                "quantity": "positive integer",
+                "parent_local_key": "optional string"
+            }],
+            "skills": [{
+                "skill_id": "ContentDefinitionId",
+                "rank": "positive integer",
+                "proficiency": "non-negative integer",
+                "enabled": "boolean"
+            }],
+            "knowledge": "array; use [] unless every typed Fact field is authorized",
+            "goals": "array; use [] unless every typed Goal field is authorized"
+        },
+        "constraints": "Use only IDs present in allowed_definitions or required_agent_profile. Empty arrays are valid. Do not invent capabilities or trusted constraints."
     })
 }
 
