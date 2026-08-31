@@ -218,6 +218,11 @@ Loreloom Runtime ───────────────► Persistence
     错误正文，只保留 invocation、失败阶段、归一化类别、经过约束的 Provider/Request ID、HTTP
     状态与 retry 元数据。Runtime、NpcTurnResult、TUI notice 和 headless 错误复用同一诊断事实，
     启动期 Bridge 创建失败使用同一安全投影。
+51. Narrator 在请求 Scene 切换前必须通过只读 `list_scene_transitions` 查询当前 Revision 的 canonical
+    目标；该 Tool 只返回 inactive 的已物化 Scene ObjectId 和尚未物化的已注册 Scene Definition ID，
+    排除当前 Scene 并避免同一 Definition 的重复目标。`transition_scene` 只接受查询返回的精确 target，
+    拒绝结果提供可操作的恢复方向；Narrator 不得在提交成功前叙述已经抵达，也不得原样重试已拒绝
+    的请求。查询无匹配目标时表示当前内容不可达，不隐式生成新 Scene。
 
 项目方已于 2026-08-29 明确确认第 18–23 项的 Mod 子系统方向。该确认把 Content Mod、Rule Mod、
 统一导入路径、类型化参数、结构化 Event Option、通用 Gameplay Tool、ModLock 和 Extension Mod

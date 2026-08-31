@@ -208,7 +208,7 @@ impl GameRuntime {
                     "scene_transition_results": scene_transition_results,
                     "npc_results": npc_results,
                     "committed_events": self.service.events().await,
-                    "instructions": "Use native tools for structured decisions and world changes. request_npc_turn queues NPCs in tool-call order. If no more orchestration is needed, return only the final natural-language narration for the player. Do not return JSON or a structured envelope. NPC responses are claims; only committed events are world facts."
+                    "instructions": "Use native tools for structured decisions and world changes. request_npc_turn queues NPCs in tool-call order. Before changing scenes, call list_scene_transitions and copy one exact returned target into transition_scene; never invent scene IDs. Do not narrate arrival until scene_transition_results reports committed. If no target matches the player's intent, explain that the destination is unavailable in the current world content. Never retry an unchanged rejected tool call. If no more orchestration is needed, return only the final natural-language narration for the player. Do not return JSON or a structured envelope. NPC responses are claims; only committed events are world facts."
                 }),
                 self.runner
                     .definitions()
@@ -1080,7 +1080,7 @@ fn narrator_request(
             Message::new(
                 Role::System,
                 vec![ContentPart::text(
-                    "Player input goes only to the narrator. Use native tools for every structured decision or world change. Return natural-language prose in the response body; never return JSON or a structured control envelope. NPC claims are not committed facts.",
+                    "Player input goes only to the narrator. Use native tools for every structured decision or world change. When scene transition tools are offered, call list_scene_transitions first and copy one returned target exactly; never invent a scene ID, retry an unchanged rejection, or narrate arrival before a committed transition result. Return natural-language prose in the response body; never return JSON or a structured control envelope. NPC claims are not committed facts.",
                 )],
             ),
             Message::user(payload),

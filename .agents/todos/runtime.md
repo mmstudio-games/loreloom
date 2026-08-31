@@ -79,6 +79,8 @@ OPEN 项、后续 RFC 或 P0 Spike；空 crate 不代表相关协议已经实现
   `split_stack`、`use_skill` 接到已冻结的 WorldCommand；
 - [x] 实现 Scene 停用/重新激活与切换产品入口；Scene、Scene-owned entity 和状态不因离开而删除，
   `promote_npc` 只改变角色的领域归属；
+- [x] 为 Narrator 提供当前 Revision 的 canonical Scene 切换目标查询，拒绝猜测或过期目标，并让
+  重复的同目标请求幂等收敛；
 - [x] 把 Spec 8.2 的 Character/Scene/Transcript 数量与字节上限接入 Narrator/NpcAgent 产品上下文，
   并在裁剪时投影 `truncated` metadata；
 - [x] 用 Runtime phase/status event 驱动 TUI thinking 展示，并移除 Provider 文本 streaming 产品协议；
@@ -89,5 +91,5 @@ OPEN 项、后续 RFC 或 P0 Spike；空 crate 不代表相关协议已经实现
 - [x] 保留 Armillae 模型失败的脱敏 category、阶段、安全 Provider 元数据与 `err_` correlation ID，
   贯通启动、AgentRunner、NpcTurnResult、Runtime、TUI notice 和 headless 错误；
 - [x] 完成 Active Spec 第 17 节实施审计：除显式 `UPSTREAM-GATED` 的第 47 条和上述分发许可选择外，
-  其余验收均有自动化或可复现证据；当前 locked 门禁为 146 tests passed，release headless 产物可在
+  其余验收均有自动化或可复现证据；当前 locked 门禁为 148 tests passed，release headless 产物可在
   同一 SurrealKV 存档从 Revision 3 重开并继续到 Revision 6，macOS arm64 release 基线为 81.2 MiB。

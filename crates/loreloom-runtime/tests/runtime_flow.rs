@@ -9,7 +9,7 @@ use std::{
 
 use armillae_core::{
     AssistantContent, CompletionRequest, CompletionResponse, FinishReason, TextContent, ToolCall,
-    ToolCallId, ToolResultContent,
+    ToolCallId, ToolResult, ToolResultContent,
 };
 use armillae_llm::{
     BoxFuture as BridgeFuture, BridgeCapabilities, BridgeError, CompletionStream, ErrorMetadata,
@@ -81,6 +81,13 @@ fn name(value: &str) -> DisplayName {
 
 fn text(value: &str) -> ShortText {
     ShortText::new(value).expect("short text")
+}
+
+fn tool_result_json(result: &ToolResult) -> &JsonValue {
+    match result.content.as_slice() {
+        [ToolResultContent::Json { value }] => value,
+        content => panic!("expected one JSON ToolResult, got {content:?}"),
+    }
 }
 
 struct Fixture {
@@ -1746,6 +1753,112 @@ async fn provider_failure_is_redacted_and_the_same_runtime_accepts_the_next_turn
 }
 
 #[tokio::test]
+async fn narrator_discovers_scene_targets_and_invented_targets_are_actionably_rejected() {
+    let directory = TempDir::new().expect("temporary save parent");
+    let fixture = fixture();
+    let store = SaveStore::create(
+        directory.path().join("save"),
+        fixture.manifest.clone(),
+        fixture.records.clone(),
+    )
+    .await
+    .expect("create save");
+    let service = WorldService::open(
+        store,
+        fixture.registry,
+        &fixture.manifest.mod_lock,
+        fixture.world_config,
+    )
+    .await
+    .expect("open world service");
+    let executor = RuntimeToolExecutor::new(service);
+    let context = || {
+        ToolContext::new().with_extension(AgentToolContext {
+            actor_id: fixture.player,
+            revision: Revision::ZERO,
+            session_id: parse("ses_01890f6a-2b87-7d4e-8f90-123456789abc"),
+            capabilities: BTreeSet::from(["narrator.transition_scene".to_owned()]),
+        })
+    };
+
+    let listed = executor
+        .execute(
+            context(),
+            ToolCall {
+                id: ToolCallId::new("list-scene-targets").expect("tool call ID"),
+                name: "list_scene_transitions".to_owned(),
+                arguments: json!({}),
+            },
+        )
+        .await
+        .expect("correlated scene target query");
+    assert!(!listed.is_error);
+    let listed = tool_result_json(&listed);
+    assert_eq!(listed["current"]["scene_id"], json!(fixture.scene));
+    assert_eq!(listed["targets"].as_array().map(Vec::len), Some(1));
+    let forest_target = listed["targets"][0]["target"].clone();
+    assert_eq!(
+        forest_target,
+        json!({
+            "type": "definition",
+            "scene_definition_id": fixture.forest_scene_definition
+        })
+    );
+
+    let rejected = executor
+        .execute(
+            context(),
+            ToolCall {
+                id: ToolCallId::new("invented-scene-target").expect("tool call ID"),
+                name: "transition_scene".to_owned(),
+                arguments: json!({
+                    "target": {
+                        "type": "definition",
+                        "scene_definition_id": "米尔港"
+                    }
+                }),
+            },
+        )
+        .await
+        .expect("correlated scene target rejection");
+    assert!(rejected.is_error);
+    assert_eq!(
+        tool_result_json(&rejected),
+        &json!({
+            "code": "scene_transition_target_unavailable",
+            "recovery_tool": "list_scene_transitions",
+            "retry_unchanged": false
+        })
+    );
+
+    let accepted = executor
+        .execute(
+            context(),
+            ToolCall {
+                id: ToolCallId::new("accepted-scene-target").expect("tool call ID"),
+                name: "transition_scene".to_owned(),
+                arguments: json!({ "target": forest_target.clone() }),
+            },
+        )
+        .await
+        .expect("correlated scene transition acceptance");
+    assert!(!accepted.is_error);
+    let duplicate = executor
+        .execute(
+            context(),
+            ToolCall {
+                id: ToolCallId::new("duplicate-scene-target").expect("tool call ID"),
+                name: "transition_scene".to_owned(),
+                arguments: json!({ "target": forest_target }),
+            },
+        )
+        .await
+        .expect("correlated duplicate scene transition acceptance");
+    assert!(!duplicate.is_error);
+    assert_eq!(tool_result_json(&duplicate)["duplicate"], json!(true));
+}
+
+#[tokio::test]
 async fn narrator_scene_transition_materializes_replans_and_revisits_without_regeneration() {
     let directory = TempDir::new().expect("temporary save parent");
     let fixture = fixture();
@@ -1766,6 +1879,11 @@ async fn narrator_scene_transition_materializes_replans_and_revisits_without_reg
     .expect("open world service");
     let narrator = Arc::new(MockBridge::scripted([
         MockResponse::tool_call(
+            ToolCallId::new("list-before-forest").expect("tool call ID"),
+            "list_scene_transitions",
+            json!({}),
+        ),
+        MockResponse::tool_call(
             ToolCallId::new("enter-forest").expect("tool call ID"),
             "transition_scene",
             json!({
@@ -1778,6 +1896,11 @@ async fn narrator_scene_transition_materializes_replans_and_revisits_without_reg
         MockResponse::text("I will lead the story into the forest."),
         MockResponse::text("Mist gathers as the forest path opens before you."),
         MockResponse::tool_call(
+            ToolCallId::new("list-before-inn").expect("tool call ID"),
+            "list_scene_transitions",
+            json!({}),
+        ),
+        MockResponse::tool_call(
             ToolCallId::new("return-inn").expect("tool call ID"),
             "transition_scene",
             json!({
@@ -1789,18 +1912,6 @@ async fn narrator_scene_transition_materializes_replans_and_revisits_without_reg
         ),
         MockResponse::text("I will return the story to the inn."),
         MockResponse::text("The inn receives you with rain against its shutters."),
-        MockResponse::tool_call(
-            ToolCallId::new("reenter-forest").expect("tool call ID"),
-            "transition_scene",
-            json!({
-                "target": {
-                    "type": "definition",
-                    "scene_definition_id": fixture.forest_scene_definition
-                }
-            }),
-        ),
-        MockResponse::text("I will return to the forest already in this world."),
-        MockResponse::text("The same watcher remains beneath the same pines."),
     ]));
     let mut runtime = GameRuntime::new(
         Arc::clone(&service),
@@ -1832,15 +1943,61 @@ async fn narrator_scene_transition_materializes_replans_and_revisits_without_reg
     assert_eq!(second.snapshot.scene.scene_id, fixture.scene);
     assert_eq!(second.snapshot.revision, Revision::new(6));
 
-    let third = runtime
-        .handle_player_input("Go back to the forest.")
+    let transition_context = AgentToolContext {
+        actor_id: fixture.player,
+        revision: Revision::new(6),
+        session_id: parse("ses_01890f6a-2b88-7d4e-8f90-123456789abc"),
+        capabilities: BTreeSet::from(["narrator.transition_scene".to_owned()]),
+    };
+    let executor = RuntimeToolExecutor::new(Arc::clone(&service));
+    let listed = executor
+        .execute(
+            ToolContext::new().with_extension(transition_context.clone()),
+            ToolCall {
+                id: ToolCallId::new("list-materialized-forest").expect("tool call ID"),
+                name: "list_scene_transitions".to_owned(),
+                arguments: json!({}),
+            },
+        )
+        .await
+        .expect("list materialized forest target");
+    let targets = tool_result_json(&listed)["targets"]
+        .as_array()
+        .expect("scene transition targets");
+    assert_eq!(
+        targets.len(),
+        1,
+        "materialized scenes replace definition targets"
+    );
+    let forest_target = targets
+        .iter()
+        .find(|option| option["target"]["scene_id"] == json!(forest_scene))
+        .map(|option| option["target"].clone())
+        .expect("materialized forest is returned by existing Scene ID");
+    assert_eq!(forest_target["type"], json!("existing"));
+    service
+        .execute(
+            &transition_context,
+            WorldCommandKind::TransitionScene {
+                target: serde_json::from_value(forest_target).expect("listed transition target"),
+            },
+        )
         .await
         .expect("re-enter forest");
-    assert_eq!(third.snapshot.scene.scene_id, forest_scene);
-    assert_eq!(third.snapshot.revision, Revision::new(9));
+    let third = service
+        .snapshot(
+            transition_context.session_id,
+            loreloom_core::RuntimePhase::Completed,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        )
+        .await
+        .expect("snapshot revisited forest");
+    assert_eq!(third.scene.scene_id, forest_scene);
+    assert_eq!(third.revision, Revision::new(7));
     assert!(
         third
-            .snapshot
             .scene
             .visible_actors
             .iter()

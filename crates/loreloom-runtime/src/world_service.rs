@@ -1,4 +1,8 @@
-use std::{collections::BTreeMap, path::Path, sync::Arc};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::Path,
+    sync::Arc,
+};
 
 use armillae_core::{ToolCall, ToolDefinition, ToolResult, ToolResultContent};
 use armillae_tools::{BoxFuture, ToolContext, ToolExecutionError, ToolExecutor};
@@ -12,13 +16,14 @@ use loreloom_content::{
 use loreloom_core::{
     ActionId, ActiveEventView, ActorId, AttributeAdjustment, AttributeOperation, AttributeView,
     CharacterContext, CharacterController, CharacterLifetime, CharacterSpawnSpec, ConditionRecord,
-    ConditionView, ContentDefinitionId, DIAGNOSED_CONDITION_PREDICATE_ID, DomainRecord, EventId,
-    EventOptionView, FactSubject, FactValue, GeneratedOrigin, InventoryView, KnowledgeStatus,
-    LongText, ModLock, NpcTurnRequestId, ObjectId, ParameterSetView, ParameterValue,
-    ParameterValueView, ResourceView, Revision, RuntimePhase, SAVE_FORMAT_V1, SaveId, SaveManifest,
-    SceneContext, SceneObservation, SceneTransitionTarget, SessionId, SkillTargetRef, SkillView,
-    SystemIdGenerator, ToolActivity, TranscriptWindow, UiNotice, UiSnapshot, VisibleActorView,
-    WorldCommand, WorldCommandKind, WorldEvent, WorldEventKind,
+    ConditionView, ContentDefinitionId, DIAGNOSED_CONDITION_PREDICATE_ID, DisplayName,
+    DomainRecord, EventId, EventOptionView, FactSubject, FactValue, GeneratedOrigin, InventoryView,
+    KnowledgeStatus, LongText, ModLock, NpcTurnRequestId, ObjectId, ParameterSetView,
+    ParameterValue, ParameterValueView, ResourceView, Revision, RuntimePhase, SAVE_FORMAT_V1,
+    SaveId, SaveManifest, SceneContext, SceneObservation, SceneRecord, SceneTransitionTarget,
+    SessionId, ShortText, SkillTargetRef, SkillView, SystemIdGenerator, ToolActivity,
+    TranscriptWindow, UiNotice, UiSnapshot, VisibleActorView, WorldCommand, WorldCommandKind,
+    WorldEvent, WorldEventKind,
 };
 use loreloom_store::{ActionResolution, CommitRequest, CommitResult, CommittedAction, SaveStore};
 use loreloom_world::{GameWorld, WorldBootstrap, WorldConfig};
@@ -43,6 +48,19 @@ struct RuntimeWorld {
     config: WorldConfig,
     events: Vec<WorldEvent>,
     ids: SystemIdGenerator,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SceneTransitionOption {
+    target: SceneTransitionTarget,
+    display_name: DisplayName,
+    framing: ShortText,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SceneTransitionProjection {
+    current: SceneRecord,
+    targets: Vec<SceneTransitionOption>,
 }
 
 pub struct WorldService {
@@ -635,6 +653,56 @@ impl WorldService {
         }))
     }
 
+    async fn list_scene_transitions(
+        &self,
+        context: &AgentToolContext,
+    ) -> Result<JsonValue, RuntimeError> {
+        let inner = self.inner.lock().await;
+        if inner.world.revision() != context.revision {
+            return Err(RuntimeError::Unavailable);
+        }
+        if inner.world.world_state().player_actor != context.actor_id
+            || !context
+                .capabilities
+                .contains(NARRATOR_TRANSITION_SCENE_CAPABILITY)
+        {
+            return Err(RuntimeError::CapabilityDenied);
+        }
+        let projection = scene_transition_projection(&inner)?;
+        Ok(json!({
+            "revision": context.revision,
+            "current": {
+                "scene_id": projection.current.id,
+                "scene_definition_id": projection.current.origin.definition_id,
+                "display_name": projection.current.display_name,
+                "framing": projection.current.framing,
+            },
+            "targets": projection.targets.into_iter().map(|option| json!({
+                "target": option.target,
+                "display_name": option.display_name,
+                "framing": option.framing,
+            })).collect::<Vec<_>>(),
+        }))
+    }
+
+    async fn validate_scene_transition_target(
+        &self,
+        context: &AgentToolContext,
+        target: &SceneTransitionTarget,
+    ) -> Result<(), RuntimeError> {
+        let inner = self.inner.lock().await;
+        if inner.world.revision() != context.revision {
+            return Err(RuntimeError::Unavailable);
+        }
+        let projection = scene_transition_projection(&inner)?;
+        projection
+            .targets
+            .iter()
+            .any(|option| &option.target == target)
+            .then_some(())
+            .ok_or(RuntimeError::SceneTransitionTargetUnavailable)
+    }
+
     async fn perform_gameplay_action(
         &self,
         context: &AgentToolContext,
@@ -970,8 +1038,16 @@ impl ToolExecutor for RuntimeToolExecutor {
                 }),
             },
             ToolDefinition {
+                name: "list_scene_transitions".to_owned(),
+                description: "List the current scene and exact canonical transition targets available at this revision. Call this before transition_scene and copy one returned target object without changing it.".to_owned(),
+                input_schema: json!({
+                    "type": "object",
+                    "additionalProperties": false
+                }),
+            },
+            ToolDefinition {
                 name: "transition_scene".to_owned(),
-                description: "Transition to one existing or content-defined scene after this narrator turn. The runtime preserves inactive scene state and replans after the transition.".to_owned(),
+                description: "Transition after this narrator turn using one exact target object returned by list_scene_transitions. Never invent a scene ID or narrate arrival before the committed transition result.".to_owned(),
                 input_schema: json!({
                     "type": "object",
                     "required": ["target"],
@@ -1338,6 +1414,7 @@ impl ToolExecutor for RuntimeToolExecutor {
                         }
                     }
                 }
+                "list_scene_transitions" => self.service.list_scene_transitions(runtime).await,
                 "transition_scene" => {
                     if !runtime
                         .capabilities
@@ -1350,31 +1427,47 @@ impl ToolExecutor for RuntimeToolExecutor {
                     } else if !self.pending_npc_decisions.lock().await.is_empty()
                         || !self.pending_npc_turns.lock().await.is_empty()
                     {
-                        Err(RuntimeError::InvalidInput)
+                        Err(RuntimeError::SceneTransitionConflict)
                     } else {
-                        match call
+                        let target = match call
                             .arguments
                             .get("target")
                             .cloned()
-                            .ok_or(RuntimeError::InvalidInput)
+                            .ok_or(RuntimeError::SceneTransitionTargetUnavailable)
                             .and_then(|value| {
                                 serde_json::from_value::<SceneTransitionTarget>(value)
-                                    .map_err(|_| RuntimeError::InvalidInput)
+                                    .map_err(|_| RuntimeError::SceneTransitionTargetUnavailable)
                             }) {
-                            Ok(target) => {
+                            Ok(target) => target,
+                            Err(error) => {
+                                return Ok(tool_result(&call, runtime_error_json(&error), true));
+                            }
+                        };
+                        match self
+                            .service
+                            .validate_scene_transition_target(runtime, &target)
+                            .await
+                        {
+                            Ok(()) => {
                                 let mut pending = self.pending_scene_transition.lock().await;
-                                if pending.is_some() {
-                                    Err(RuntimeError::InvalidInput)
-                                } else {
-                                    *pending = Some(PendingSceneTransition {
-                                        call_id: call.id.as_str().to_owned(),
-                                        revision: runtime.revision,
-                                        target,
-                                    });
-                                    Ok(json!({
+                                match pending.as_ref() {
+                                    Some(existing) if existing.target == target => Ok(json!({
+                                        "status": "accepted_pending",
+                                        "revision": runtime.revision,
+                                        "duplicate": true
+                                    })),
+                                    Some(_) => Err(RuntimeError::SceneTransitionConflict),
+                                    None => {
+                                        *pending = Some(PendingSceneTransition {
+                                            call_id: call.id.as_str().to_owned(),
+                                            revision: runtime.revision,
+                                            target,
+                                        });
+                                        Ok(json!({
                                         "status": "accepted_pending",
                                         "revision": runtime.revision
-                                    }))
+                                        }))
+                                    }
                                 }
                             }
                             Err(error) => Err(error),
@@ -1416,10 +1509,62 @@ impl ToolExecutor for RuntimeToolExecutor {
             };
             Ok(match result {
                 Ok(value) => tool_result(&call, value, false),
-                Err(error) => tool_result(&call, json!({ "code": error.code() }), true),
+                Err(error) => tool_result(&call, runtime_error_json(&error), true),
             })
         })
     }
+}
+
+fn scene_transition_projection(
+    inner: &RuntimeWorld,
+) -> Result<SceneTransitionProjection, RuntimeError> {
+    let active_scene = inner.world.world_state().active_scene;
+    let scenes = inner
+        .world
+        .project_records()?
+        .into_iter()
+        .filter_map(|record| match record {
+            DomainRecord::Scene(scene) => Some(scene),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let current = scenes
+        .iter()
+        .find(|scene| scene.id == active_scene && scene.active)
+        .cloned()
+        .ok_or(RuntimeError::Unavailable)?;
+    let materialized_definitions = scenes
+        .iter()
+        .map(|scene| scene.origin.definition_id.clone())
+        .collect::<BTreeSet<_>>();
+    let mut targets = scenes
+        .into_iter()
+        .filter(|scene| scene.id != active_scene && !scene.active)
+        .map(|scene| SceneTransitionOption {
+            target: SceneTransitionTarget::Existing { scene_id: scene.id },
+            display_name: scene.display_name,
+            framing: scene.framing,
+        })
+        .collect::<Vec<_>>();
+    targets.extend(inner.registry.iter().filter_map(|(_, entry)| {
+        let Definition::Scene(scene) = &entry.definition else {
+            return None;
+        };
+        (!materialized_definitions.contains(&scene.id)).then(|| SceneTransitionOption {
+            target: SceneTransitionTarget::Definition {
+                scene_definition_id: scene.id.clone(),
+            },
+            display_name: scene.display_name.clone(),
+            framing: scene.framing.clone(),
+        })
+    }));
+    targets.sort_by_key(|option| match &option.target {
+        SceneTransitionTarget::Existing { scene_id } => format!("existing:{scene_id}"),
+        SceneTransitionTarget::Definition {
+            scene_definition_id,
+        } => format!("definition:{scene_definition_id}"),
+    });
+    Ok(SceneTransitionProjection { current, targets })
 }
 
 async fn spawn_character(
@@ -2315,5 +2460,20 @@ fn tool_result(call: &ToolCall, value: JsonValue, is_error: bool) -> ToolResult 
         call_id: call.id.clone(),
         content: vec![ToolResultContent::Json { value }],
         is_error,
+    }
+}
+
+fn runtime_error_json(error: &RuntimeError) -> JsonValue {
+    match error {
+        RuntimeError::SceneTransitionTargetUnavailable => json!({
+            "code": error.code(),
+            "recovery_tool": "list_scene_transitions",
+            "retry_unchanged": false,
+        }),
+        RuntimeError::SceneTransitionConflict => json!({
+            "code": error.code(),
+            "retry_unchanged": false,
+        }),
+        _ => json!({ "code": error.code() }),
     }
 }

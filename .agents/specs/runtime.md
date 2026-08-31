@@ -1043,6 +1043,7 @@ Narrator 可以使用：
 | Orchestration | `materialize_npc` | 暂存受约束 NarratorNpcDecision/NpcGenerationRequest，待当前 Narrator Turn 结束后物化 |
 | Command | `promote_npc` | 请求把已有 Scene-owned NPC 提升为世界级角色 |
 | Orchestration | `request_npc_turn` | 请求 Runtime 为已有 AgentBinding NPC 追加一次 Turn |
+| Query | `list_scene_transitions` | 返回当前 Scene 与当前 Revision 可用的 canonical Scene 切换目标 |
 | Orchestration | `transition_scene` | 暂存目标 Scene，待当前 Narrator Turn 结束后原子停用当前 Scene 并激活目标 Scene |
 
 这些 Tool 不允许 Narrator 提供原始 Component、Provider、无限属性、未注册 Definition 或自定义
@@ -1053,6 +1054,20 @@ Executor。Runtime 只验证和执行 Narrator 通过原生 ToolCall 提交的�
 `request_npc_turn` 共存；后出现的冲突 ToolCall 返回结构化拒绝。Narrator Turn 结束后 Runtime 才以
 ToolCall 被接受时的 Revision 执行切换；成功、stale 或领域拒绝都形成下一次 Narrator 输入并强制
 重新规划，切换前的 NPC 请求不得在新 Scene 中启动。
+
+Narrator 在切换前必须调用 `list_scene_transitions`，并把其中某一项的 `target` 对象原样传给
+`transition_scene`，不得从展示名称、玩家文本或模型记忆猜测 Stable ID。Query 与切换共享
+`narrator.transition_scene` Capability，并绑定当前玩家 Actor 与 Revision；它返回当前 Scene 摘要，
+以及以下互斥的目标：
+
+- 已在 World 中物化且 inactive 的 Scene 返回 `existing` Scene ObjectId；
+- 当前 Registry 中尚未物化的 Scene Definition 返回 `definition` Definition ID；
+- 当前 active Scene 被排除；已物化 Definition 不再同时返回 Definition 目标。
+
+目标不在该列表、参数形状错误或编排互斥时，ToolResult 必须给出可区分的结构化原因与恢复方向。
+同一 Turn 对同一已接受目标的重复调用按幂等接受处理；不同目标仍按冲突拒绝。Narrator 不得在
+`scene_transition_results` 报告 committed 前叙述已经抵达；若列表没有匹配玩家意图的目标，应说明
+当前内容不可达，不能原样重试或隐式生成 Scene。
 
 ### 9.6 Event 与 Gameplay Action Tool 面
 
@@ -1533,6 +1548,11 @@ Scene lifetime Character 及其拥有的 Item/Condition/SkillGrant/Goal 都保�
 
 第一阶段同一 World 只有一个 active Scene。`transition_scene` 接受已提交 Scene ObjectId，或当前
 ModLock 中的 Scene Definition ID：
+
+在提交前，Narrator 通过 `list_scene_transitions` 取得当前 Revision 的可选目标。该投影以 Working
+World 与当前 Registry 为权威：inactive Scene 使用既有 ObjectId，未物化 Definition 使用 Definition
+ID，当前 Scene 和重复 Definition 目标不进入结果。这个发现步骤只读取状态，不修改 Revision，也不
+授予运行时创建未注册 Scene 的能力。
 
 - 已提交目标必须是 inactive Scene；Runtime 使用其原有 SceneRecord、Place、Character、Event 和
  其它领域状态，不重新从 Definition 覆盖；
