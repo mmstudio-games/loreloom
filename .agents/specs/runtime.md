@@ -174,7 +174,9 @@ Backend、Runtime 与 TUI 装配，以及进程退出顺序。
 
 在外部 Provider/Mod 配置产品化前，二进制提供无 Secret 的本地 demo smoke path：默认打开 TUI，
 `--save PATH` 选择 SurrealKV 存档，`--headless INPUT` 对同一 Runtime 执行一个完整 Turn 供 CI/终端
-兼容诊断。该开发 demo 不替代第 10.4 节的 Mod package pipeline，也不能作为外部内容格式。
+兼容诊断；可重复的 `--mod PATH` 把每个显式目录包根加入第 10.4 节同一编译闭包。该开发 demo 的
+内置内容使用 virtual directory source，不替代外部内容格式；已有 Save 必须用相同 candidate ModLock
+重开。
 
 ## 4. Rust、Cargo 与依赖策略
 
@@ -1371,19 +1373,33 @@ directory pipeline 加载。目录布局固定为：
 mod.toml
 content/*.json
 rules/*.json
+patches/*.json       # only files declared by Manifest
 locales/*.json       # optional display-only data
 assets/**            # optional bounded opaque resources
 ```
 
 `mod.toml` 是 UTF-8 TOML，Manifest Schema v1 至少声明 reverse-DNS lowercase Mod ID、SemVer
-version、Engine SemVer requirement、Content Schema version、required/optional dependencies、
-`content | rules` capability、payload SHA-256 与显式 Patch。JSON 文件为 versioned tagged Schema，
-拒绝未知控制字段。第一阶段没有 package signature/authenticity 承诺；包来源信任由用户配置表达，
-SHA-256 只提供内容完整性和存档精确锁定。
+version、属于该 Mod 且 kind 为 `pack` 的 Pack ID、Engine SemVer requirement、Content Schema
+version、required/optional dependencies、`content | rules` capability、64-byte lowercase hex payload
+SHA-256 与显式 Patch。JSON 文件为 versioned tagged Schema，拒绝未知控制字段。第一阶段没有
+package signature/authenticity 承诺；包来源信任由用户配置表达，SHA-256 只提供内容完整性和存档
+精确锁定。第一阶段 Loreloom Engine compatibility version 固定为 `0.1.0`，独立于各 Rust crate 的
+Semifold patch release；只有协议兼容边界变化时才显式提升。
 
-payload hash 输入为把 `content_hash` 清空后规范序列化的 Manifest，以及按相对 path byte-order 排序
-的全部 payload；每个 path 长度/path bytes/内容长度/原始内容 bytes 都进入 SHA-256。Manifest TOML
-空白不影响 hash，JSON/asset 原始 bytes 或路径变化会改变 hash。
+`content/*.json` 使用第 10.2 节 Content Document v1，并只允许 AgentProfile 到 Scene 的静态
+Definition；`rules/*.json` 复用同一 document envelope，但只允许 Parameter、Event、GameplayAction
+与 Rule Definition。对应目录存在时 Manifest 必须分别声明 `content`/`rules` capability。
+`patches/*.json` 不参与普通 Definition 扫描，只能由 Manifest 精确引用；Patch Document v1 顶层为
+`schema_version: 1` 与非空 `operations`，第一阶段唯一 operation 是 `replace_definition`，其 value
+为完整 Definition。替换值必须与声明的 target Definition 保持相同 ID 和 kind，保留 target 的
+ContentOrigin，并在全部 Patch 应用后重新执行字段、跨引用、Rule plan 与能力校验。第一阶段不支持
+JSON Pointer、字段级 merge、删除/重命名 Definition 或可执行 Patch。
+
+payload hash 输入为把 `content_hash` 清空并把 dependency、capability、Patch 分别按 ID 排序后规范
+TOML 序列化的 Manifest，以及按相对 path byte-order 排序的全部 payload。Digest 输入先写 manifest
+byte length 的 little-endian `u64` 与 manifest bytes，再为每个 payload 写 path byte length 的
+little-endian `u64`、path bytes、内容 byte length 的 little-endian `u64` 与原始内容 bytes。
+Manifest TOML 空白不影响 hash，JSON/asset 原始 bytes 或路径变化会改变 hash。
 
 包路径统一使用 `/` 的相对路径。加载器在解析内容前拒绝 absolute、反斜杠、NUL、空/`.`/`..`
 segment、symlink 和重复规范路径。Host 默认上限为 256 个 payload 文件、单文件 1 MiB、总 payload
@@ -1410,6 +1426,12 @@ ModLock 每项固定保存 Mod ID、resolved SemVer、content hash、Manifest/Co
 包内文本、Agent Profile 和展示资源均视为不可信数据，不能改变系统 Prompt 优先级、Tool
 Capability 或日志/Secret 策略。Content/Rule Mod 没有包外文件、网络、Shell、Provider 或 Secret
 访问能力。数据文件不能注册 Tool Handler、Native System、动态 Component 或脚本解释器。
+
+Content 产品 API 以显式 package root 或内存 virtual directory 为输入；内置内容和测试 Fixture
+使用 virtual directory 只是来源差异，必须经过同一 Manifest、path/size、hash、dependency、Patch、
+Registry 与 ModLock 编译器。编译结果拥有不可变 DefinitionRegistry、规范 ModLock 与有界资源索引。
+打开既有 Save 时 Runtime 必须在物化 World 前比较 candidate ModLock 与 SaveManifest ModLock；不匹配
+返回稳定 `content_lock_mismatch`，不能先替换 Registry 或加载部分 World。
 
 第一阶段不支持在活动 World 中热替换 Definition/Rule。启停或升级 Mod 必须关闭当前世界，并在
 重开时通过版本检查、迁移和完整重建边界执行。

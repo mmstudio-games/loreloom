@@ -7,7 +7,7 @@ use loreloom_content::{Definition, DefinitionRegistry, ParameterVisibility, Pred
 use loreloom_core::{
     ActionId, ActiveEventView, ActorId, AttributeAdjustment, AttributeOperation, AttributeView,
     CharacterContext, CharacterController, ConditionView, DomainRecord, EventId, EventOptionView,
-    InventoryView, LongText, ObjectId, ParameterSetView, ParameterValueView, ResourceView,
+    InventoryView, LongText, ModLock, ObjectId, ParameterSetView, ParameterValueView, ResourceView,
     Revision, RuntimePhase, SceneContext, SceneObservation, SessionId, SkillView,
     SystemIdGenerator, ToolActivity, TranscriptWindow, UiNotice, UiSnapshot, VisibleActorView,
     WorldCommand, WorldCommandKind, WorldEvent,
@@ -47,8 +47,12 @@ impl WorldService {
     pub async fn open(
         mut store: SaveStore,
         registry: DefinitionRegistry,
+        candidate_mod_lock: &ModLock,
         config: WorldConfig,
     ) -> Result<Arc<Self>, RuntimeError> {
+        if &store.manifest().mod_lock != candidate_mod_lock {
+            return Err(RuntimeError::ContentLockMismatch);
+        }
         let loaded = store.load().await?;
         let world =
             GameWorld::from_records(loaded.revision, loaded.records, config.clone(), &registry)?;

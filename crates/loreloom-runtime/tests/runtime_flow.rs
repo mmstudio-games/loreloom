@@ -30,10 +30,11 @@ use loreloom_core::{
     ActionId, ActionState, ActorId, AgentBinding, AttributeAdjustment, AttributeOperation,
     BaseAttributes, CharacterController, CharacterLifetime, CharacterProfile, CharacterRecord,
     ContentDefinitionId, ContentOrigin, DisplayName, DomainRecord, EntityOrigin,
-    EventInstanceRecord, EventStatus, Fixed, LifeState, LongText, ModId, ModLock, ObjectId,
-    ParameterSetRecord, ParameterValue, PlaceRecord, Posture, Revision, SAVE_FORMAT_V1, SaveId,
-    SaveManifest, SceneRecord, SessionId, ShortText, StackState, SystemIdGenerator,
-    TranscriptSpeaker, WorldCommand, WorldCommandKind, WorldId, WorldStateRecord, WorldTime,
+    EventInstanceRecord, EventStatus, Fixed, LifeState, LockedMod, LongText, ModId, ModLock,
+    ModSourceKind, ObjectId, ParameterSetRecord, ParameterValue, PlaceRecord, Posture, Revision,
+    SAVE_FORMAT_V1, SaveId, SaveManifest, SceneRecord, SessionId, ShortText, StackState,
+    SystemIdGenerator, TranscriptSpeaker, WorldCommand, WorldCommandKind, WorldId,
+    WorldStateRecord, WorldTime,
 };
 use loreloom_runtime::{
     GameRuntime, RuntimeConfig, RuntimeError, RuntimeToolExecutor, WorldService,
@@ -530,6 +531,36 @@ fn npc_bridge() -> Arc<MockBridge> {
 }
 
 #[tokio::test]
+async fn world_service_rejects_a_candidate_mod_lock_before_world_materialization() {
+    let directory = TempDir::new().expect("temporary save parent");
+    let fixture = fixture();
+    let store = SaveStore::create(
+        directory.path().join("save"),
+        fixture.manifest,
+        fixture.records,
+    )
+    .await
+    .expect("create save");
+    let candidate = ModLock {
+        mods: vec![LockedMod {
+            mod_id: ModId::parse("games.loreloom.other").expect("candidate Mod ID"),
+            version: Version::new(1, 0, 0),
+            content_hash: parse_content_hash("e".repeat(64)).expect("candidate hash"),
+            manifest_schema: 1,
+            content_schema: CONTENT_SCHEMA_V1,
+            source_kind: ModSourceKind::Builtin,
+            dependencies: Vec::new(),
+            applied_patches: Vec::new(),
+        }],
+    };
+
+    assert!(matches!(
+        WorldService::open(store, fixture.registry, &candidate, fixture.world_config).await,
+        Err(RuntimeError::ContentLockMismatch)
+    ));
+}
+
+#[tokio::test]
 async fn player_narrator_npc_and_surreal_store_form_a_durable_vertical_slice() {
     let directory = TempDir::new().expect("temporary save parent");
     let fixture = fixture();
@@ -544,6 +575,7 @@ async fn player_narrator_npc_and_surreal_store_form_a_durable_vertical_slice() {
     let service = WorldService::open(
         store,
         fixture.registry.clone(),
+        &fixture.manifest.mod_lock,
         fixture.world_config.clone(),
     )
     .await
@@ -625,6 +657,7 @@ async fn player_narrator_npc_and_surreal_store_form_a_durable_vertical_slice() {
 async fn stale_npc_requests_are_correlated_without_calling_the_provider() {
     let directory = TempDir::new().expect("temporary save parent");
     let fixture = fixture();
+    let candidate_mod_lock = fixture.manifest.mod_lock.clone();
     let store = SaveStore::create(
         directory.path().join("save"),
         fixture.manifest,
@@ -632,9 +665,14 @@ async fn stale_npc_requests_are_correlated_without_calling_the_provider() {
     )
     .await
     .expect("create save");
-    let service = WorldService::open(store, fixture.registry, fixture.world_config)
-        .await
-        .expect("open service");
+    let service = WorldService::open(
+        store,
+        fixture.registry,
+        &candidate_mod_lock,
+        fixture.world_config,
+    )
+    .await
+    .expect("open service");
     let plan = NarratorPlan {
         based_on_revision: Revision::new(1),
         npc_turns: vec![request(fixture.npc, object_id("2b6f"))],
@@ -663,6 +701,7 @@ async fn stale_npc_requests_are_correlated_without_calling_the_provider() {
 async fn synthesis_cannot_cite_an_uncommitted_world_event() {
     let directory = TempDir::new().expect("temporary save parent");
     let fixture = fixture();
+    let candidate_mod_lock = fixture.manifest.mod_lock.clone();
     let store = SaveStore::create(
         directory.path().join("save"),
         fixture.manifest,
@@ -671,9 +710,14 @@ async fn synthesis_cannot_cite_an_uncommitted_world_event() {
     .await
     .expect("create save");
     let mut observer = store.connect().await.expect("observer connection");
-    let service = WorldService::open(store, fixture.registry, fixture.world_config)
-        .await
-        .expect("open service");
+    let service = WorldService::open(
+        store,
+        fixture.registry,
+        &candidate_mod_lock,
+        fixture.world_config,
+    )
+    .await
+    .expect("open service");
     let plan = NarratorPlan {
         based_on_revision: Revision::new(1),
         npc_turns: Vec::new(),
@@ -709,6 +753,7 @@ async fn synthesis_cannot_cite_an_uncommitted_world_event() {
 async fn external_revision_conflict_recovers_the_candidate_world() {
     let directory = TempDir::new().expect("temporary save parent");
     let fixture = fixture();
+    let candidate_mod_lock = fixture.manifest.mod_lock.clone();
     let store = SaveStore::create(
         directory.path().join("save"),
         fixture.manifest,
@@ -720,6 +765,7 @@ async fn external_revision_conflict_recovers_the_candidate_world() {
     let service = WorldService::open(
         store,
         fixture.registry.clone(),
+        &candidate_mod_lock,
         fixture.world_config.clone(),
     )
     .await

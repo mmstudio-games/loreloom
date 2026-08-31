@@ -229,7 +229,7 @@ mod tests {
             .build()
             .expect("test runtime");
         let setup = io
-            .block_on(build_demo(&temporary.path().join("save")))
+            .block_on(build_demo(&temporary.path().join("save"), &[]))
             .expect("demo setup");
         let initial_revision = setup.initial_snapshot.revision;
         let mut adapter = RuntimeAdapter::spawn(setup.runtime).expect("runtime worker");

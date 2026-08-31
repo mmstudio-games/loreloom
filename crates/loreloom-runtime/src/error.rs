@@ -10,6 +10,8 @@ pub enum RuntimeError {
     InvalidInput,
     #[error("runtime actor or scene is unavailable")]
     Unavailable,
+    #[error("save ModLock does not match the configured content packages")]
+    ContentLockMismatch,
     #[error("agent model protocol is invalid at {stage}")]
     ModelProtocol { stage: &'static str },
     #[error("agent bridge is unavailable")]
@@ -44,6 +46,7 @@ impl RuntimeError {
         match self {
             Self::InvalidInput => "invalid_input",
             Self::Unavailable => "unavailable",
+            Self::ContentLockMismatch => "content_lock_mismatch",
             Self::ModelProtocol { .. } | Self::Agent(_) | Self::Json { .. } => "agent_error",
             Self::BridgeUnavailable => "bridge_unavailable",
             Self::Budget(_) => "budget_exhausted",

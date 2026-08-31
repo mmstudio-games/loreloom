@@ -35,7 +35,7 @@ fn run_application() -> Result<(), AppError> {
     let DemoSetup {
         mut runtime,
         initial_snapshot,
-    } = tokio.block_on(build_demo(&cli.save_path))?;
+    } = tokio.block_on(build_demo(&cli.save_path, &cli.mod_paths))?;
     if let Some(input) = cli.headless_input {
         let outcome = tokio.block_on(runtime.handle_player_input(input))?;
         println!("{}", outcome.narration);

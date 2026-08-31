@@ -55,7 +55,10 @@ OPEN 项、后续 RFC 或 P0 Spike；空 crate 不代表相关协议已经实现
 - [ ] 实现关闭后物理备份、恢复与存档切换的产品 API；
 - [x] 实现 Runtime Client/Event loop、确定性 TUI 产品层与可运行的内置 demo 装配，完成最小可玩
   Runtime、World、Agent、Store、TUI 纵向切片；
-- [ ] 实现正式目录 Mod package discovery、依赖/Patch/hash lock、统一内置/外部加载与精确重开；
+- [x] 实现正式目录 Mod package discovery、依赖/Patch/hash lock、统一内置/外部 Registry 加载与
+  精确 ModLock 重开门禁；
+- [ ] 把内置/外部初始 Scene 统一编译为 spawn plan，并通过共享 NpcFactory/初始化提交物化，不再由
+  demo 手工构造初始 Character/Item records；
 - [ ] 实现 Event Option、Gameplay Action 与声明式 Rule 的产品 executor 和通用 Tool；
 - [ ] 实现外部 Provider、非敏感配置与 Secret source 的二进制装配；
 - [ ] 满足 Active Spec 第 17 节全部验收条件。

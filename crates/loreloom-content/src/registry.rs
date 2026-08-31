@@ -35,6 +35,8 @@ pub enum ContentError {
     },
     #[error("duplicate definition {id}")]
     DuplicateDefinition { id: ContentDefinitionId },
+    #[error("duplicate content pack {id}")]
+    DuplicatePack { id: ContentDefinitionId },
     #[error("definition {owner} references missing or wrong-kind {target}; expected {expected}")]
     InvalidReference {
         owner: ContentDefinitionId,
@@ -76,7 +78,7 @@ pub struct RegisteredDefinition {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DefinitionRegistry {
-    context: ContentPackContext,
+    contexts: BTreeMap<ContentDefinitionId, ContentPackContext>,
     definitions: BTreeMap<ContentDefinitionId, RegisteredDefinition>,
 }
 
@@ -102,57 +104,73 @@ impl DefinitionRegistry {
         context: ContentPackContext,
         documents: impl IntoIterator<Item = ContentDocument>,
     ) -> Result<Self, ContentError> {
-        if context
-            .pack_id
-            .mod_id()
-            .map_err(|_| ContentError::Identity)?
-            != context.mod_id
-            || context.pack_id.kind().map_err(|_| ContentError::Identity)? != "pack"
-        {
-            return Err(ContentError::WrongMod {
-                id: context.pack_id.clone(),
-                mod_id: context.mod_id.clone(),
-            });
-        }
-        let version_text =
-            ShortText::new(context.mod_version.to_string()).map_err(|_| ContentError::TextBound)?;
+        Self::build_packages([(context, documents.into_iter().collect())])
+    }
+
+    pub fn build_packages(
+        packages: impl IntoIterator<Item = (ContentPackContext, Vec<ContentDocument>)>,
+    ) -> Result<Self, ContentError> {
+        let mut contexts = BTreeMap::new();
         let mut definitions = BTreeMap::new();
-        for document in documents {
-            if document.schema_version != CONTENT_SCHEMA_V1 {
-                return Err(ContentError::UnsupportedSchema {
-                    observed: document.schema_version,
+        for (context, documents) in packages {
+            if context
+                .pack_id
+                .mod_id()
+                .map_err(|_| ContentError::Identity)?
+                != context.mod_id
+                || context.pack_id.kind().map_err(|_| ContentError::Identity)? != "pack"
+            {
+                return Err(ContentError::WrongMod {
+                    id: context.pack_id.clone(),
+                    mod_id: context.mod_id.clone(),
                 });
             }
-            for definition in document.definitions {
-                validate_definition_identity(&context.mod_id, &definition)?;
-                validate_local_values(&definition)?;
-                let id = definition.id().clone();
-                let origin = ContentOrigin {
-                    mod_id: context.mod_id.clone(),
-                    mod_version: version_text.clone(),
-                    pack_id: context.pack_id.clone(),
-                    definition_id: id.clone(),
-                    content_version: context.content_version,
-                    content_hash: context.content_hash.clone(),
-                };
-                if definitions
-                    .insert(id.clone(), RegisteredDefinition { definition, origin })
-                    .is_some()
-                {
-                    return Err(ContentError::DuplicateDefinition { id });
+            if contexts
+                .insert(context.pack_id.clone(), context.clone())
+                .is_some()
+            {
+                return Err(ContentError::DuplicatePack {
+                    id: context.pack_id,
+                });
+            }
+            let version_text = ShortText::new(context.mod_version.to_string())
+                .map_err(|_| ContentError::TextBound)?;
+            for document in documents {
+                if document.schema_version != CONTENT_SCHEMA_V1 {
+                    return Err(ContentError::UnsupportedSchema {
+                        observed: document.schema_version,
+                    });
+                }
+                for definition in document.definitions {
+                    validate_definition_identity(&context.mod_id, &definition)?;
+                    validate_local_values(&definition)?;
+                    let id = definition.id().clone();
+                    let origin = ContentOrigin {
+                        mod_id: context.mod_id.clone(),
+                        mod_version: version_text.clone(),
+                        pack_id: context.pack_id.clone(),
+                        definition_id: id.clone(),
+                        content_version: context.content_version,
+                        content_hash: context.content_hash.clone(),
+                    };
+                    if definitions
+                        .insert(id.clone(), RegisteredDefinition { definition, origin })
+                        .is_some()
+                    {
+                        return Err(ContentError::DuplicateDefinition { id });
+                    }
                 }
             }
         }
         validate_references(&definitions)?;
         Ok(Self {
-            context,
+            contexts,
             definitions,
         })
     }
 
-    #[must_use]
-    pub fn context(&self) -> &ContentPackContext {
-        &self.context
+    pub fn contexts(&self) -> impl Iterator<Item = &ContentPackContext> {
+        self.contexts.values()
     }
 
     #[must_use]

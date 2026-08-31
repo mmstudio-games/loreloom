@@ -11,6 +11,10 @@ pub enum AppError {
     #[error(transparent)]
     Content(#[from] loreloom_content::ContentError),
     #[error(transparent)]
+    Package(#[from] loreloom_content::PackageError),
+    #[error("built-in demo content could not be encoded")]
+    DemoCodec(#[source] serde_json::Error),
+    #[error(transparent)]
     Store(#[from] loreloom_store::StoreError),
     #[error(transparent)]
     Runtime(#[from] loreloom_runtime::RuntimeError),
