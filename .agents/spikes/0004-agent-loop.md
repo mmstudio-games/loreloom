@@ -5,6 +5,11 @@
 > 完成日期：2026-08-30
 > 规范来源：[Runtime Active Spec §10](../specs/runtime.md#10-agent-runtime)
 
+> 历史证据说明：本 Spike 验证的串行执行、Tool correlation、预算、取消和 Revision 结论继续有效；
+> 其中由模型正文生成 NarratorPlan/NpcModelOutput/NarratorSynthesis JSON 的实验协议已于
+> 2026-08-31 被产品协议取代。当前权威行为见 Active Runtime Spec 10.1/10.5：模型正文是自然语言，
+> 内部 Plan 由 Provider 原生 ToolCall 构造。产品回归证据位于 `loreloom-runtime/tests/runtime_flow.rs`。
+
 ## 目标
 
 验证 Loreloom 可以在 Armillae 单次 `LlmBridge`/`ToolExecutor` 合约之上显式实现 Agent Turn 和完整

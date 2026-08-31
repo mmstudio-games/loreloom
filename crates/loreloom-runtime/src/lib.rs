@@ -7,7 +7,8 @@ mod runtime;
 mod world_service;
 
 pub use config::{
-    ContextProjectionPolicy, NARRATOR_MATERIALIZE_NPC_CAPABILITY, NpcResourcePolicy,
+    ContextProjectionPolicy, NARRATOR_MATERIALIZE_NPC_CAPABILITY,
+    NARRATOR_REQUEST_NPC_TURN_CAPABILITY, NARRATOR_SUBMIT_NPC_DRAFT_CAPABILITY, NpcResourcePolicy,
     OrchestrationBudget, RuntimeConfig,
 };
 pub use error::RuntimeError;

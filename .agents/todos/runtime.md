@@ -26,9 +26,9 @@ OPEN 项、后续 RFC 或 P0 Spike；空 crate 不代表相关协议已经实现
 - [x] [Armillae/Bevy Spike](../spikes/0001-armillae-bevy.md)：验证 Component/System、WorldGateway、Observation、容器、技能、
   Attribute、Condition/Clock 与 Revision conflict；
 - [x] [TUI Spike](../spikes/0003-tui.md)：验证 Ratatui/Crossterm 双栏、多行 Unicode 输入、
-  streaming、resize、窄屏降级和终端恢复，并冻结第一阶段交互边界；
-- [x] [Agent Loop Spike](../spikes/0004-agent-loop.md)：验证并冻结 NarratorPlan、
-  NpcTurnRequest/Result、NarratorSynthesis、严格串行、两级预算、取消和 stale Revision；
+  resize、窄屏降级和终端恢复；产品阶段改用 Runtime thinking 状态，不展示 Provider 未完成正文；
+- [x] [Agent Loop Spike](../spikes/0004-agent-loop.md)：验证严格串行、ToolCall 构造的内部 Plan、
+  NpcTurnRequest/Result、两级预算、取消和 stale Revision；产品模型正文协议已改为自然语言；
 - [x] [Content/NpcFactory Spike](../spikes/0005-content-npc-factory.md)：验证并冻结预设 Definition
   与运行时 Draft 的统一 SpawnSpec/Factory 路径、两阶段跨引用、失败回滚和 GeneratedOrigin 恢复；
 - [x] [Mod/Rule Spike](../spikes/0006-mod-rule.md)：验证并冻结目录包格式、依赖/Patch/哈希锁定、
@@ -44,7 +44,7 @@ OPEN 项、后续 RFC 或 P0 Spike；空 crate 不代表相关协议已经实现
 - [x] 冻结角色、物品、技能、属性、资源、Condition、正交状态、KnownFact/Goal/Transcript Schema；
 - [x] 冻结 Character/Scene/Item/Skill 等 Content Definition v1 字段与迁移版本；
 - [x] 冻结 Mod Manifest/ModLock、Parameter、Event、Gameplay Action 与声明式 Rule 协议边界；
-- [x] 冻结 NarratorPlan/NpcTurnRequest/NpcTurnResult/NarratorSynthesis 与预算配置；
+- [x] 把模型正文协议收敛为自然语言，并由原生 ToolCall 构造内部 NarratorPlan/NpcTurnRequest；
 - [x] 实现 Bevy Working World 的 Stable ID 映射、typed record 投影/重建与第一阶段领域 Command；
 - [x] 实现 typed ModLock/SaveManifest、SurrealKV 显式事务、Revision CAS、ActionId 幂等、checksum、
   checkpoint + RecordOp 重建和 Transcript/Event/Action durable rows；
@@ -53,8 +53,9 @@ OPEN 项、后续 RFC 或 P0 Spike；空 crate 不代表相关协议已经实现
   Content-resolved Character/Scene/UiSnapshot 投影；
 - [x] 实现 Player -> Narrator planning -> ordered NPC turns -> Narrator synthesis 纵向编排，并覆盖
   stale Request、committed Event provenance、伪造 Event 拒绝、SurrealKV durable replay 与冲突恢复；
-- [ ] 取得并接入可等待、幂等的 SurrealKV shutdown API，移除物理关闭/备份对 sleep/retry 的依赖；
-- [ ] 实现关闭后物理备份、恢复与存档切换的产品 API；
+- [ ] **UPSTREAM-GATED**：SurrealDB SDK 暴露可等待、幂等的 embedded shutdown 后接入，移除物理
+  关闭/备份对 sleep/retry 的依赖；上游已确认当前 SDK 无法等待 local router/datastore 退出；
+- [ ] **UPSTREAM-GATED**：实现关闭后物理备份、恢复与存档切换的产品 API；
 - [x] 实现 Runtime Client/Event loop、确定性 TUI 产品层与可运行的内置 demo 装配，完成最小可玩
   Runtime、World、Agent、Store、TUI 纵向切片；
 - [x] 实现正式目录 Mod package discovery、依赖/Patch/hash lock、统一内置/外部 Registry 加载与
@@ -73,10 +74,10 @@ OPEN 项、后续 RFC 或 P0 Spike；空 crate 不代表相关协议已经实现
 - [x] 暴露有界 Stable ID 游标分页的 `list_inventory`/`inspect_item` 与
   `list_available_skills`/`inspect_skill` Query Tool，并把 `transfer_item`、`equip_item`、
   `split_stack`、`use_skill` 接到已冻结的 WorldCommand；
-- [ ] 收敛 `promote_npc` 与 Scene cleanup 产品入口：当前 `PromoteCharacter { actor_id }` 只能改变
-  lifetime，尚不能满足“与跨 Scene durable reference 在同一 Command 原子建立”的冻结约束；
+- [ ] 实现 Scene 停用/重新激活与切换产品入口；Scene、Scene-owned entity 和状态不因离开而删除，
+  `promote_npc` 只改变角色的领域归属；
 - [x] 把 Spec 8.2 的 Character/Scene/Transcript 数量与字节上限接入 Narrator/NpcAgent 产品上下文，
-  并在裁剪时投影 `truncated` metadata；当前只有 Transcript 条数受限；
-- [ ] 把 Provider streaming 接到 Runtime UI event adapter；当前 TUI 已支持确定性
-  `StreamStarted/StreamChunk/StreamFinished`，但产品 RuntimeAdapter 只发布 working/final Snapshot；
+  并在裁剪时投影 `truncated` metadata；
+- [ ] 用 Runtime phase/status event 驱动 TUI thinking 展示，移除 Provider 文本 streaming 产品协议，
+  并完成面向叙事阅读的视觉重构；
 - [ ] 满足 Active Spec 第 17 节全部验收条件。

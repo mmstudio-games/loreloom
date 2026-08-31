@@ -6,6 +6,8 @@ use loreloom_core::ContentDefinitionId;
 use serde::{Deserialize, Serialize};
 
 pub const NARRATOR_MATERIALIZE_NPC_CAPABILITY: &str = "narrator.materialize_npc";
+pub const NARRATOR_REQUEST_NPC_TURN_CAPABILITY: &str = "narrator.request_npc_turn";
+pub const NARRATOR_SUBMIT_NPC_DRAFT_CAPABILITY: &str = "narrator.submit_npc_draft";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -135,7 +137,10 @@ impl Default for RuntimeConfig {
         Self {
             turn_budget: ResourceBudget::default(),
             orchestration_budget: OrchestrationBudget::default(),
-            narrator_capabilities: BTreeSet::from([NARRATOR_MATERIALIZE_NPC_CAPABILITY.to_owned()]),
+            narrator_capabilities: BTreeSet::from([
+                NARRATOR_MATERIALIZE_NPC_CAPABILITY.to_owned(),
+                NARRATOR_REQUEST_NPC_TURN_CAPABILITY.to_owned(),
+            ]),
             npc_resources: NpcResourcePolicy::default(),
             generation_policies: BTreeMap::new(),
             context_projection: ContextProjectionPolicy::default(),

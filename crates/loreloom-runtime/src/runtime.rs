@@ -8,12 +8,10 @@ use armillae_core::{CompletionRequest, ContentPart, Message, Role};
 use armillae_llm::LlmBridge;
 use loreloom_agent::{
     AgentDefinition, AgentRunner, AgentToolContext, BudgetReason, CancellationToken,
-    NarratorNpcDecision, NarratorPlan, NarratorSynthesis, NpcAgent, NpcAssignment,
-    NpcControllerKind, NpcLifetime, NpcModelOutput, NpcNarrativeAction, NpcTarget, NpcTurnRequest,
-    NpcTurnResult, NpcTurnStatus, ResourceUsage, ToolCallOutcome, TurnInvocation, TurnOutcome,
-    TurnStatus,
+    NarratorNpcDecision, NarratorPlan, NpcAgent, NpcAssignment, NpcControllerKind, NpcLifetime,
+    NpcNarrativeAction, NpcTarget, NpcTurnRequest, NpcTurnResult, NpcTurnStatus, ResourceUsage,
+    ToolCallOutcome, TurnInvocation, TurnOutcome, TurnStatus,
 };
-use loreloom_content::NpcDraft;
 use loreloom_core::{
     ActorId, CharacterController, CharacterLifetime, ContentDefinitionId, GeneratedOrigin,
     GenerationId, GenerationSource, LongText, Revision, RuntimePhase, SessionId, ShortText,
@@ -23,7 +21,8 @@ use serde::Serialize;
 use serde_json::json;
 
 use crate::{
-    OrchestrationBudget, RuntimeConfig, RuntimeError, RuntimeToolExecutor, WorldService,
+    NARRATOR_SUBMIT_NPC_DRAFT_CAPABILITY, OrchestrationBudget, RuntimeConfig, RuntimeError,
+    RuntimeToolExecutor, WorldService,
     context::{project_npc_context, project_observation},
     world_service::{CharacterMaterializationRequest, PendingNpcDecision},
 };
@@ -148,6 +147,7 @@ impl GameRuntime {
         let mut tool_activity = Vec::new();
         let mut npc_results = Vec::new();
         let _ = self.executor.take_pending_npc_decisions().await;
+        let _ = self.executor.take_pending_npc_turns().await;
 
         let before = self
             .service
@@ -170,7 +170,7 @@ impl GameRuntime {
         let mut materialization_results = Vec::new();
         let mut settled_materializations = Vec::new();
         let mut generated_attempts = 0_u32;
-        let mut plan = loop {
+        loop {
             orchestration.start_round(self.config.orchestration_budget, started)?;
             orchestration.start_turn(self.config.orchestration_budget, started)?;
             let mut observation = self
@@ -178,21 +178,26 @@ impl GameRuntime {
                 .observation(self.session_id, input.clone())
                 .await?;
             project_observation(&mut observation, self.config.context_projection);
-            let planning_request = narrator_request(
-                "narrator_planning",
+            let narrator_request = narrator_request(
+                "narrator_turn",
                 json!({
                     "observation": observation,
                     "materialization_results": materialization_results,
-                    "materialization_rule": "Preset/generated NPCs must be committed first. After a successful materialization, plan with the returned actor_id and do not repeat the request.",
-                    "output_contract": "NarratorPlan"
+                    "npc_results": npc_results,
+                    "committed_events": self.service.events().await,
+                    "instructions": "Use native tools for structured decisions and world changes. request_npc_turn queues NPCs in tool-call order. If no more orchestration is needed, return only the final natural-language narration for the player. Do not return JSON or a structured envelope. NPC responses are claims; only committed events are world facts."
                 }),
-                self.runner.definitions(),
+                self.runner
+                    .definitions()
+                    .into_iter()
+                    .filter(|definition| definition.name != "submit_npc_draft")
+                    .collect(),
             )?;
-            let planning = self
+            let narrator_turn = self
                 .runner
                 .run_turn(TurnInvocation {
                     bridge: self.narrator.as_ref(),
-                    request: planning_request,
+                    request: narrator_request,
                     tool_context: AgentToolContext {
                         actor_id: before.player.actor_id,
                         revision: self.service.revision().await,
@@ -204,20 +209,15 @@ impl GameRuntime {
                     cancellation: &self.cancellation,
                 })
                 .await;
-            append_tool_activity(&mut tool_activity, &planning.tool_calls);
-            orchestration.merge(&planning.usage, self.config.orchestration_budget, started)?;
+            append_tool_activity(&mut tool_activity, &narrator_turn.tool_calls);
+            orchestration.merge(
+                &narrator_turn.usage,
+                self.config.orchestration_budget,
+                started,
+            )?;
             let pending = self.executor.take_pending_npc_decisions().await;
-            let planning_text = require_text(&planning)?;
-            let candidate: NarratorPlan =
-                serde_json::from_str(&planning_text).map_err(|_| RuntimeError::ModelProtocol {
-                    stage: "narrator_plan",
-                })?;
-            candidate.validate()?;
-            if candidate.based_on_revision != self.service.revision().await {
-                return Err(RuntimeError::ModelProtocol {
-                    stage: "stale_narrator_plan",
-                });
-            }
+            let mut pending_turns = self.executor.take_pending_npc_turns().await;
+            let narrator_text = require_text(&narrator_turn)?;
             let requires_replanning = pending.iter().any(|pending| {
                 pending.decision.requires_materialization()
                     && !settled_materializations.iter().any(
@@ -249,12 +249,57 @@ impl GameRuntime {
                 materialization_results.extend(resolved);
             }
             if requires_replanning {
+                pending_turns.clear();
                 continue;
             }
-            break candidate;
-        };
 
-        loop {
+            let plan_revision = self.service.revision().await;
+            for request in &mut pending_turns {
+                request.based_on_revision = plan_revision;
+            }
+            let plan = NarratorPlan {
+                based_on_revision: plan_revision,
+                npc_turns: pending_turns,
+            };
+            plan.validate()?;
+
+            if plan.npc_turns.is_empty() {
+                let narration = loreloom_agent::NarrationText::new(narrator_text)?;
+                let supporting_events = self
+                    .service
+                    .events()
+                    .await
+                    .into_iter()
+                    .filter(|event| event.revision > before.revision)
+                    .map(|event| event.id)
+                    .collect::<Vec<_>>();
+                self.service
+                    .append_transcript(
+                        before.player.actor_id,
+                        self.session_id,
+                        TranscriptSpeaker::Narrator,
+                        narration.clone(),
+                        supporting_events.clone(),
+                    )
+                    .await?;
+                let snapshot = self
+                    .service
+                    .snapshot(
+                        self.session_id,
+                        RuntimePhase::Completed,
+                        tool_activity,
+                        Vec::new(),
+                        supporting_events,
+                    )
+                    .await?;
+                return Ok(PlayerTurnOutcome {
+                    narration,
+                    npc_results,
+                    usage: orchestration.usage,
+                    snapshot,
+                });
+            }
+
             let mut budget_failure = None;
             for request in &plan.npc_turns {
                 if self.cancellation.is_cancelled() {
@@ -374,7 +419,7 @@ impl GameRuntime {
                 ) {
                     budget_failure = Some(reason);
                 }
-                let (status, output) = npc_output(&turn);
+                let (status, response) = npc_output(&turn);
                 if let NpcTurnStatus::BudgetExhausted(reason) = status {
                     budget_failure = Some(reason);
                 }
@@ -384,9 +429,7 @@ impl GameRuntime {
                     observed_revision: Some(observed_revision),
                     final_revision: self.service.revision().await,
                     status,
-                    utterance: output.utterance,
-                    intent: output.intent,
-                    claimed_action_description: output.claimed_action_description,
+                    response,
                     tool_call_ids: turn
                         .tool_calls
                         .iter()
@@ -401,130 +444,6 @@ impl GameRuntime {
             }
             if let Some(reason) = budget_failure {
                 return Err(RuntimeError::Budget(reason));
-            }
-            orchestration.start_turn(self.config.orchestration_budget, started)?;
-            let revision = self.service.revision().await;
-            let committed_events = self.service.events().await;
-            let synthesis_request = narrator_request(
-                "narrator_synthesis",
-                json!({
-                    "revision": revision,
-                    "npc_outputs_are_claims": true,
-                    "npc_results": npc_results,
-                    "npc_materialization_results": materialization_results,
-                    "committed_events": committed_events,
-                    "output_contract": "NarratorSynthesis"
-                }),
-                self.runner
-                    .definitions()
-                    .into_iter()
-                    .filter(|definition| definition.name != "materialize_npc")
-                    .collect(),
-            )?;
-            let synthesis = self
-                .runner
-                .run_turn(TurnInvocation {
-                    bridge: self.narrator.as_ref(),
-                    request: synthesis_request,
-                    tool_context: AgentToolContext {
-                        actor_id: before.player.actor_id,
-                        revision,
-                        session_id: self.session_id,
-                        capabilities: self.config.narrator_capabilities.clone(),
-                    },
-                    budget: self.config.turn_budget,
-                    max_context_tokens: self.config.context_projection.max_context_tokens,
-                    cancellation: &self.cancellation,
-                })
-                .await;
-            append_tool_activity(&mut tool_activity, &synthesis.tool_calls);
-            orchestration.merge(&synthesis.usage, self.config.orchestration_budget, started)?;
-            if !self.executor.take_pending_npc_decisions().await.is_empty() {
-                return Err(RuntimeError::ModelProtocol {
-                    stage: "materialization_outside_planning",
-                });
-            }
-            let synthesis_text = require_text(&synthesis)?;
-            let envelope: NarratorSynthesis =
-                serde_json::from_str(&synthesis_text).map_err(|_| RuntimeError::ModelProtocol {
-                    stage: "narrator_synthesis",
-                })?;
-            let committed_ids = self
-                .service
-                .events()
-                .await
-                .into_iter()
-                .map(|event| event.id)
-                .collect::<BTreeSet<_>>();
-            let supporting = match &envelope {
-                NarratorSynthesis::Final {
-                    supporting_events, ..
-                }
-                | NarratorSynthesis::Continue {
-                    supporting_events, ..
-                } => supporting_events,
-            };
-            if supporting
-                .iter()
-                .any(|event| !committed_ids.contains(event))
-            {
-                return Err(RuntimeError::ModelProtocol {
-                    stage: "uncommitted_supporting_event",
-                });
-            }
-            match envelope {
-                NarratorSynthesis::Final {
-                    based_on_revision,
-                    narration,
-                    supporting_events,
-                } => {
-                    if based_on_revision != self.service.revision().await {
-                        return Err(RuntimeError::ModelProtocol {
-                            stage: "stale_synthesis",
-                        });
-                    }
-                    self.service
-                        .append_transcript(
-                            before.player.actor_id,
-                            self.session_id,
-                            TranscriptSpeaker::Narrator,
-                            narration.clone(),
-                            supporting_events.clone(),
-                        )
-                        .await?;
-                    let snapshot = self
-                        .service
-                        .snapshot(
-                            self.session_id,
-                            RuntimePhase::Completed,
-                            tool_activity,
-                            Vec::new(),
-                            supporting_events,
-                        )
-                        .await?;
-                    return Ok(PlayerTurnOutcome {
-                        narration,
-                        npc_results,
-                        usage: orchestration.usage,
-                        snapshot,
-                    });
-                }
-                NarratorSynthesis::Continue {
-                    based_on_revision,
-                    next_plan,
-                    ..
-                } => {
-                    if based_on_revision != self.service.revision().await
-                        || next_plan.based_on_revision != based_on_revision
-                    {
-                        return Err(RuntimeError::ModelProtocol {
-                            stage: "stale_continuation",
-                        });
-                    }
-                    orchestration.start_round(self.config.orchestration_budget, started)?;
-                    next_plan.validate()?;
-                    plan = next_plan;
-                }
             }
         }
     }
@@ -735,6 +654,7 @@ impl GameRuntime {
                             continue;
                         }
                     };
+                    let _ = self.executor.take_pending_npc_drafts().await;
                     let generation_request = narrator_request(
                         "npc_generation",
                         json!({
@@ -746,9 +666,13 @@ impl GameRuntime {
                                 NpcControllerKind::Agent(profile_id) => Some(profile_id),
                                 _ => None,
                             },
-                            "output_contract": npc_draft_contract()
+                            "instructions": "Create one NPC and submit it through submit_npc_draft. Do not return the draft as JSON text. After the tool result, finish with a short natural-language acknowledgement."
                         }),
-                        Vec::new(),
+                        self.runner
+                            .definitions()
+                            .into_iter()
+                            .filter(|definition| definition.name == "submit_npc_draft")
+                            .collect(),
                     )?;
                     let generation = self
                         .runner
@@ -759,7 +683,9 @@ impl GameRuntime {
                                 actor_id: acting_actor,
                                 revision: self.service.revision().await,
                                 session_id: self.session_id,
-                                capabilities: BTreeSet::new(),
+                                capabilities: BTreeSet::from([
+                                    NARRATOR_SUBMIT_NPC_DRAFT_CAPABILITY.to_owned(),
+                                ]),
                             },
                             budget: self.config.turn_budget,
                             max_context_tokens: self.config.context_projection.max_context_tokens,
@@ -773,9 +699,11 @@ impl GameRuntime {
                         started,
                     )?;
                     let draft = match require_text(&generation) {
-                        Ok(text) => match serde_json::from_str::<NpcDraft>(&text) {
-                            Ok(draft) => draft,
-                            Err(_) => {
+                        Ok(_) => {
+                            let mut drafts = self.executor.take_pending_npc_drafts().await;
+                            if drafts.len() == 1 {
+                                drafts.pop().expect("one draft was checked above")
+                            } else {
                                 outcomes.push(NpcMaterializationResult::rejected(
                                     pending,
                                     self.service.revision().await,
@@ -783,7 +711,7 @@ impl GameRuntime {
                                 ));
                                 continue;
                             }
-                        },
+                        }
                         Err(RuntimeError::Cancelled) => return Err(RuntimeError::Cancelled),
                         Err(RuntimeError::Budget(reason)) => {
                             return Err(RuntimeError::Budget(reason));
@@ -1039,68 +967,13 @@ fn narrator_request(
             Message::new(
                 Role::System,
                 vec![ContentPart::text(
-                    "Player input goes only to the narrator. Use tools for world changes. NPC claims are not committed facts.",
+                    "Player input goes only to the narrator. Use native tools for every structured decision or world change. Return natural-language prose in the response body; never return JSON or a structured control envelope. NPC claims are not committed facts.",
                 )],
             ),
             Message::user(payload),
         ],
         tools,
         ..CompletionRequest::default()
-    })
-}
-
-fn npc_draft_contract() -> serde_json::Value {
-    json!({
-        "type": "NpcDraft",
-        "encoding": "Return only one JSON object. Unknown fields are rejected.",
-        "required": [
-            "display_name",
-            "profile",
-            "agent_profile",
-            "base_attributes",
-            "resources",
-            "conditions",
-            "inventory",
-            "skills",
-            "knowledge",
-            "goals"
-        ],
-        "shape": {
-            "display_name": "string",
-            "profile": {
-                "summary": "string",
-                "values": ["string"],
-                "speaking_style": "string",
-                "narrative_tags": ["ContentDefinitionId"]
-            },
-            "agent_profile": "ContentDefinitionId or null; must equal required_agent_profile",
-            "base_attributes": { "ContentDefinitionId": "Fixed integer" },
-            "resources": [{
-                "resource_id": "ContentDefinitionId",
-                "current": "Fixed integer",
-                "base_maximum": "Fixed integer"
-            }],
-            "conditions": [{
-                "condition_id": "ContentDefinitionId",
-                "stacks": "positive integer",
-                "intensity": "Fixed integer"
-            }],
-            "inventory": [{
-                "local_key": "string",
-                "item_id": "ContentDefinitionId",
-                "quantity": "positive integer",
-                "parent_local_key": "optional string"
-            }],
-            "skills": [{
-                "skill_id": "ContentDefinitionId",
-                "rank": "positive integer",
-                "proficiency": "non-negative integer",
-                "enabled": "boolean"
-            }],
-            "knowledge": "array; use [] unless every typed Fact field is authorized",
-            "goals": "array; use [] unless every typed Goal field is authorized"
-        },
-        "constraints": "Use only IDs present in allowed_definitions or required_agent_profile. Empty arrays are valid. Do not invent capabilities or trusted constraints."
     })
 }
 
@@ -1118,22 +991,15 @@ fn require_text(outcome: &TurnOutcome) -> Result<String, RuntimeError> {
     }
 }
 
-fn npc_output(outcome: &TurnOutcome) -> (NpcTurnStatus, NpcModelOutput) {
+fn npc_output(outcome: &TurnOutcome) -> (NpcTurnStatus, Option<LongText>) {
     match outcome.status {
-        TurnStatus::Completed => match outcome
-            .final_text
-            .as_deref()
-            .and_then(|text| serde_json::from_str(text).ok())
-        {
-            Some(output) => (NpcTurnStatus::Completed, output),
-            None => (NpcTurnStatus::Failed, NpcModelOutput::default()),
+        TurnStatus::Completed => match outcome.final_text.clone().map(LongText::new) {
+            Some(Ok(response)) => (NpcTurnStatus::Completed, Some(response)),
+            _ => (NpcTurnStatus::Failed, None),
         },
-        TurnStatus::Cancelled => (NpcTurnStatus::Cancelled, NpcModelOutput::default()),
-        TurnStatus::BudgetExhausted(reason) => (
-            NpcTurnStatus::BudgetExhausted(reason),
-            NpcModelOutput::default(),
-        ),
-        TurnStatus::Failed(_) => (NpcTurnStatus::Failed, NpcModelOutput::default()),
+        TurnStatus::Cancelled => (NpcTurnStatus::Cancelled, None),
+        TurnStatus::BudgetExhausted(reason) => (NpcTurnStatus::BudgetExhausted(reason), None),
+        TurnStatus::Failed(_) => (NpcTurnStatus::Failed, None),
     }
 }
 
@@ -1148,9 +1014,7 @@ fn unstarted_result(
         observed_revision: None,
         final_revision: revision,
         status,
-        utterance: None,
-        intent: None,
-        claimed_action_description: None,
+        response: None,
         tool_call_ids: Vec::new(),
         world_events: Vec::new(),
     }

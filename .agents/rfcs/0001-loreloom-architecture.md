@@ -2,7 +2,7 @@
 
 > 状态：Accepted
 > 接受日期：2026-08-30
-> 更新日期：2026-08-30
+> 更新日期：2026-08-31
 > 设计入口：[Loreloom 设计索引](../DESIGN.md)
 > 规范：[Loreloom Runtime Active Spec](../specs/runtime.md)
 > 基础设施依赖：[Armillae](https://github.com/mmstudio-games/armillae)
@@ -68,12 +68,11 @@ Loreloom 的目标不是消除 LLM，而是把模型放在它擅长的位置：�
 | Observation | 针对一个 Actor、一个世界版本生成的只读上下文投影 |
 | Actor | 能发起游戏行动的玩家角色、Agent 角色或规则驱动实体 |
 | Agent Step | 一次 Observation 到模型响应或 ToolCall 的受预算执行步骤 |
-| NarratorAgent | 解释玩家输入、生成 NarratorPlan 并在 NPC Turn 后生成 NarratorSynthesis 的主 Agent |
-| NarratorPlan | Narrator 对本轮场景推进的结构化计划，包含有序 NpcTurnRequest |
+| NarratorAgent | 解释玩家输入、调用受控 Tool，并以自然语言正文向玩家叙事的主 Agent |
+| NarratorPlan | Runtime 从 Narrator 已接受 ToolCall 构造的内部有序 NpcTurnRequest 队列 |
 | NpcAgent | 由不可变角色/场景上下文按 Turn 创建的一次性 NPC 执行对象 |
 | NpcTurnRequest | NarratorPlan 中请求一个指定 NPC 在指定 Scene 执行一次 Turn 的有序记录 |
-| NpcTurnResult | 一次 NPC Turn 的有界输出及其实际 ToolResult/WorldEvent 关联 |
-| NarratorSynthesis | Narrator 汇总 NPC Turn 结果与已提交事实后形成的最终叙事或下一轮计划 |
+| NpcTurnResult | 一次 NPC Turn 的自然语言响应及其实际 ToolResult/WorldEvent 关联 |
 | AgentRunner | 共享 Bridge、ToolExecutor、预算与取消状态机的 Agent 执行服务 |
 | Tool | 向模型暴露的带 Schema 能力；分为 Query、Command、Orchestration 和受控 Service |
 | WorldCommand | 经过身份、权限、参数和前置条件校验的类型化修改请求 |
@@ -238,9 +237,11 @@ Revision 冲突策略设计。
 多 Agent 第一阶段采用明确的 Narrator 编排边界：
 
 - 自然语言 `PlayerInput` 只进入主 `NarratorAgent`。Narrator 观察当前 Scene、已提交
-  WorldEvent 和玩家输入，生成结构化 `NarratorPlan`；
-- `NarratorPlan` 决定 NPC 是否需要独立 Turn、需要哪些 NPC 以及语义执行顺序，并包含零个或多个
-  有序 `NpcTurnRequest`。Runtime 不再实现叙事优先级、公平性或“重要 NPC”判断；
+  WorldEvent 和玩家输入，通过 Provider 原生 Tool Calling 请求结构化编排或世界操作，并以自然
+  语言正文提供最终叙事；Runtime 不解析模型正文中的 JSON 或其它控制协议；
+- Runtime 按已接受 `request_npc_turn` ToolCall 的顺序构造内部 `NarratorPlan`。它决定 NPC 是否
+  需要独立 Turn、需要哪些 NPC 以及语义执行顺序；Runtime 不再实现叙事优先级、公平性或“重要
+  NPC”判断；
 - `NarratorAgent` 不在 Tool Handler 内同步创建或递归执行另一个模型。Runtime 依次校验请求中的
   NPC、Scene、Revision、Capability 和资源上限，再按 Narrator 给出的顺序放入显式临时队列；
 - 每个请求真正开始时，Runtime 从届时有效的 committed Revision 重新生成不可变
@@ -249,11 +250,11 @@ Revision 冲突策略设计。
 - `NpcAgent` 是一次 NPC Turn 的临时对象，通过
   `NpcAgent::new(agent_definition, character_context, scene_context, assignment)` 构造；它不
   持有 ECS 引用，也不作为角色存档；
-- 每个 NPC Turn 返回有界 `NpcTurnResult`，可以包含发言、意图、动作描述、结束状态，以及实际
+- 每个 NPC Turn 返回内部 `NpcTurnResult`，包含一段自然语言响应、结束状态，以及实际
   ToolResult/WorldEvent 的关联；NPC 声称要做或已经做的动作本身不是 World Fact；
-- 全部已请求 NPC Turn 结束后，Runtime 再执行 `NarratorSynthesis`。Narrator 只能把成功 ToolCall /
-  WorldCommand 产生的 ToolResult/WorldEvent 叙述为已经发生；Synthesis 可以生成最终玩家可见
-  叙事，也可以在总预算允许时产生下一轮 `NarratorPlan`；
+- 全部已请求 NPC Turn 结束后，Runtime 把结果和已提交事实交给下一个 Narrator Turn。Narrator 只能
+  把成功 ToolCall/WorldCommand 产生的 ToolResult/WorldEvent 叙述为已经发生；它可以返回最终玩家
+  可见的自然语言叙事，也可以在总预算允许时继续调用编排 Tool；
 - 长期角色只保存 ECS 状态和 `AgentBinding`；Plan、未开始请求、Turn Result、一次调用的
   canonical history、取消、重试和 Future 属于 Runtime 临时状态；
 - 共享 `AgentRunner` 拥有 LlmBridge、ToolExecutor 和执行状态机，Narrator 与所有 NPC 可以复用
@@ -599,10 +600,11 @@ workspace resolver 与 `.changes/` 变更集维护成员版本。内置 Mod 位�
 玩家提交输入
   -> TUI 发送 PlayerInput
   -> Runtime 只把自然语言输入交给 NarratorAgent
-  -> NarratorAgent 基于 SceneObservation 与 Revision 生成 NarratorPlan
+  -> NarratorAgent 基于 SceneObservation 与 Revision 调用结构化 Tool
+  -> Runtime 从已接受 ToolCall 构造内部 NarratorPlan
   -> Runtime 执行 Plan 中允许的 Narrator Tool 和有序 NPC Turn
-  -> NarratorSynthesis 汇总 NpcTurnResult 与已提交 WorldEvent
-  -> 形成最终玩家可见叙事
+  -> 后续 Narrator Turn 汇总 NpcTurnResult 与已提交 WorldEvent
+  -> Narrator 返回最终玩家可见的自然语言叙事
   -> 持久化世界事实/Transcript 并发布新 UiSnapshot
 ```
 
@@ -611,12 +613,13 @@ workspace resolver 与 `.changes/` 变更集维护成员版本。内置 Mod 位�
 ```text
 PlayerInput
   -> Runtime 为 NarratorAgent 构建 Scene Observation
-  -> NarratorAgent 生成 NarratorPlan
+  -> NarratorAgent 以原生 ToolCall 提交结构化决定
   -> 判断 Mention / Materialize / NarratorProxy / NpcTurn 与 lifetime/controller
   -> 简单交互可由 NarratorProxy 完成
   -> 需要实体时提交 MaterializeNpcRequest
   -> Runtime 校验并通过 NpcFactory / WorldCommand 创建或提升 NPC
-  -> 需要独立 Agent 时在 Plan 中按语义顺序追加 NpcTurnRequest
+  -> 需要独立 Agent 时调用 request_npc_turn
+  -> Runtime 按已接受 ToolCall 的语义顺序构造 NarratorPlan/NpcTurnRequest
   -> Runtime 依次校验并排队，不在 Narrator Tool 内递归调用模型
   -> 对每个请求从当前 committed Revision 生成 CharacterContext 与 SceneContext
   -> 组合 NpcAssignment，创建一次性 NpcAgent
@@ -624,9 +627,9 @@ PlayerInput
   -> NpcAgent 可以产生发言/意图/动作描述，并经允许的 ToolCall 请求世界动作
   -> Runtime 串行执行允许的 Command，记录实际 ToolResult/WorldEvent
   -> 每个 NPC 返回 NpcTurnResult
-  -> 所有请求结束后执行 NarratorSynthesis
-  -> 根据 NpcTurnResult 与已提交事实生成最终叙事
-  -> 若仍需 NPC 且总预算允许，生成下一轮 NarratorPlan；否则结束本轮
+  -> 所有请求结束后再次调用 Narrator
+  -> 根据 NpcTurnResult 与已提交事实生成最终自然语言叙事
+  -> 若仍需 NPC 且总预算允许，继续调用 request_npc_turn；否则结束本轮
 ```
 
 没有经过 Runtime 接受的 `NpcTurnRequest` 时，NPC 不会仅因“是 Agent”而后台运行。Narrator
@@ -830,10 +833,10 @@ LLM 输出本身不被宣称为确定性。Loreloom 的可回放承诺应是：
     不另设叙事优先级或公平性判断；
 46. NpcTurnResult 区分 NPC 的发言/意图/动作描述与实际 ToolResult/WorldEvent，Narrator 不会把
     未成功提交的声称动作叙述为已经发生；
-47. NarratorSynthesis 可以结束本轮或提出下一轮 NarratorPlan；不存在固定 NPC 数量常量，循环
-    由可配置整轮/单 Turn 资源上限与最大编排轮数终止；
-48. 等待 Provider 时 TUI 的流式显示、取消和退出保持响应，逻辑 World Clock 不随墙钟时间隐式
-    推进。
+47. Narrator 正文只按自然语言使用；内部 Plan 只来自已接受 ToolCall。不存在固定 NPC 数量常量，
+    循环由可配置整轮/单 Turn 资源上限与最大编排轮数终止；
+48. 等待 Provider 时 TUI 的 Runtime thinking 状态、取消和退出保持响应，未完成 Provider 正文不
+    展示，逻辑 World Clock 不随墙钟时间隐式推进。
 
 ## 14. 待决问题
 
@@ -844,11 +847,11 @@ LLM 输出本身不被宣称为确定性。Loreloom 的可回放承诺应是：
 2. ECS 执行成功但持久化失败时，Working World 如何回滚、重建或进入只读故障状态？
 3. 多个修改类 ToolCall 是逐个提交、整批原子提交，还是默认只允许一次一个修改动作？
 4. 玩家输入优先解释为“玩家说的话”“玩家角色行动”还是支持显式输入模式？
-5. `NarratorPlan`、`NpcTurnRequest`、`NpcTurnResult` 与 `NarratorSynthesis` 的精确 Schema 是
-   什么；整轮/单 Turn 预算有哪些字段、配置层级和默认值，最大编排轮数是多少？
+5. Runtime 内部 `NarratorPlan`、`NpcTurnRequest`、`NpcTurnResult` 的精确 Schema 是什么；整轮/
+   单 Turn 预算有哪些字段、配置层级和默认值，最大编排轮数是多少？
 6. Known Fact、Belief、Memory Record 和 Transcript 之间的最小 Schema 是什么？
 7. 对话全文、摘要和嵌入索引分别保存多久，哪些属于存档兼容承诺？
-8. Provider 流式文本在取消时是丢弃、标记中断还是保留为 Transcript？
+8. Runtime thinking 状态在取消、失败与完成时如何清除或替换？
 9. 初始可玩垂直切片包含哪些地点、角色、行动和胜负/进展反馈？
 10. Item/Skill Definition 使用什么内容包格式、版本和迁移策略？
 11. 物品堆叠的等价比较、拆分 ID 和容量/重量单位如何精确表示？
@@ -995,3 +998,20 @@ Schema、预算字段、配置层级、默认值或最大编排轮数。
 
 第 14 节未决问题继续阻塞相应公共 API、持久化格式和产品行为，但不阻止无公共领域 API 的
 workspace 脚手架、版本工具配置与 P0 Spike。
+
+### 16.6 模型正文、持久 Scene 与 thinking 状态修订记录
+
+项目方于 2026-08-31 进一步确认：
+
+- Narrator、NpcAgent 与 generation stage 的模型正文必须是自然语言，Runtime 在任何情况下都不从
+  正文解析 JSON 结构化控制数据；
+- 结构化编排、世界操作与 NPC Draft 统一使用 Provider 原生 Tool Calling；ToolCall 被 Runtime
+  接受后才构成内部 NarratorPlan、NpcTurnRequest 或领域命令；
+- Scene、Scene-owned entity 及其状态在离开后继续持久化，Scene 切换只停用旧 Scene、激活或首次
+  物化目标 Scene，不因故事阶段结束而自动删除；promotion 只改变角色的领域归属；
+- TUI 只展示 Runtime phase 映射出的 thinking 状态，不展示 Provider 未完成正文。
+
+本修订取代第 16.4 节中“模型生成结构化 NarratorPlan/NarratorSynthesis”与 Provider 正文流式展示
+的早期表达，但不改变 Narrator 的编排所有权、NpcTurnRequest 的语义顺序、单一 Agent 执行槽、
+Tool 权威边界、两级预算或 World Clock 等既有核心决定。持续约束实现的精确契约以 Active Runtime
+Spec 为准。

@@ -19,8 +19,8 @@ use armillae_tools::{ToolContext, ToolExecutor};
 use loreloom_agent::{
     AgentDefinition, AgentRunner, AgentToolContext, CancellationToken, NarrativeImportance,
     NarratorNpcDecision, NarratorPlan, NpcControllerKind, NpcGenerationRequest, NpcLifetime,
-    NpcModelOutput, NpcNarrativeAction, NpcTarget, NpcTurnRequest, NpcTurnStatus, ResourceBudget,
-    TurnInvocation, TurnStatus,
+    NpcNarrativeAction, NpcTarget, NpcTurnRequest, NpcTurnStatus, ResourceBudget, TurnInvocation,
+    TurnStatus,
 };
 use loreloom_content::{
     AgentProfileDefinition, AttributeDefinition, CONTENT_SCHEMA_V1, CharacterDefinition,
@@ -828,67 +828,78 @@ impl LlmBridge for NarratorBridge {
         request: CompletionRequest,
     ) -> BridgeFuture<'a, Result<CompletionResponse, BridgeError>> {
         Box::pin(async move {
-            let call = self.calls.fetch_add(1, Ordering::SeqCst);
-            if call == 0 {
-                let payload = request
-                    .messages
-                    .iter()
-                    .rev()
-                    .flat_map(|message| message.content.iter())
-                    .find_map(|part| match part {
-                        armillae_core::ContentPart::Text(text) => {
-                            serde_json::from_str::<JsonValue>(&text.text).ok()
-                        }
-                        _ => None,
-                    })
-                    .ok_or_else(|| BridgeError::InvalidRequest {
-                        message: "missing planning payload".to_owned(),
-                    })?;
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let payload = request
+                .messages
+                .iter()
+                .rev()
+                .flat_map(|message| message.content.iter())
+                .find_map(|part| match part {
+                    armillae_core::ContentPart::Text(text) => {
+                        serde_json::from_str::<JsonValue>(&text.text).ok()
+                    }
+                    _ => None,
+                })
+                .ok_or_else(|| BridgeError::InvalidRequest {
+                    message: "missing narrator payload".to_owned(),
+                })?;
+            if self
+                .planning_observation
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_none()
+            {
                 *self
                     .planning_observation
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner) =
                     Some(payload["payload"]["observation"].clone());
-                return Ok(text_response(
-                    serde_json::to_string(&self.plan).expect("plan serialization"),
-                ));
             }
-            let payload = request
-                .messages
-                .iter()
-                .rev()
-                .find_map(|message| {
-                    message.content.iter().find_map(|part| match part {
-                        armillae_core::ContentPart::Text(text) => {
-                            serde_json::from_str::<JsonValue>(&text.text).ok()
-                        }
-                        _ => None,
+            let has_tool_result = request.messages.iter().any(|message| {
+                message
+                    .content
+                    .iter()
+                    .any(|part| matches!(part, armillae_core::ContentPart::ToolResult(_)))
+            });
+            let has_npc_results = payload["payload"]["npc_results"]
+                .as_array()
+                .is_some_and(|results| !results.is_empty());
+            if !has_tool_result && !has_npc_results && !self.plan.npc_turns.is_empty() {
+                let content = self
+                    .plan
+                    .npc_turns
+                    .iter()
+                    .enumerate()
+                    .map(|(index, npc)| {
+                        AssistantContent::ToolCall(ToolCall {
+                            id: ToolCallId::new(format!("request-npc-{index}"))
+                                .expect("test tool call ID"),
+                            name: "request_npc_turn".to_owned(),
+                            arguments: json!({
+                                "actor_id": npc.actor_id,
+                                "scene_id": npc.scene_id,
+                                "assignment": npc.assignment
+                            }),
+                        })
                     })
-                })
-                .ok_or_else(|| BridgeError::InvalidRequest {
-                    message: "missing synthesis payload".to_owned(),
-                })?;
-            let revision = payload["payload"]["revision"].clone();
-            let supporting_events = match self.support {
-                SupportMode::Committed => payload["payload"]["committed_events"]
-                    .as_array()
-                    .and_then(|events| events.last())
-                    .map(|event| vec![event["id"].clone()])
-                    .unwrap_or_default(),
-                SupportMode::Empty => Vec::new(),
-                SupportMode::Fabricated => {
-                    vec![json!("evt_01890f6a-2b70-7d4e-8f90-123456789abc")]
-                }
-            };
-            Ok(text_response(
-                serde_json::to_string(&json!({
-                    "kind": "final",
-                    "based_on_revision": revision,
-                    "narration": "The inn settles into a deliberate silence.",
-                    "supporting_events": supporting_events
-                }))
-                .expect("synthesis serialization"),
-            ))
+                    .collect::<Vec<_>>();
+                return Ok(CompletionResponse {
+                    id: None,
+                    model: Some("runtime-test".to_owned()),
+                    content,
+                    finish_reason: Some(FinishReason::ToolCall),
+                    usage: None,
+                    provider_metadata: JsonValue::Null,
+                });
+            }
+            let _ = &self.support;
+            Ok(text_response(if has_npc_results {
+                "The inn settles into a deliberate silence."
+            } else if has_tool_result {
+                "The narrator waits for the requested voices."
+            } else {
+                "The inn settles into a deliberate silence."
+            }))
         })
     }
 
@@ -969,23 +980,36 @@ impl GeneratedNarratorBridge {
         }
     }
 
-    fn plan_response(&self, actor_id: ActorId, revision: Revision) -> CompletionResponse {
-        text_response(
-            serde_json::to_string(&NarratorPlan {
-                based_on_revision: revision,
-                npc_turns: vec![NpcTurnRequest {
-                    request_id: parse("ntr_01890f6a-2ba0-7d4e-8f90-123456789abc"),
-                    actor_id,
-                    scene_id: self.scene_id,
-                    based_on_revision: revision,
-                    assignment: loreloom_agent::AssignmentText::new(
-                        "Answer according to the character that now exists.",
-                    )
-                    .expect("generated assignment"),
-                }],
-            })
-            .expect("replanned plan"),
-        )
+    fn npc_turn_response(&self, actor_id: ActorId) -> CompletionResponse {
+        tool_response(ToolCall {
+            id: ToolCallId::new("request-generated-witness").expect("request tool call ID"),
+            name: "request_npc_turn".to_owned(),
+            arguments: json!({
+                "actor_id": actor_id,
+                "scene_id": self.scene_id,
+                "assignment": "Answer according to the character that now exists."
+            }),
+        })
+    }
+
+    fn draft(&self) -> NpcDraft {
+        NpcDraft {
+            display_name: name("Ilya"),
+            profile: CharacterProfile {
+                summary: text("A rain-soaked witness with a careful memory."),
+                values: Vec::new(),
+                speaking_style: text("Careful and concrete."),
+                narrative_tags: BTreeSet::new(),
+            },
+            agent_profile: Some(self.profile_id.clone()),
+            base_attributes: BaseAttributes::default(),
+            resources: Vec::new(),
+            conditions: Vec::new(),
+            inventory: Vec::new(),
+            skills: Vec::new(),
+            knowledge: Vec::new(),
+            goals: Vec::new(),
+        }
     }
 }
 
@@ -1011,34 +1035,14 @@ impl LlmBridge for GeneratedNarratorBridge {
                     arguments: serde_json::to_value(self.decision())
                         .expect("materialization arguments"),
                 })),
-                1 => Ok(text_response(
-                    serde_json::to_string(&NarratorPlan {
-                        based_on_revision: Revision::new(1),
-                        npc_turns: Vec::new(),
-                    })
-                    .expect("provisional plan"),
-                )),
-                2 => Ok(text_response(
-                    serde_json::to_string(&NpcDraft {
-                        display_name: name("Ilya"),
-                        profile: CharacterProfile {
-                            summary: text("A rain-soaked witness with a careful memory."),
-                            values: Vec::new(),
-                            speaking_style: text("Careful and concrete."),
-                            narrative_tags: BTreeSet::new(),
-                        },
-                        agent_profile: Some(self.profile_id.clone()),
-                        base_attributes: BaseAttributes::default(),
-                        resources: Vec::new(),
-                        conditions: Vec::new(),
-                        inventory: Vec::new(),
-                        skills: Vec::new(),
-                        knowledge: Vec::new(),
-                        goals: Vec::new(),
-                    })
-                    .expect("generated draft"),
-                )),
-                3 => {
+                1 => Ok(text_response("The witness request is queued.")),
+                2 => Ok(tool_response(ToolCall {
+                    id: ToolCallId::new("submit-witness-draft").expect("draft tool call ID"),
+                    name: "submit_npc_draft".to_owned(),
+                    arguments: serde_json::to_value(self.draft()).expect("generated draft"),
+                })),
+                3 => Ok(text_response("The generated draft is ready.")),
+                4 => {
                     let payload = request
                         .messages
                         .iter()
@@ -1086,69 +1090,26 @@ impl LlmBridge for GeneratedNarratorBridge {
                                 .expect("repeated materialization arguments"),
                         }))
                     } else {
-                        Ok(self.plan_response(actor_id, revision))
+                        Ok(self.npc_turn_response(actor_id))
                     }
                 }
-                4 => {
+                5 => {
                     if self.repeat_materialization {
-                        let (actor_id, revision) = self
+                        let (actor_id, _) = self
                             .materialized_actor
                             .lock()
                             .expect("materialized actor lock")
                             .expect("materialized actor");
-                        return Ok(self.plan_response(actor_id, revision));
+                        return Ok(self.npc_turn_response(actor_id));
                     }
-                    let payload = request
-                        .messages
-                        .iter()
-                        .rev()
-                        .find_map(|message| {
-                            message.content.iter().find_map(|part| match part {
-                                armillae_core::ContentPart::Text(text) => {
-                                    serde_json::from_str::<JsonValue>(&text.text).ok()
-                                }
-                                _ => None,
-                            })
-                        })
-                        .ok_or_else(|| BridgeError::InvalidRequest {
-                            message: "missing synthesis payload".to_owned(),
-                        })?;
-                    Ok(text_response(
-                        serde_json::to_string(&json!({
-                            "kind": "final",
-                            "based_on_revision": payload["payload"]["revision"],
-                            "narration": "Ilya answers only after becoming part of the world.",
-                            "supporting_events": []
-                        }))
-                        .expect("generated synthesis"),
-                    ))
+                    Ok(text_response("The generated NPC turn is queued."))
                 }
-                5 if self.repeat_materialization => {
-                    let payload = request
-                        .messages
-                        .iter()
-                        .rev()
-                        .find_map(|message| {
-                            message.content.iter().find_map(|part| match part {
-                                armillae_core::ContentPart::Text(text) => {
-                                    serde_json::from_str::<JsonValue>(&text.text).ok()
-                                }
-                                _ => None,
-                            })
-                        })
-                        .ok_or_else(|| BridgeError::InvalidRequest {
-                            message: "missing repeated synthesis payload".to_owned(),
-                        })?;
-                    Ok(text_response(
-                        serde_json::to_string(&json!({
-                            "kind": "final",
-                            "based_on_revision": payload["payload"]["revision"],
-                            "narration": "Ilya answers only after becoming part of the world.",
-                            "supporting_events": []
-                        }))
-                        .expect("repeated generated synthesis"),
-                    ))
+                6 if self.repeat_materialization => {
+                    Ok(text_response("The generated NPC turn is queued."))
                 }
+                6 | 7 => Ok(text_response(
+                    "Ilya answers only after becoming part of the world.",
+                )),
                 _ => Err(BridgeError::InvalidRequest {
                     message: "unexpected narrator call".to_owned(),
                 }),
@@ -1226,13 +1187,7 @@ impl LlmBridge for PresetNarratorBridge {
                     })
                     .expect("preset decision"),
                 })),
-                1 => Ok(text_response(
-                    serde_json::to_string(&NarratorPlan {
-                        based_on_revision: Revision::new(1),
-                        npc_turns: Vec::new(),
-                    })
-                    .expect("preset provisional plan"),
-                )),
+                1 => Ok(text_response("The preset character request is queued.")),
                 2 => {
                     let payload = request
                         .messages
@@ -1254,10 +1209,6 @@ impl LlmBridge for PresetNarratorBridge {
                         .map_err(|_| BridgeError::InvalidRequest {
                             message: "missing preset actor".to_owned(),
                         })?;
-                    let revision = serde_json::from_value::<Revision>(result["revision"].clone())
-                        .map_err(|_| BridgeError::InvalidRequest {
-                        message: "missing preset revision".to_owned(),
-                    })?;
                     let visible = payload["payload"]["observation"]["scene"]["visible_actors"]
                         .as_array()
                         .is_some_and(|actors| {
@@ -1268,49 +1219,20 @@ impl LlmBridge for PresetNarratorBridge {
                         });
                     self.saw_materialized_profile
                         .store(visible, Ordering::SeqCst);
-                    Ok(text_response(
-                        serde_json::to_string(&NarratorPlan {
-                            based_on_revision: revision,
-                            npc_turns: vec![NpcTurnRequest {
-                                request_id: parse("ntr_01890f6a-2ba2-7d4e-8f90-123456789abc"),
-                                actor_id,
-                                scene_id: self.scene_id,
-                                based_on_revision: revision,
-                                assignment: loreloom_agent::AssignmentText::new(
-                                    "Respond as the fully loaded preset character.",
-                                )
-                                .expect("preset assignment"),
-                            }],
-                        })
-                        .expect("preset replanned plan"),
-                    ))
+                    Ok(tool_response(ToolCall {
+                        id: ToolCallId::new("request-preset-npc").expect("request tool call ID"),
+                        name: "request_npc_turn".to_owned(),
+                        arguments: json!({
+                            "actor_id": actor_id,
+                            "scene_id": self.scene_id,
+                            "assignment": "Respond as the fully loaded preset character."
+                        }),
+                    }))
                 }
-                3 => {
-                    let payload = request
-                        .messages
-                        .iter()
-                        .rev()
-                        .find_map(|message| {
-                            message.content.iter().find_map(|part| match part {
-                                armillae_core::ContentPart::Text(text) => {
-                                    serde_json::from_str::<JsonValue>(&text.text).ok()
-                                }
-                                _ => None,
-                            })
-                        })
-                        .ok_or_else(|| BridgeError::InvalidRequest {
-                            message: "missing preset synthesis payload".to_owned(),
-                        })?;
-                    Ok(text_response(
-                        serde_json::to_string(&json!({
-                            "kind": "final",
-                            "based_on_revision": payload["payload"]["revision"],
-                            "narration": "Orin joins the conversation from the prepared cast.",
-                            "supporting_events": []
-                        }))
-                        .expect("preset synthesis"),
-                    ))
-                }
+                3 => Ok(text_response("The preset NPC turn is queued.")),
+                4 => Ok(text_response(
+                    "Orin joins the conversation from the prepared cast.",
+                )),
                 _ => Err(BridgeError::InvalidRequest {
                     message: "unexpected preset narrator call".to_owned(),
                 }),
@@ -1574,18 +1496,7 @@ fn npc_bridge() -> Arc<MockBridge> {
     };
     Arc::new(MockBridge::scripted([
         MockResponse::tool_call(call.id, call.name, call.arguments),
-        MockResponse::text(
-            serde_json::to_string(&NpcModelOutput {
-                utterance: Some(
-                    loreloom_agent::UtteranceText::new("One moment passes.").expect("utterance"),
-                ),
-                intent: None,
-                claimed_action_description: Some(
-                    loreloom_agent::ClaimedActionText::new("waited by the hearth").expect("claim"),
-                ),
-            })
-            .expect("npc output"),
-        ),
+        MockResponse::text("One moment passes. I wait by the hearth."),
     ]))
 }
 
@@ -1770,15 +1681,7 @@ async fn generated_npc_is_committed_before_narrator_replans_and_dispatches_it() 
         policy_id.clone(),
     ));
     let npc = Arc::new(MockBridge::scripted([MockResponse::text(
-        serde_json::to_string(&NpcModelOutput {
-            utterance: Some(
-                loreloom_agent::UtteranceText::new("I saw the lantern before the rain.")
-                    .expect("utterance"),
-            ),
-            intent: Some(loreloom_agent::IntentText::new("answer truthfully").expect("intent")),
-            claimed_action_description: None,
-        })
-        .expect("NPC output"),
+        "I saw the lantern before the rain, and I will answer truthfully.",
     )]));
     let mut config = RuntimeConfig::default();
     config.generation_policies.insert(policy_id, policy);
@@ -1796,7 +1699,7 @@ async fn generated_npc_is_committed_before_narrator_replans_and_dispatches_it() 
         .expect("complete generated NPC turn");
 
     assert!(narrator.saw_materialized_profile.load(Ordering::SeqCst));
-    assert_eq!(narrator.calls.load(Ordering::SeqCst), 5);
+    assert_eq!(narrator.calls.load(Ordering::SeqCst), 7);
     assert_eq!(npc.requests().expect("NPC request log").len(), 1);
     assert_eq!(outcome.npc_results.len(), 1);
     assert_eq!(outcome.npc_results[0].status, NpcTurnStatus::Completed);
@@ -1872,15 +1775,7 @@ async fn repeated_materialization_request_does_not_generate_a_second_character()
         policy_id.clone(),
     ));
     let npc = Arc::new(MockBridge::scripted([MockResponse::text(
-        serde_json::to_string(&NpcModelOutput {
-            utterance: Some(
-                loreloom_agent::UtteranceText::new("There is still only one of me.")
-                    .expect("utterance"),
-            ),
-            intent: None,
-            claimed_action_description: None,
-        })
-        .expect("NPC output"),
+        "There is still only one of me.",
     )]));
     let mut config = RuntimeConfig::default();
     config.generation_policies.insert(
@@ -1900,7 +1795,7 @@ async fn repeated_materialization_request_does_not_generate_a_second_character()
         .await
         .expect("complete deduplicated NPC turn");
 
-    assert_eq!(narrator.calls.load(Ordering::SeqCst), 6);
+    assert_eq!(narrator.calls.load(Ordering::SeqCst), 8);
     assert_eq!(npc.requests().expect("NPC requests").len(), 1);
     let loaded = observer.load().await.expect("load deduplicated save");
     assert_eq!(
@@ -1946,15 +1841,7 @@ async fn preset_npc_uses_the_same_spawn_event_and_post_commit_replanning_barrier
         fixture.profile_id.clone(),
     ));
     let npc = Arc::new(MockBridge::scripted([MockResponse::text(
-        serde_json::to_string(&NpcModelOutput {
-            utterance: Some(
-                loreloom_agent::UtteranceText::new("I was already expected.")
-                    .expect("preset utterance"),
-            ),
-            intent: None,
-            claimed_action_description: None,
-        })
-        .expect("preset NPC output"),
+        "I was already expected.",
     )]));
     let mut runtime = GameRuntime::new(
         Arc::clone(&service),
@@ -1970,7 +1857,7 @@ async fn preset_npc_uses_the_same_spawn_event_and_post_commit_replanning_barrier
         .expect("complete preset NPC turn");
 
     assert!(narrator.saw_materialized_profile.load(Ordering::SeqCst));
-    assert_eq!(narrator.calls.load(Ordering::SeqCst), 4);
+    assert_eq!(narrator.calls.load(Ordering::SeqCst), 5);
     assert_eq!(npc.requests().expect("preset NPC requests").len(), 1);
     assert_eq!(outcome.npc_results.len(), 1);
     assert_eq!(
@@ -2263,7 +2150,7 @@ async fn stale_npc_requests_are_correlated_without_calling_the_provider() {
 }
 
 #[tokio::test]
-async fn synthesis_cannot_cite_an_uncommitted_world_event() {
+async fn narrator_text_cannot_supply_world_event_provenance() {
     let directory = TempDir::new().expect("temporary save parent");
     let fixture = fixture();
     let candidate_mod_lock = fixture.manifest.mod_lock.clone();
@@ -2294,24 +2181,58 @@ async fn synthesis_cannot_cite_an_uncommitted_world_event() {
         RuntimeConfig::default(),
     );
 
-    let error = runtime
+    let outcome = runtime
         .handle_player_input("Say that an impossible event occurred.")
         .await
-        .expect_err("fabricated event is rejected");
+        .expect("natural-language narration completes");
 
-    assert!(matches!(
-        error,
-        RuntimeError::ModelProtocol {
-            stage: "uncommitted_supporting_event"
-        }
-    ));
-    let loaded = observer.load().await.expect("load after rejection");
-    assert_eq!(loaded.revision, Revision::new(1));
-    assert_eq!(loaded.transcripts.len(), 1);
+    assert!(outcome.snapshot.supporting_events.is_empty());
+    let loaded = observer.load().await.expect("load completed narration");
+    assert_eq!(loaded.revision, Revision::new(2));
+    assert_eq!(loaded.transcripts.len(), 2);
     assert!(matches!(
         loaded.transcripts[0].speaker,
         TranscriptSpeaker::Player { .. }
     ));
+    assert!(loaded.transcripts[1].supporting_events.is_empty());
+}
+
+#[tokio::test]
+async fn narrator_response_body_is_never_parsed_as_a_control_envelope() {
+    let directory = TempDir::new().expect("temporary save parent");
+    let fixture = fixture();
+    let candidate_mod_lock = fixture.manifest.mod_lock.clone();
+    let store = SaveStore::create(
+        directory.path().join("save"),
+        fixture.manifest,
+        fixture.records,
+    )
+    .await
+    .expect("create save");
+    let service = WorldService::open(
+        store,
+        fixture.registry,
+        &candidate_mod_lock,
+        fixture.world_config,
+    )
+    .await
+    .expect("open service");
+    let literal = r#"{"kind":"continue","next_plan":{"npc_turns":[]}}"#;
+    let narrator = Arc::new(MockBridge::scripted([MockResponse::text(literal)]));
+    let mut runtime = GameRuntime::new(
+        service,
+        narrator,
+        parse("ses_01890f6a-2bc0-7d4e-8f90-123456789abc"),
+        RuntimeConfig::default(),
+    );
+
+    let outcome = runtime
+        .handle_player_input("Tell me what happens next.")
+        .await
+        .expect("literal model text is valid narration");
+
+    assert_eq!(outcome.narration.as_str(), literal);
+    assert!(outcome.npc_results.is_empty());
 }
 
 #[tokio::test]

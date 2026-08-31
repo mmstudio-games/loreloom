@@ -2,7 +2,9 @@ use std::{collections::BTreeMap, path::Path, sync::Arc};
 
 use armillae_core::{ToolCall, ToolDefinition, ToolResult, ToolResultContent};
 use armillae_tools::{BoxFuture, ToolContext, ToolExecutionError, ToolExecutor};
-use loreloom_agent::{AgentDefinition, AgentToolContext, NarratorNpcDecision};
+use loreloom_agent::{
+    AgentDefinition, AgentToolContext, AssignmentText, NarratorNpcDecision, NpcTurnRequest,
+};
 use loreloom_content::{
     CharacterCompileRequest, Definition, DefinitionRegistry, DraftCompileRequest, GenerationPolicy,
     NpcDraft, ParameterVisibility, PredicateDefinition, SceneSpawnPlan,
@@ -12,18 +14,21 @@ use loreloom_core::{
     CharacterContext, CharacterController, CharacterLifetime, CharacterSpawnSpec, ConditionRecord,
     ConditionView, ContentDefinitionId, DIAGNOSED_CONDITION_PREDICATE_ID, DomainRecord, EventId,
     EventOptionView, FactSubject, FactValue, GeneratedOrigin, InventoryView, KnowledgeStatus,
-    LongText, ModLock, ObjectId, ParameterSetView, ParameterValue, ParameterValueView,
-    ResourceView, Revision, RuntimePhase, SAVE_FORMAT_V1, SaveId, SaveManifest, SceneContext,
-    SceneObservation, SessionId, SkillTargetRef, SkillView, SystemIdGenerator, ToolActivity,
-    TranscriptWindow, UiNotice, UiSnapshot, VisibleActorView, WorldCommand, WorldCommandKind,
-    WorldEvent, WorldEventKind,
+    LongText, ModLock, NpcTurnRequestId, ObjectId, ParameterSetView, ParameterValue,
+    ParameterValueView, ResourceView, Revision, RuntimePhase, SAVE_FORMAT_V1, SaveId, SaveManifest,
+    SceneContext, SceneObservation, SessionId, SkillTargetRef, SkillView, SystemIdGenerator,
+    ToolActivity, TranscriptWindow, UiNotice, UiSnapshot, VisibleActorView, WorldCommand,
+    WorldCommandKind, WorldEvent, WorldEventKind,
 };
 use loreloom_store::{ActionResolution, CommitRequest, CommitResult, CommittedAction, SaveStore};
 use loreloom_world::{GameWorld, WorldBootstrap, WorldConfig};
 use serde_json::{Value as JsonValue, json};
 use tokio::sync::Mutex;
 
-use crate::{NARRATOR_MATERIALIZE_NPC_CAPABILITY, RuntimeError};
+use crate::{
+    NARRATOR_MATERIALIZE_NPC_CAPABILITY, NARRATOR_REQUEST_NPC_TURN_CAPABILITY,
+    NARRATOR_SUBMIT_NPC_DRAFT_CAPABILITY, RuntimeError,
+};
 
 const CONTEXT_TRANSCRIPT_SOURCE_LIMIT: usize = 256;
 const UI_TRANSCRIPT_LIMIT: usize = 64;
@@ -707,6 +712,9 @@ impl WorldService {
 pub struct RuntimeToolExecutor {
     service: Arc<WorldService>,
     pending_npc_decisions: Mutex<Vec<PendingNpcDecision>>,
+    pending_npc_turns: Mutex<Vec<NpcTurnRequest>>,
+    pending_npc_drafts: Mutex<Vec<NpcDraft>>,
+    request_ids: Mutex<SystemIdGenerator>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -722,11 +730,22 @@ impl RuntimeToolExecutor {
         Self {
             service,
             pending_npc_decisions: Mutex::new(Vec::new()),
+            pending_npc_turns: Mutex::new(Vec::new()),
+            pending_npc_drafts: Mutex::new(Vec::new()),
+            request_ids: Mutex::new(SystemIdGenerator),
         }
     }
 
     pub(crate) async fn take_pending_npc_decisions(&self) -> Vec<PendingNpcDecision> {
         std::mem::take(&mut *self.pending_npc_decisions.lock().await)
+    }
+
+    pub(crate) async fn take_pending_npc_turns(&self) -> Vec<NpcTurnRequest> {
+        std::mem::take(&mut *self.pending_npc_turns.lock().await)
+    }
+
+    pub(crate) async fn take_pending_npc_drafts(&self) -> Vec<NpcDraft> {
+        std::mem::take(&mut *self.pending_npc_drafts.lock().await)
     }
 }
 
@@ -908,6 +927,27 @@ impl ToolExecutor for RuntimeToolExecutor {
                     "properties": {
                         "event_instance_id": { "type": "string" },
                         "option_id": { "type": "string" }
+                    },
+                    "additionalProperties": false
+                }),
+            },
+            ToolDefinition {
+                name: "submit_npc_draft".to_owned(),
+                description: "Submit one generated NPC draft for Runtime validation."
+                    .to_owned(),
+                input_schema: npc_draft_schema(),
+            },
+            ToolDefinition {
+                name: "request_npc_turn".to_owned(),
+                description: "Queue one turn for an existing NPC after this narrator turn."
+                    .to_owned(),
+                input_schema: json!({
+                    "type": "object",
+                    "required": ["actor_id", "scene_id", "assignment"],
+                    "properties": {
+                        "actor_id": { "type": "string" },
+                        "scene_id": { "type": "string" },
+                        "assignment": { "type": "string" }
                     },
                     "additionalProperties": false
                 }),
@@ -1190,6 +1230,83 @@ impl ToolExecutor for RuntimeToolExecutor {
                                 }
                                 Err(error) => Err(RuntimeError::Agent(error)),
                             },
+                            Err(_) => Err(RuntimeError::InvalidInput),
+                        }
+                    }
+                }
+                "request_npc_turn" => {
+                    if !runtime
+                        .capabilities
+                        .contains(NARRATOR_REQUEST_NPC_TURN_CAPABILITY)
+                        || self.service.player_actor().await != runtime.actor_id
+                    {
+                        Err(RuntimeError::CapabilityDenied)
+                    } else if self.service.revision().await != runtime.revision {
+                        Err(RuntimeError::Unavailable)
+                    } else {
+                        match (
+                            parse_actor_id(&call.arguments, "actor_id"),
+                            parse_object_id(&call.arguments, "scene_id"),
+                            call.arguments.get("assignment").and_then(JsonValue::as_str),
+                        ) {
+                            (Ok(actor_id), Ok(scene_id), Some(assignment)) => {
+                                match AssignmentText::new(assignment) {
+                                    Ok(assignment) => {
+                                        let request_id = match NpcTurnRequestId::generate_with(
+                                            &mut *self.request_ids.lock().await,
+                                        ) {
+                                            Ok(request_id) => request_id,
+                                            Err(error) => {
+                                                return Ok(tool_result(
+                                                    &call,
+                                                    json!({ "code": RuntimeError::from(error).code() }),
+                                                    true,
+                                                ));
+                                            }
+                                        };
+                                        self.pending_npc_turns.lock().await.push(NpcTurnRequest {
+                                            request_id,
+                                            actor_id,
+                                            scene_id,
+                                            based_on_revision: runtime.revision,
+                                            assignment,
+                                        });
+                                        Ok(json!({
+                                            "status": "accepted_pending",
+                                            "request_id": request_id,
+                                            "revision": runtime.revision
+                                        }))
+                                    }
+                                    Err(_) => Err(RuntimeError::InvalidInput),
+                                }
+                            }
+                            _ => Err(RuntimeError::InvalidInput),
+                        }
+                    }
+                }
+                "submit_npc_draft" => {
+                    if !runtime
+                        .capabilities
+                        .contains(NARRATOR_SUBMIT_NPC_DRAFT_CAPABILITY)
+                        || self.service.player_actor().await != runtime.actor_id
+                    {
+                        Err(RuntimeError::CapabilityDenied)
+                    } else if self.service.revision().await != runtime.revision {
+                        Err(RuntimeError::Unavailable)
+                    } else {
+                        match serde_json::from_value::<NpcDraft>(call.arguments.clone()) {
+                            Ok(draft) => {
+                                let mut pending = self.pending_npc_drafts.lock().await;
+                                if pending.is_empty() {
+                                    pending.push(draft);
+                                    Ok(json!({
+                                        "status": "accepted_pending",
+                                        "revision": runtime.revision
+                                    }))
+                                } else {
+                                    Err(RuntimeError::InvalidInput)
+                                }
+                            }
                             Err(_) => Err(RuntimeError::InvalidInput),
                         }
                     }
@@ -1888,6 +2005,100 @@ fn skill_is_available(
         })
 }
 
+fn npc_draft_schema() -> JsonValue {
+    json!({
+        "type": "object",
+        "required": [
+            "display_name", "profile", "agent_profile", "base_attributes", "resources",
+            "conditions", "inventory", "skills", "knowledge", "goals"
+        ],
+        "properties": {
+            "display_name": { "type": "string" },
+            "profile": {
+                "type": "object",
+                "required": ["summary", "values", "speaking_style", "narrative_tags"],
+                "properties": {
+                    "summary": { "type": "string" },
+                    "values": { "type": "array", "items": { "type": "string" } },
+                    "speaking_style": { "type": "string" },
+                    "narrative_tags": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "uniqueItems": true
+                    }
+                },
+                "additionalProperties": false
+            },
+            "agent_profile": {
+                "anyOf": [{ "type": "string" }, { "type": "null" }]
+            },
+            "base_attributes": {
+                "type": "object",
+                "additionalProperties": { "type": "integer" }
+            },
+            "resources": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "required": ["resource_id", "current", "base_maximum"],
+                    "properties": {
+                        "resource_id": { "type": "string" },
+                        "current": { "type": "integer" },
+                        "base_maximum": { "type": "integer" }
+                    },
+                    "additionalProperties": false
+                }
+            },
+            "conditions": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "required": ["condition_id", "stacks", "intensity"],
+                    "properties": {
+                        "condition_id": { "type": "string" },
+                        "stacks": { "type": "integer", "minimum": 1 },
+                        "intensity": { "type": "integer" }
+                    },
+                    "additionalProperties": false
+                }
+            },
+            "inventory": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "required": ["local_key", "item_id", "quantity"],
+                    "properties": {
+                        "local_key": { "type": "string" },
+                        "item_id": { "type": "string" },
+                        "quantity": { "type": "integer", "minimum": 1 },
+                        "parent_local_key": {
+                            "anyOf": [{ "type": "string" }, { "type": "null" }]
+                        }
+                    },
+                    "additionalProperties": false
+                }
+            },
+            "skills": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "required": ["skill_id", "rank", "proficiency", "enabled"],
+                    "properties": {
+                        "skill_id": { "type": "string" },
+                        "rank": { "type": "integer", "minimum": 1 },
+                        "proficiency": { "type": "integer", "minimum": 0 },
+                        "enabled": { "type": "boolean" }
+                    },
+                    "additionalProperties": false
+                }
+            },
+            "knowledge": { "type": "array", "items": { "type": "object" } },
+            "goals": { "type": "array", "items": { "type": "object" } }
+        },
+        "additionalProperties": false
+    })
+}
+
 fn page_schema() -> JsonValue {
     json!({
         "type": "object",
@@ -1939,6 +2150,10 @@ fn parse_object_id(arguments: &JsonValue, field: &str) -> Result<ObjectId, Runti
         .ok_or(RuntimeError::InvalidInput)?
         .parse()
         .map_err(RuntimeError::Identity)
+}
+
+fn parse_actor_id(arguments: &JsonValue, field: &str) -> Result<ActorId, RuntimeError> {
+    parse_object_id(arguments, field).map(ActorId::from)
 }
 
 fn parse_u32(arguments: &JsonValue, field: &str) -> Result<u32, RuntimeError> {

@@ -129,22 +129,25 @@ Loreloom Runtime ───────────────► Persistence
     依赖模糊加载顺序静默覆盖 Definition；
 24. 第一阶段持久化后端固定为 SurrealDB + SurrealKV，SQLite 只作为测试对照；SurrealDB driver
     固定到公开 Git revision，已通过 Store Spike 验证显式事务、原生 JSON、migration tracking、
-    Revision CAS、崩溃恢复、关闭后备份和 10,000 Record 规模；
+    Revision CAS、崩溃恢复和 10,000 Record 规模；确定性关闭、物理备份/恢复与存档切换受已确认的
+    SurrealDB SDK 上游缺口门禁，不使用 sleep/retry 伪造完成；
 25. Loreloom 的 durable commit 必须使用显式事务，不得把普通 ORM batch 当作原子事务；数据库
     Schema migration 也不能替代领域 record、ModLock 和 payload Schema 的版本迁移；
 26. 第一阶段只有一个 Agent Loop 执行槽：NarratorAgent 与 NpcAgent、以及不同 NpcAgent 之间严格
     串行；`NpcTurnRequest` 可以按 Narrator 给出的顺序排队，但下一个 Agent 只能在前一个完成/
     取消/失败并释放执行槽后开始，并从届时有效的 committed Revision 重新校验和投影上下文；
-27. 第一阶段的自然语言玩家输入只交给 NarratorAgent；Narrator 负责结合 Scene/Context 生成
-    `NarratorPlan`，决定是否以及按什么顺序请求 NPC Turn，Runtime 不实现叙事优先级或公平性判断；
-28. NpcAgent 的发言、意图和动作描述先形成有界 `NpcTurnResult` 返回 Narrator；真正的世界变化只
-    来自已执行 ToolCall/WorldCommand，Narrator 必须以实际 ToolResult/WorldEvent 为准形成
-    `NarratorSynthesis`，不能把 NPC 声称的行动当作已发生事实；
-29. Narrator 不受固定 NPC 数量常量约束，可以在 Synthesis 后提出下一轮有序 `NpcTurnRequest`；
-    Runtime 通过可配置的整轮与单 Turn Model Call、ToolCall、Token、输出和墙钟预算阻止无限循环，
-    模型或 Mod 不能扩大配置上限；
-30. 等待 Provider 时 TUI 流式显示和取消保持响应，但第一阶段逻辑 World Clock 不随真实墙钟时间
-    隐式推进；世界只通过明确 WorldCommand/System 变化。
+27. 第一阶段的自然语言玩家输入只交给 NarratorAgent；Narrator 通过 Provider 原生 Tool Calling
+    请求 NPC Turn，并以自然语言正文提供叙事；Runtime 从已接受 ToolCall 构造内部 `NarratorPlan`，
+    不解析模型正文中的 JSON，也不实现叙事优先级或公平性判断；
+28. NpcAgent 的自然语言响应与实际 ToolResult/WorldEvent 一起形成内部 `NpcTurnResult` 返回
+    Narrator；真正的世界变化只来自已执行 ToolCall/WorldCommand，NPC 或 Narrator 的正文不能直接
+    改变 ECS；
+29. Narrator 不受固定 NPC 数量常量约束，可以在后续 Narrator Turn 继续调用
+    `request_npc_turn`；Runtime 通过可配置的整轮与单 Turn Model Call、ToolCall、Token、输出和墙钟
+    预算阻止无限循环，模型或 Mod 不能扩大配置上限；
+30. 等待 Provider 时 TUI 显示由 Runtime 阶段驱动的临时 thinking 状态，并保持取消和退出响应；
+    不向玩家转发 Provider 的未完成正文。第一阶段逻辑 World Clock 不随真实墙钟时间隐式推进，
+    世界只通过明确 WorldCommand/System 变化。
 31. 第一阶段使用 Cargo virtual workspace，包含 `loreloom-core`、`loreloom-content`、
     `loreloom-world`、`loreloom-agent`、`loreloom-store`、`loreloom-runtime`、`loreloom-tui` 七个
     library crate 和 `loreloom` binary crate；
@@ -178,22 +181,24 @@ Loreloom Runtime ───────────────► Persistence
     Schema 与纯编译器，World 拥有结合当前状态校验并执行的 NpcFactory。Content document v1 拒绝
     未知字段，升级按 content schema version 显式迁移。
 42. Beat lifetime 只允许 MentionOnly，不生成 Entity；Scene 与 Persistent 使用同一完整 Character
-    record，Lightweight 只是没有 AgentBinding 的 NarratorProxy/Rules controller。产生跨 Scene 的
-    持久引用前必须原子 promotion；Scene 结束后只有无持久入引用的 Scene entity 可以清理。
+    record，Lightweight 只是没有 AgentBinding 的 NarratorProxy/Rules controller。Scene、其状态与
+    Scene-owned entity 都是存档中的持久事实；离开 Scene 只停用，重新进入时恢复，不因离开或故事
+    阶段结束而 cleanup。promotion 只表达角色脱离原 Scene、成为世界级角色的领域语义。
 43. Agent 长期上下文不增加隐藏 Memory 数据库：KnownFact/Goal 是决策事实，Transcript 是有状态的
     对话归档。第一阶段只做确定性、可配置的有界投影，不调用摘要模型；Narrator/NPC 文本不会自动
     写入 KnownFact。
 44. `NpcTarget` 固定区分 Existing、Preset、Generated 与 Mentioned；Generated NPC 的 Draft 使用现有
-    Narrator Provider 的独立 generation stage，并消费同一整轮编排预算，不增加隐式第三 Provider。
-    Generated provenance 明确引用触发本次生成的 PlayerInput Transcript 或 WorldEvent。
+    Narrator Provider 的独立 generation stage，并通过该 stage 提供的原生 Tool 提交，不从模型正文
+    解析 JSON；它消费同一整轮编排预算，不增加隐式第三 Provider。Generated provenance 明确引用
+    触发本次生成的 PlayerInput Transcript 或 WorldEvent。
 45. Condition Clock 在 periodic 与 expiry 同 tick 时先执行 periodic，再重新校验并执行 expiry；周期
     Effect 作用于 Condition target。诊断不写回 Condition，而使用观察者拥有、以目标 Actor 为 subject、
     Condition Definition 为 value 的 confirmed KnownFact 决定是否投影真实名称。
-46. `NarratorPlan` 只调度已经提交且具有 `ActorId` 的角色。Narrator 请求 Preset/Generated NPC 时，
-    当前 planning Turn 先结束，Runtime 才能串行完成编译或 `npc_generation`、经统一
-    `CharacterSpawnSpec -> SpawnCharacter` 路径提交；随后 Runtime 在同一次玩家输入中把物化结果和
-    更新后的 Scene Observation 交给 Narrator 重新规划。Narrator 看过完整角色投影后才生成
-    `NpcTurnRequest`；不增加角色重要度、可选复核或未物化 target 的 Plan wire。
+46. Runtime 只从已接受的 `request_npc_turn` ToolCall 构造引用 committed `ActorId` 的内部
+    `NarratorPlan`。Narrator 请求 Preset/Generated NPC 时，当前 Turn 先结束，Runtime 才能串行完成
+    编译或 `npc_generation`、经统一 `CharacterSpawnSpec -> SpawnCharacter` 路径提交；随后 Runtime
+    在同一次玩家输入中把物化结果和更新后的 Scene Observation 交给 Narrator。Narrator 看过完整
+    角色投影后才能为其调用 `request_npc_turn`；不增加角色重要度、可选复核或未物化 target 的 wire。
 
 项目方已于 2026-08-29 明确确认第 18–23 项的 Mod 子系统方向。该确认把 Content Mod、Rule Mod、
 统一导入路径、类型化参数、结构化 Event Option、通用 Gameplay Tool、ModLock 和 Extension Mod
@@ -211,6 +216,11 @@ Store Schema、领域迁移和 AGPL 兼容分发方式仍按各自门禁处理�
 取代早期的 NPC 激活请求表述。这次确认冻结玩家入口、语义调度所有权、Narrator Synthesis、配置化
 资源边界和 Provider 等待期间暂停逻辑世界；精确数据 Schema、预算字段与默认值仍待 Spec 冻结。
 
+项目方于 2026-08-31 进一步明确模型正文在所有 Provider 上都必须保持自然语言，不使用模型生成的
+JSON Plan/Synthesis/NpcDraft；结构化操作统一通过 Provider 原生 Tool Calling。该决定取代上段的
+模型 Synthesis wire，但保留 Narrator 编排所有权、NpcTurnRequest 语义顺序、串行执行与两级预算。
+同日确认 Scene 离开后持久停用而非删除，并以 Runtime thinking phase 取代 Provider 未完成正文展示。
+
 项目方于 2026-08-30 接受 RFC 0001 的核心架构并授权进入实施初始化，同时确认第 31–33 项的
 workspace、版本管理和仓库目录约定。尚未冻结的精确协议转为 Active Spec 下的范围化实施门禁，
 不得由空 crate 脚手架反向冻结公共 API。
@@ -223,16 +233,16 @@ workspace、版本管理和仓库目录约定。尚未冻结的精确协议转�
 - Mod Package Manifest、命名空间、依赖解析、显式 Patch、内容哈希、信任来源和资源限额；
 - Event/Rule/Parameter Schema、Predicate/Effect 白名单、规则执行顺序和 Gameplay Action 协议；
 - Extension Mod 是否采用 WASM Component、Host API、Capability、签名与存档兼容边界；
-- NarratorNpcDecision、NpcTarget、Scene cleanup、Agent 化资源门禁和持久引用升级规则已冻结；
+- NarratorNpcDecision、NpcTarget、持久 Scene 激活语义、Agent 化资源门禁和角色 promotion 规则已冻结；
   Generated Draft 复用 Narrator Provider 的独立预算阶段，具体预算值是 Host 配置，不进入模型/Mod
   wire；
 - Store 各领域 payload Schema，以及最终 AGPL 兼容分发方式；record envelope、重建事实源、
   migration 顺序与未知字段策略已冻结；
 - 一个玩家输入、Agent Step、ToolCall、WorldCommand 和世界提交之间的原子性；
-- `NarratorPlan`、`NpcTurnRequest`、`NpcTurnResult`、`NarratorSynthesis` 的精确 Schema，整轮/单
-  Turn 预算字段、配置层级、默认值和最大编排轮数；
+- ToolCall 构造的内部 `NarratorPlan`、`NpcTurnRequest`、自然语言 `NpcTurnResult`，以及整轮/单
+  Turn 预算字段、配置层级、默认值和最大编排轮数；模型正文不承担这些结构化协议；
 - 角色私有知识、Goal、Transcript 与确定性上下文投影已冻结；摘要模型延期；
-- TUI 的窄屏降级、快捷键、流式输出和后台任务交互细节；
+- TUI 的窄屏降级、快捷键、thinking 状态和后台任务交互细节；
 - 初始世界内容、玩法循环和可发布范围。
 
 ## 6. 后续推进顺序

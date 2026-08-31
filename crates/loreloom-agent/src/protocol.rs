@@ -12,9 +12,6 @@ use thiserror::Error;
 use crate::BudgetReason;
 
 pub type AssignmentText = BoundedText<4096>;
-pub type UtteranceText = BoundedText<16384>;
-pub type IntentText = BoundedText<4096>;
-pub type ClaimedActionText = BoundedText<8192>;
 pub type NarrationText = BoundedText<65536>;
 
 #[derive(Debug, Error)]
@@ -246,12 +243,7 @@ impl NpcAgent {
         let context = serde_json::to_string(&json!({
             "kind": "npc_turn",
             "profile_id": self.definition.profile_id,
-            "context": self.context,
-            "output_contract": {
-                "utterance": "optional string",
-                "intent": "optional string",
-                "claimed_action_description": "optional string"
-            }
+            "context": self.context
         }))
         .map_err(AgentError::ContextEncoding)?;
         Ok(CompletionRequest {
@@ -259,7 +251,7 @@ impl NpcAgent {
                 Message::new(
                     Role::System,
                     vec![ContentPart::text(
-                        "Follow product safety and tool rules. Claims are not world facts; use tools for state changes.",
+                        "Follow product safety and tool rules. Use tools for state changes. Respond to the narrator in natural language; do not return JSON or a structured envelope. Your claims are not world facts unless a tool commits them.",
                     )],
                 ),
                 Message::new(
@@ -330,41 +322,9 @@ pub struct NpcTurnResult {
     pub final_revision: Revision,
     pub status: NpcTurnStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub utterance: Option<UtteranceText>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub intent: Option<IntentText>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub claimed_action_description: Option<ClaimedActionText>,
+    pub response: Option<LongText>,
     pub tool_call_ids: Vec<String>,
     pub world_events: Vec<EventId>,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct NpcModelOutput {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub utterance: Option<UtteranceText>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub intent: Option<IntentText>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub claimed_action_description: Option<ClaimedActionText>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub enum NarratorSynthesis {
-    Final {
-        based_on_revision: Revision,
-        narration: NarrationText,
-        supporting_events: Vec<EventId>,
-    },
-    Continue {
-        based_on_revision: Revision,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        narration: Option<NarrationText>,
-        supporting_events: Vec<EventId>,
-        next_plan: NarratorPlan,
-    },
 }
 
 #[cfg(test)]
