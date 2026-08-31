@@ -94,6 +94,8 @@ Loreloom Runtime ───────────────► Persistence
 8. 技能采用“静态 Skill Definition + ECS Skill Grant + System Executor”模型，主动技能通过
    类型化 Tool/WorldCommand 使用，被动与反应技能由明确的规则入口驱动；
 9. Agent 上下文只接收背包摘要、当前可用技能和按需查询结果，不直接持有 ECS 集合或完整内容库；
+   Runtime 为当前 ToolContext Actor 暴露有界、Stable ID 游标分页的物品/技能 Query，并只把冻结的
+   Item/Skill WorldCommand 作为 Command Tool；查询不能借由任意 Actor 参数越过 Actor 所有权；
 10. 主 `NarratorAgent` 负责解释玩家交互意图，并决定 NPC 是仅叙事提及、实体化、由 Narrator
     代理、规则控制还是请求独立 NPC Turn，以及建议其 Scene/World 生命周期；Runtime 不重新判断
     叙事重要性，只负责 Schema、Revision、Capability、预算和世界不变量；

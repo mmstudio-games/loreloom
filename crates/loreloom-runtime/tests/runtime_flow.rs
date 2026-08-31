@@ -17,17 +17,20 @@ use armillae_llm::{
 };
 use armillae_tools::{ToolContext, ToolExecutor};
 use loreloom_agent::{
-    AgentDefinition, AgentToolContext, NarrativeImportance, NarratorNpcDecision, NarratorPlan,
-    NpcControllerKind, NpcGenerationRequest, NpcLifetime, NpcModelOutput, NpcNarrativeAction,
-    NpcTarget, NpcTurnRequest, NpcTurnStatus,
+    AgentDefinition, AgentRunner, AgentToolContext, CancellationToken, NarrativeImportance,
+    NarratorNpcDecision, NarratorPlan, NpcControllerKind, NpcGenerationRequest, NpcLifetime,
+    NpcModelOutput, NpcNarrativeAction, NpcTarget, NpcTurnRequest, NpcTurnStatus, ResourceBudget,
+    TurnInvocation, TurnStatus,
 };
 use loreloom_content::{
     AgentProfileDefinition, AttributeDefinition, CONTENT_SCHEMA_V1, CharacterDefinition,
     ConditionDefinition, ContainerDefinition, ContentDocument, ContentPackContext, Definition,
-    DefinitionRegistry, DurationPolicy, EffectDefinition, EventDefinition, EventNodeDefinition,
-    EventOptionDefinition, GameplayActionDefinition, GenerationPolicy, ItemDefinition, NpcDraft,
-    ParameterDefinition, ParameterPersistence, ParameterType, ParameterVisibility, PlaceDefinition,
-    SceneDefinition, StackPolicy, SymptomDefinition, TagDefinition, parse_content_hash,
+    DefinitionRegistry, DurationPolicy, EffectDefinition, EquipmentSlotDefinition, EventDefinition,
+    EventNodeDefinition, EventOptionDefinition, GameplayActionDefinition, GenerationPolicy,
+    ItemDefinition, NpcDraft, ParameterDefinition, ParameterPersistence, ParameterType,
+    ParameterVisibility, PlaceDefinition, ResourceCost, ResourceDefinition, ResourceMaximumPolicy,
+    SceneDefinition, SkillDefinition, SkillKind, SkillTarget, StackPolicy, SymptomDefinition,
+    TagDefinition, parse_content_hash,
 };
 use loreloom_core::{
     ActionId, ActionState, ActorId, AgentBinding, AttributeAdjustment, AttributeOperation,
@@ -35,11 +38,12 @@ use loreloom_core::{
     ConditionRecord, ConditionSource, ContentDefinitionId, ContentOrigin,
     DIAGNOSED_CONDITION_PREDICATE_ID, DisplayName, DomainRecord, EntityOrigin, EventInstanceRecord,
     EventStatus, FactSource, FactSubject, FactValue, Fixed, GenerationSource, IntensityPolicy,
-    KnowledgeStatus, KnownFactRecord, LifeState, LockedMod, LongText, ModId, ModLock,
-    ModSourceKind, ObjectId, ParameterSetRecord, ParameterValue, PlaceRecord, Posture, Revision,
-    SAVE_FORMAT_V1, SaveId, SaveManifest, SceneRecord, SessionId, ShortText, SpawnConstraints,
-    StackState, SystemIdGenerator, TranscriptSpeaker, WorldCommand, WorldCommandKind, WorldId,
-    WorldStateRecord, WorldTime,
+    ItemRecord, KnowledgeStatus, KnownFactRecord, LifeState, LockedMod, LongText, ModId, ModLock,
+    ModSourceKind, ObjectId, ParameterSetRecord, ParameterValue, PlaceRecord, Posture,
+    ResourcePool, Revision, SAVE_FORMAT_V1, SaveId, SaveManifest, SceneRecord, SessionId,
+    ShortText, SkillGrantRecord, SkillSource, SpawnConstraints, StackState, SystemIdGenerator,
+    TranscriptSpeaker, WorldCommand, WorldCommandKind, WorldEventKind, WorldId, WorldStateRecord,
+    WorldTime,
 };
 use loreloom_runtime::{
     GameRuntime, RuntimeConfig, RuntimeError, RuntimeToolExecutor, WorldService,
@@ -105,6 +109,11 @@ fn fixture() -> Fixture {
     let event_node = definition_id("event_node", "rain_entry");
     let event_option = definition_id("event_option", "listen");
     let inventory_definition = definition_id("item", "inventory");
+    let stack_definition = definition_id("item", "token_stack");
+    let gear_definition = definition_id("item", "hand_lantern");
+    let equipment_slot = definition_id("equipment_slot", "hand");
+    let resource_definition = definition_id("resource", "focus");
+    let skill_definition = definition_id("skill", "steady_breath");
     let condition_id = definition_id("condition", "shivering");
     let place_definition = definition_id("place", "hall");
     let scene_definition = definition_id("scene", "inn");
@@ -260,6 +269,58 @@ fn fixture() -> Fixture {
                         }),
                         equipment_slots: BTreeSet::new(),
                         modifiers: Vec::new(),
+                    }),
+                    Definition::Item(ItemDefinition {
+                        id: stack_definition,
+                        display_name: name("Trade tokens"),
+                        description: text("A small stack of trade tokens."),
+                        tags: BTreeSet::new(),
+                        stack_limit: NonZeroU32::new(99).expect("stack limit"),
+                        unit_weight_grams: Fixed::ONE,
+                        durability: None,
+                        container: None,
+                        equipment_slots: BTreeSet::new(),
+                        modifiers: Vec::new(),
+                    }),
+                    Definition::EquipmentSlot(EquipmentSlotDefinition {
+                        id: equipment_slot.clone(),
+                        display_name: name("Hand"),
+                        allowed_item_tags: BTreeSet::new(),
+                    }),
+                    Definition::Item(ItemDefinition {
+                        id: gear_definition,
+                        display_name: name("Hand lantern"),
+                        description: text("A lantern that occupies one hand."),
+                        tags: BTreeSet::new(),
+                        stack_limit: NonZeroU32::MIN,
+                        unit_weight_grams: Fixed::ONE,
+                        durability: None,
+                        container: None,
+                        equipment_slots: BTreeSet::from([equipment_slot]),
+                        modifiers: Vec::new(),
+                    }),
+                    Definition::Resource(ResourceDefinition {
+                        id: resource_definition.clone(),
+                        display_name: name("Focus"),
+                        minimum: Fixed::ZERO,
+                        maximum: Fixed::from_integer(10).expect("resource maximum"),
+                        maximum_policy: ResourceMaximumPolicy::ClampCurrent,
+                        derived_from_attribute: None,
+                    }),
+                    Definition::Skill(SkillDefinition {
+                        id: skill_definition,
+                        display_name: name("Steady breath"),
+                        description: text("Spend one focus to steady yourself."),
+                        kind: SkillKind::Active,
+                        costs: vec![ResourceCost {
+                            resource_id: resource_definition,
+                            amount: Fixed::ONE,
+                        }],
+                        cooldown_ticks: 3,
+                        target: SkillTarget::SelfTarget,
+                        executor_id: definition_id("skill_executor", "effects"),
+                        effects: Vec::new(),
+                        reaction: None,
                     }),
                     Definition::Condition(ConditionDefinition {
                         id: condition_id.clone(),
@@ -501,6 +562,134 @@ fn inventory(
         instance_adjustments: Vec::new(),
         origin: EntityOrigin::Content { origin },
     })
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ToolFixtureIds {
+    stack: ObjectId,
+    gear: ObjectId,
+    grant: ObjectId,
+    npc_grant: ObjectId,
+}
+
+fn add_tool_records(fixture: &mut Fixture) -> ToolFixtureIds {
+    let stack_definition = definition_id("item", "token_stack");
+    let gear_definition = definition_id("item", "hand_lantern");
+    let resource_definition = definition_id("resource", "focus");
+    let skill_definition = definition_id("skill", "steady_breath");
+    let stack = object_id("2bc0");
+    let gear = object_id("2bc1");
+    let grant = object_id("2bc2");
+    let npc_grant = object_id("2bc5");
+    let stack_origin = fixture
+        .registry
+        .get(&stack_definition)
+        .expect("stack definition")
+        .origin
+        .clone();
+    let gear_origin = fixture
+        .registry
+        .get(&gear_definition)
+        .expect("gear definition")
+        .origin
+        .clone();
+    let skill_origin = fixture
+        .registry
+        .get(&skill_definition)
+        .expect("skill definition")
+        .origin
+        .clone();
+    let player = fixture
+        .records
+        .iter_mut()
+        .find_map(|record| match record {
+            DomainRecord::Character(character) if character.id == fixture.player => Some(character),
+            _ => None,
+        })
+        .expect("player character");
+    player.resources.insert(
+        resource_definition.clone(),
+        ResourcePool {
+            resource_id: resource_definition,
+            current: Fixed::from_integer(5).expect("resource current"),
+            base_maximum: Fixed::from_integer(10).expect("resource maximum"),
+        },
+    );
+    let player_root = player.inventory_root;
+    fixture.records.extend([
+        DomainRecord::Item(ItemRecord {
+            id: stack,
+            definition_id: stack_definition,
+            stack: StackState(NonZeroU32::new(3).expect("stack quantity")),
+            durability: None,
+            container: None,
+            contained_by: None,
+            owned_by: Some(fixture.player),
+            equipped: None,
+            located_at: Some(fixture.place),
+            custom_name: None,
+            bound_actor: None,
+            parameters: BTreeMap::new(),
+            instance_adjustments: Vec::new(),
+            origin: EntityOrigin::Content {
+                origin: stack_origin,
+            },
+        }),
+        DomainRecord::Item(ItemRecord {
+            id: gear,
+            definition_id: gear_definition,
+            stack: StackState(NonZeroU32::MIN),
+            durability: None,
+            container: None,
+            contained_by: Some(player_root),
+            owned_by: Some(fixture.player),
+            equipped: None,
+            located_at: None,
+            custom_name: None,
+            bound_actor: None,
+            parameters: BTreeMap::new(),
+            instance_adjustments: Vec::new(),
+            origin: EntityOrigin::Content {
+                origin: gear_origin,
+            },
+        }),
+        DomainRecord::SkillGrant(SkillGrantRecord {
+            id: grant,
+            owner_id: fixture.player,
+            skill_id: skill_definition.clone(),
+            rank: 1,
+            proficiency: 0,
+            source: SkillSource::Rule {
+                rule_id: definition_id("rule", "bootstrap"),
+            },
+            enabled: true,
+            ready_at: None,
+            origin: EntityOrigin::Content {
+                origin: skill_origin.clone(),
+            },
+        }),
+        DomainRecord::SkillGrant(SkillGrantRecord {
+            id: npc_grant,
+            owner_id: fixture.npc,
+            skill_id: skill_definition,
+            rank: 1,
+            proficiency: 0,
+            source: SkillSource::Rule {
+                rule_id: definition_id("rule", "bootstrap"),
+            },
+            enabled: true,
+            ready_at: None,
+            origin: EntityOrigin::Content {
+                origin: skill_origin,
+            },
+        }),
+    ]);
+    ToolFixtureIds {
+        stack,
+        gear,
+        grant,
+        npc_grant,
+    }
 }
 
 fn text_response(text: impl Into<String>) -> CompletionResponse {
@@ -2093,6 +2282,375 @@ async fn synthesis_cannot_cite_an_uncommitted_world_event() {
         loaded.transcripts[0].speaker,
         TranscriptSpeaker::Player { .. }
     ));
+}
+
+#[tokio::test]
+async fn inventory_tools_page_by_stable_id_enforce_actor_ownership_and_update_snapshot() {
+    let directory = TempDir::new().expect("temporary save parent");
+    let mut fixture = fixture();
+    let ids = add_tool_records(&mut fixture);
+    let player_root = fixture
+        .records
+        .iter()
+        .find_map(|record| match record {
+            DomainRecord::Character(character) if character.id == fixture.player => {
+                Some(character.inventory_root)
+            }
+            _ => None,
+        })
+        .expect("player inventory root");
+    let npc_root = fixture
+        .records
+        .iter()
+        .find_map(|record| match record {
+            DomainRecord::Character(character) if character.id == fixture.npc => {
+                Some(character.inventory_root)
+            }
+            _ => None,
+        })
+        .expect("npc inventory root");
+    let store = SaveStore::create(
+        directory.path().join("save"),
+        fixture.manifest.clone(),
+        fixture.records,
+    )
+    .await
+    .expect("create save");
+    let service = WorldService::open(
+        store,
+        fixture.registry,
+        &fixture.manifest.mod_lock,
+        fixture.world_config,
+    )
+    .await
+    .expect("open service");
+    let executor = RuntimeToolExecutor::new(Arc::clone(&service));
+    let session_id = parse("ses_01890f6a-2bc3-7d4e-8f90-123456789abc");
+    let context = |revision| {
+        ToolContext::new().with_extension(AgentToolContext {
+            actor_id: fixture.player,
+            revision,
+            session_id,
+            capabilities: Default::default(),
+        })
+    };
+
+    let first = executor
+        .execute(
+            context(Revision::ZERO),
+            ToolCall {
+                id: ToolCallId::new("inventory-first-page").expect("call id"),
+                name: "list_inventory".to_owned(),
+                arguments: json!({ "limit": 1 }),
+            },
+        )
+        .await
+        .expect("correlated first page");
+    let ToolResultContent::Json { value: first } = &first.content[0] else {
+        panic!("JSON first page")
+    };
+    assert_eq!(first["items"].as_array().expect("items").len(), 1);
+    let cursor = first["next_after"]
+        .as_str()
+        .expect("next cursor")
+        .to_owned();
+    let rest = executor
+        .execute(
+            context(Revision::ZERO),
+            ToolCall {
+                id: ToolCallId::new("inventory-rest").expect("call id"),
+                name: "list_inventory".to_owned(),
+                arguments: json!({ "after": cursor, "limit": 64 }),
+            },
+        )
+        .await
+        .expect("correlated remaining page");
+    let ToolResultContent::Json { value: rest } = &rest.content[0] else {
+        panic!("JSON remaining page")
+    };
+    assert!(
+        rest["items"]
+            .as_array()
+            .expect("remaining items")
+            .iter()
+            .all(|item| item["item_id"] != json!(npc_root))
+    );
+
+    let denied = executor
+        .execute(
+            context(Revision::ZERO),
+            ToolCall {
+                id: ToolCallId::new("inspect-foreign-item").expect("call id"),
+                name: "inspect_item".to_owned(),
+                arguments: json!({ "item_id": npc_root }),
+            },
+        )
+        .await
+        .expect("correlated ownership rejection");
+    assert!(denied.is_error);
+    assert!(matches!(
+        &denied.content[..],
+        [ToolResultContent::Json { value }] if value["code"] == json!("unavailable")
+    ));
+    let inspected_item = executor
+        .execute(
+            context(Revision::ZERO),
+            ToolCall {
+                id: ToolCallId::new("inspect-owned-item").expect("call id"),
+                name: "inspect_item".to_owned(),
+                arguments: json!({ "item_id": ids.stack }),
+            },
+        )
+        .await
+        .expect("correlated item inspection");
+    assert!(!inspected_item.is_error);
+
+    let skills = executor
+        .execute(
+            context(Revision::ZERO),
+            ToolCall {
+                id: ToolCallId::new("list-skills").expect("call id"),
+                name: "list_available_skills".to_owned(),
+                arguments: json!({}),
+            },
+        )
+        .await
+        .expect("correlated skill list");
+    let ToolResultContent::Json { value: skills } = &skills.content[0] else {
+        panic!("JSON skill list")
+    };
+    assert_eq!(skills["skills"].as_array().expect("skills").len(), 1);
+    assert_eq!(skills["skills"][0]["grant_id"], json!(ids.grant));
+    assert_eq!(skills["skills"][0]["available"], json!(true));
+    let inspected = executor
+        .execute(
+            context(Revision::ZERO),
+            ToolCall {
+                id: ToolCallId::new("inspect-skill").expect("call id"),
+                name: "inspect_skill".to_owned(),
+                arguments: json!({ "grant_id": ids.grant }),
+            },
+        )
+        .await
+        .expect("correlated skill inspection");
+    assert!(!inspected.is_error);
+    let denied_skill = executor
+        .execute(
+            context(Revision::ZERO),
+            ToolCall {
+                id: ToolCallId::new("inspect-foreign-skill").expect("call id"),
+                name: "inspect_skill".to_owned(),
+                arguments: json!({ "grant_id": ids.npc_grant }),
+            },
+        )
+        .await
+        .expect("correlated skill ownership rejection");
+    assert!(denied_skill.is_error);
+
+    let transferred = executor
+        .execute(
+            context(Revision::ZERO),
+            ToolCall {
+                id: ToolCallId::new("transfer-stack").expect("call id"),
+                name: "transfer_item".to_owned(),
+                arguments: json!({ "item_id": ids.stack, "container_id": player_root }),
+            },
+        )
+        .await
+        .expect("correlated transfer");
+    assert!(!transferred.is_error);
+    let equipped = executor
+        .execute(
+            context(Revision::new(1)),
+            ToolCall {
+                id: ToolCallId::new("equip-gear").expect("call id"),
+                name: "equip_item".to_owned(),
+                arguments: json!({
+                    "item_id": ids.gear,
+                    "slot_id": definition_id("equipment_slot", "hand")
+                }),
+            },
+        )
+        .await
+        .expect("correlated equip");
+    assert!(!equipped.is_error);
+
+    let stale = executor
+        .execute(
+            context(Revision::ZERO),
+            ToolCall {
+                id: ToolCallId::new("stale-inventory").expect("call id"),
+                name: "list_inventory".to_owned(),
+                arguments: json!({}),
+            },
+        )
+        .await
+        .expect("correlated stale result");
+    assert!(stale.is_error);
+    let snapshot = service
+        .snapshot(
+            session_id,
+            loreloom_core::RuntimePhase::Idle,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        )
+        .await
+        .expect("updated snapshot");
+    assert_eq!(snapshot.revision, Revision::new(2));
+    assert_eq!(
+        snapshot
+            .player
+            .inventory
+            .iter()
+            .find(|item| item.item.id == ids.stack)
+            .expect("transferred stack")
+            .item
+            .contained_by,
+        Some(player_root)
+    );
+    assert_eq!(
+        snapshot
+            .player
+            .inventory
+            .iter()
+            .find(|item| item.item.id == ids.gear)
+            .expect("equipped gear")
+            .item
+            .equipped
+            .as_ref()
+            .expect("equipment state")
+            .slot_id,
+        definition_id("equipment_slot", "hand")
+    );
+}
+
+#[tokio::test]
+async fn mock_agent_continuation_splits_stack_then_uses_skill_at_advanced_revision() {
+    let directory = TempDir::new().expect("temporary save parent");
+    let mut fixture = fixture();
+    let ids = add_tool_records(&mut fixture);
+    let store = SaveStore::create(
+        directory.path().join("save"),
+        fixture.manifest.clone(),
+        fixture.records,
+    )
+    .await
+    .expect("create save");
+    let service = WorldService::open(
+        store,
+        fixture.registry,
+        &fixture.manifest.mod_lock,
+        fixture.world_config,
+    )
+    .await
+    .expect("open service");
+    let executor = Arc::new(RuntimeToolExecutor::new(Arc::clone(&service)));
+    let tools = executor
+        .definitions()
+        .into_iter()
+        .filter(|definition| matches!(definition.name.as_str(), "split_stack" | "use_skill"))
+        .collect();
+    let runner = AgentRunner::new(executor);
+    let bridge = MockBridge::scripted([
+        MockResponse::tool_call(
+            ToolCallId::new("split-from-agent").expect("call id"),
+            "split_stack",
+            json!({ "item_id": ids.stack, "quantity": 1 }),
+        ),
+        MockResponse::tool_call(
+            ToolCallId::new("skill-from-agent").expect("call id"),
+            "use_skill",
+            json!({
+                "grant_id": ids.grant,
+                "target": { "type": "self_target" }
+            }),
+        ),
+        MockResponse::text("done"),
+    ]);
+    let session_id = parse("ses_01890f6a-2bc4-7d4e-8f90-123456789abc");
+    let cancellation = CancellationToken::new();
+    let outcome = runner
+        .run_turn(TurnInvocation {
+            bridge: &bridge,
+            request: CompletionRequest {
+                tools,
+                ..CompletionRequest::default()
+            },
+            tool_context: AgentToolContext {
+                actor_id: fixture.player,
+                revision: Revision::ZERO,
+                session_id,
+                capabilities: BTreeSet::from(["split_stack".to_owned(), "use_skill".to_owned()]),
+            },
+            budget: ResourceBudget::default(),
+            cancellation: &cancellation,
+        })
+        .await;
+    assert_eq!(outcome.status, TurnStatus::Completed);
+    assert!(outcome.tool_calls.iter().all(|call| !call.is_error));
+    assert_eq!(outcome.committed_events.len(), 3);
+    let events = service.events().await;
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event.kind, WorldEventKind::StackSplit { .. }))
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event.kind, WorldEventKind::ResourceChanged { .. }))
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event.kind, WorldEventKind::SkillUsed { .. }))
+    );
+    let snapshot = service
+        .snapshot(
+            session_id,
+            loreloom_core::RuntimePhase::Idle,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        )
+        .await
+        .expect("updated snapshot");
+    assert_eq!(snapshot.revision, Revision::new(2));
+    assert_eq!(
+        snapshot
+            .player
+            .inventory
+            .iter()
+            .find(|item| item.item.id == ids.stack)
+            .expect("source stack")
+            .item
+            .stack
+            .0
+            .get(),
+        2
+    );
+    assert_eq!(
+        snapshot
+            .player
+            .resources
+            .iter()
+            .find(|resource| resource.resource_id == definition_id("resource", "focus"))
+            .expect("focus resource")
+            .current,
+        Fixed::from_integer(4).expect("remaining focus")
+    );
+    assert_eq!(
+        snapshot
+            .player
+            .skills
+            .iter()
+            .find(|skill| skill.grant.id == ids.grant)
+            .expect("skill grant")
+            .grant
+            .ready_at,
+        Some(WorldTime::from_ticks(3))
+    );
 }
 
 #[tokio::test]

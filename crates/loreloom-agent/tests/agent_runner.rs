@@ -99,7 +99,11 @@ impl ToolExecutor for RecordingExecutor {
             let value = match call.name.as_str() {
                 "commit_first" => json!({
                     "revision": 2,
-                    "event_id": "evt_01890f6a-2b40-7d4e-8f90-123456789abc"
+                    "event_id": "evt_01890f6a-2b40-7d4e-8f90-123456789abc",
+                    "event_ids": [
+                        "evt_01890f6a-2b40-7d4e-8f90-123456789abc",
+                        "evt_01890f6a-2b41-7d4e-8f90-123456789abc"
+                    ]
                 }),
                 "inspect_after" => json!({ "observed_revision": runtime.revision }),
                 _ => {
@@ -193,7 +197,11 @@ fn product_runner_preserves_tool_order_correlation_and_committed_revision() {
     );
     assert_eq!(outcome.tool_results[0].call_id.as_str(), "call-first");
     assert_eq!(outcome.tool_results[1].call_id.as_str(), "call-second");
-    assert_eq!(outcome.committed_events.len(), 1);
+    assert_eq!(outcome.committed_events.len(), 2);
+    assert_eq!(
+        outcome.committed_events[1].to_string(),
+        "evt_01890f6a-2b41-7d4e-8f90-123456789abc"
+    );
     let requests = bridge.requests().expect("mock requests");
     assert_eq!(requests.len(), 2);
     assert!(matches!(
@@ -232,7 +240,7 @@ fn committed_tool_is_retained_when_follow_up_model_budget_is_exhausted() {
         TurnStatus::BudgetExhausted(BudgetReason::ModelCalls)
     );
     assert_eq!(outcome.tool_results.len(), 1);
-    assert_eq!(outcome.committed_events.len(), 1);
+    assert_eq!(outcome.committed_events.len(), 2);
 }
 
 struct PendingBridge {

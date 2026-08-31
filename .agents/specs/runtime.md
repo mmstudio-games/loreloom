@@ -976,11 +976,21 @@ Tool。它只校验并暂存 `NarratorNpcDecision`；Preset 编译、`npc_genera
 | Query | `inspect_skill` | 返回一个 Grant/Definition 的允许披露详情 |
 | Command | `transfer_item` | 请求在合法容器/Actor 之间转移物品 |
 | Command | `equip_item` | 请求把物品装备到合法槽位 |
+| Command | `split_stack` | 请求拆分当前 Actor 拥有的可拆分物品堆叠 |
 | Command | `use_item` | 请求执行 Item Definition 注册的领域行为 |
 | Command | `use_skill` | 请求执行 Skill Grant 对应的 Active Skill |
 
-列表 Tool 必须分页或受大小上限约束，不能把完整内容库或无限嵌套容器注入 Prompt。ToolResult
-使用 Stable ID，后续 Command 必须引用 Query 返回或 Observation 已授权的实例/Grant。
+`list_inventory` 与 `list_available_skills` 使用可选 `after` Stable ObjectId 与 `limit` 参数；默认
+`limit = 32`、单次最大 `64`，按实例/Grant ObjectId 严格升序返回，并在仍有结果时返回
+`next_after`。`inspect_item` 只接受当前 ToolContext Actor 拥有的 Item instance；
+`inspect_skill` 只接受该 Actor 拥有的 Skill Grant。两类 inspect 返回对应实例和允许披露的固定
+ModLock Definition，不能接受任意 ActorId 或遍历完整内容库。所有 Query 在绑定 Revision 上读取，
+过期时返回结构化 unavailable，且拒绝时不改变 Revision。
+
+ToolResult 使用 Stable ID，后续 Command 必须引用 Query 返回或 Observation 已授权的实例/Grant。
+`transfer_item`、`equip_item`、`split_stack` 与 `use_skill` 的 Actor、ActionId 和 Revision 只来自
+ToolContext；模型只能提供冻结 WorldCommand 中的领域参数。`use_item` 仍等待 Item 行为 Schema 与
+对应 WorldCommand 增量冻结，本阶段不得用通用 Effect/Component patch 代替。
 
 不得向普通 Narrator/NpcAgent 注册通用 `set_attribute`、`set_resource` 或 `set_condition`。
 Agent 选择休息、使用物品、使用技能或其它领域行动，由相应 World System 计算资源和 Condition
@@ -1027,6 +1037,9 @@ lock 和当前 Observation 决定是否投影相应 Event/Action。
   另有总预算与最大轮数；
 - ToolResult 必须关联原 ToolCall ID，并在同一 assistant message 之后按原 ToolCall 顺序逐条写入
   canonical history；未知、无权限、参数错误与执行失败也必须生成关联原 ID 的 error result；
+- 成功 Command ToolResult 必须投影 `CommittedAction.event_ids` 的完整有序列表；兼容性的单个
+  `event_id` 不能导致 AgentRunner 丢弃同一 durable unit 的其它 Event，`NpcTurnResult.world_events`
+  必须包含该 Turn 所有成功 Tool 的完整已提交 Event；
 - ActionId 重复提交遵循第 11.4 节：相同 digest 返回已保存 outcome，不产生第二次世界修改；不同
   digest 返回 identity conflict；
 - 一个模型响应中的多个 Command ToolCall **不构成跨调用原子事务**。每个成功 Command 是独立

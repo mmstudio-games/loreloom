@@ -70,4 +70,9 @@ OPEN 项、后续 RFC 或 P0 Spike；空 crate 不代表相关协议已经实现
 - [x] 实现 confirmed KnownFact 驱动的 Condition 诊断投影，未诊断视图不得包含真实名称；
 - [x] 实现 Existing/Preset/Generated/Mentioned NpcTarget、Narrator generation stage、统一物化路径，
   并在 Preset/Generated 提交后于同一玩家输入内使用完整角色投影重新规划；
+- [x] 暴露有界 Stable ID 游标分页的 `list_inventory`/`inspect_item` 与
+  `list_available_skills`/`inspect_skill` Query Tool，并把 `transfer_item`、`equip_item`、
+  `split_stack`、`use_skill` 接到已冻结的 WorldCommand；
+- [ ] 收敛 `promote_npc` 与 Scene cleanup 产品入口：当前 `PromoteCharacter { actor_id }` 只能改变
+  lifetime，尚不能满足“与跨 Scene durable reference 在同一 Command 原子建立”的冻结约束；
 - [ ] 满足 Active Spec 第 17 节全部验收条件。

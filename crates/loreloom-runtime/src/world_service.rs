@@ -14,9 +14,9 @@ use loreloom_core::{
     EventOptionView, FactSubject, FactValue, GeneratedOrigin, InventoryView, KnowledgeStatus,
     LongText, ModLock, ObjectId, ParameterSetView, ParameterValue, ParameterValueView,
     ResourceView, Revision, RuntimePhase, SAVE_FORMAT_V1, SaveId, SaveManifest, SceneContext,
-    SceneObservation, SessionId, SkillView, SystemIdGenerator, ToolActivity, TranscriptWindow,
-    UiNotice, UiSnapshot, VisibleActorView, WorldCommand, WorldCommandKind, WorldEvent,
-    WorldEventKind,
+    SceneObservation, SessionId, SkillTargetRef, SkillView, SystemIdGenerator, ToolActivity,
+    TranscriptWindow, UiNotice, UiSnapshot, VisibleActorView, WorldCommand, WorldCommandKind,
+    WorldEvent, WorldEventKind,
 };
 use loreloom_store::{ActionResolution, CommitRequest, CommitResult, CommittedAction, SaveStore};
 use loreloom_world::{GameWorld, WorldBootstrap, WorldConfig};
@@ -27,6 +27,8 @@ use crate::{NARRATOR_MATERIALIZE_NPC_CAPABILITY, RuntimeError};
 
 const CONTEXT_TRANSCRIPT_LIMIT: usize = 64;
 const CONTEXT_EVENT_LIMIT: usize = 64;
+const TOOL_PAGE_DEFAULT: usize = 32;
+const TOOL_PAGE_MAXIMUM: usize = 64;
 
 struct RuntimeWorld {
     world: GameWorld,
@@ -371,6 +373,177 @@ impl WorldService {
         )
     }
 
+    async fn list_inventory(
+        &self,
+        context: &AgentToolContext,
+        after: Option<ObjectId>,
+        limit: usize,
+    ) -> Result<JsonValue, RuntimeError> {
+        let inner = self.inner.lock().await;
+        require_revision(&inner, context.revision)?;
+        if inner.world.character(context.actor_id).is_none() {
+            return Err(RuntimeError::Unavailable);
+        }
+        let records = inner.world.project_records()?;
+        let mut items = records
+            .iter()
+            .filter_map(|record| match record {
+                DomainRecord::Item(item)
+                    if item.owned_by == Some(context.actor_id)
+                        && after.is_none_or(|cursor| item.id > cursor) =>
+                {
+                    Some(item)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        items.sort_by_key(|item| item.id);
+        let has_more = items.len() > limit;
+        items.truncate(limit);
+        let summaries = items
+            .iter()
+            .map(|item| {
+                let Definition::Item(item_definition) =
+                    definition(&inner.registry, &item.definition_id)?
+                else {
+                    return Err(RuntimeError::Unavailable);
+                };
+                Ok(json!({
+                    "item_id": item.id,
+                    "definition_id": item.definition_id,
+                    "display_name": item_definition.display_name,
+                    "custom_name": item.custom_name,
+                    "quantity": item.stack.0.get(),
+                    "durability": item.durability,
+                    "contained_by": item.contained_by,
+                    "equipped": item.equipped,
+                    "is_container": item.container.is_some(),
+                }))
+            })
+            .collect::<Result<Vec<_>, RuntimeError>>()?;
+        let next_after = has_more.then(|| items.last().map(|item| item.id)).flatten();
+        Ok(json!({
+            "revision": context.revision,
+            "items": summaries,
+            "next_after": next_after,
+        }))
+    }
+
+    async fn inspect_item(
+        &self,
+        context: &AgentToolContext,
+        item_id: ObjectId,
+    ) -> Result<JsonValue, RuntimeError> {
+        let inner = self.inner.lock().await;
+        require_revision(&inner, context.revision)?;
+        let item = inner
+            .world
+            .item(item_id)
+            .filter(|item| item.owned_by == Some(context.actor_id))
+            .ok_or(RuntimeError::Unavailable)?;
+        let Definition::Item(item_definition) = definition(&inner.registry, &item.definition_id)?
+        else {
+            return Err(RuntimeError::Unavailable);
+        };
+        Ok(json!({
+            "revision": context.revision,
+            "item": item,
+            "definition": item_definition,
+        }))
+    }
+
+    async fn list_available_skills(
+        &self,
+        context: &AgentToolContext,
+        after: Option<ObjectId>,
+        limit: usize,
+    ) -> Result<JsonValue, RuntimeError> {
+        let inner = self.inner.lock().await;
+        require_revision(&inner, context.revision)?;
+        let character = inner
+            .world
+            .character(context.actor_id)
+            .ok_or(RuntimeError::Unavailable)?;
+        let clock = inner.world.world_state().clock;
+        let records = inner.world.project_records()?;
+        let mut skills = records
+            .iter()
+            .filter_map(|record| match record {
+                DomainRecord::SkillGrant(grant)
+                    if grant.owner_id == context.actor_id
+                        && after.is_none_or(|cursor| grant.id > cursor) =>
+                {
+                    Some(grant)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        skills.sort_by_key(|grant| grant.id);
+        let has_more = skills.len() > limit;
+        skills.truncate(limit);
+        let summaries = skills
+            .iter()
+            .map(|grant| {
+                let Definition::Skill(skill) = definition(&inner.registry, &grant.skill_id)? else {
+                    return Err(RuntimeError::Unavailable);
+                };
+                Ok(json!({
+                    "grant_id": grant.id,
+                    "skill_id": grant.skill_id,
+                    "display_name": skill.display_name,
+                    "kind": skill.kind,
+                    "available": skill_is_available(character, grant, skill, clock),
+                    "costs": skill.costs,
+                    "target": skill.target,
+                    "cooldown_ticks": skill.cooldown_ticks,
+                    "ready_at": grant.ready_at,
+                }))
+            })
+            .collect::<Result<Vec<_>, RuntimeError>>()?;
+        let next_after = has_more
+            .then(|| skills.last().map(|grant| grant.id))
+            .flatten();
+        Ok(json!({
+            "revision": context.revision,
+            "skills": summaries,
+            "next_after": next_after,
+        }))
+    }
+
+    async fn inspect_skill(
+        &self,
+        context: &AgentToolContext,
+        grant_id: ObjectId,
+    ) -> Result<JsonValue, RuntimeError> {
+        let inner = self.inner.lock().await;
+        require_revision(&inner, context.revision)?;
+        let character = inner
+            .world
+            .character(context.actor_id)
+            .ok_or(RuntimeError::Unavailable)?;
+        let records = inner.world.project_records()?;
+        let grant = records
+            .iter()
+            .find_map(|record| match record {
+                DomainRecord::SkillGrant(grant)
+                    if grant.id == grant_id && grant.owner_id == context.actor_id =>
+                {
+                    Some(grant)
+                }
+                _ => None,
+            })
+            .ok_or(RuntimeError::Unavailable)?;
+        let Definition::Skill(skill) = definition(&inner.registry, &grant.skill_id)? else {
+            return Err(RuntimeError::Unavailable);
+        };
+        Ok(json!({
+            "revision": context.revision,
+            "grant": grant,
+            "definition": skill,
+            "available": skill_is_available(character, grant, skill, inner.world.world_state().clock),
+        }))
+    }
+
     pub async fn append_transcript(
         &self,
         actor_id: ActorId,
@@ -561,6 +734,116 @@ impl ToolExecutor for RuntimeToolExecutor {
                 description: "Inspect the authorized actor at the bound revision.".to_owned(),
                 input_schema: json!({
                     "type": "object",
+                    "additionalProperties": false
+                }),
+            },
+            ToolDefinition {
+                name: "list_inventory".to_owned(),
+                description: "List the authorized actor's inventory using a stable item-ID cursor."
+                    .to_owned(),
+                input_schema: page_schema(),
+            },
+            ToolDefinition {
+                name: "inspect_item".to_owned(),
+                description: "Inspect one item instance owned by the authorized actor.".to_owned(),
+                input_schema: json!({
+                    "type": "object",
+                    "required": ["item_id"],
+                    "properties": { "item_id": { "type": "string" } },
+                    "additionalProperties": false
+                }),
+            },
+            ToolDefinition {
+                name: "transfer_item".to_owned(),
+                description: "Transfer one owned item into an authorized container.".to_owned(),
+                input_schema: json!({
+                    "type": "object",
+                    "required": ["item_id", "container_id"],
+                    "properties": {
+                        "item_id": { "type": "string" },
+                        "container_id": { "type": "string" }
+                    },
+                    "additionalProperties": false
+                }),
+            },
+            ToolDefinition {
+                name: "equip_item".to_owned(),
+                description: "Equip one owned item into a compatible equipment slot.".to_owned(),
+                input_schema: json!({
+                    "type": "object",
+                    "required": ["item_id", "slot_id"],
+                    "properties": {
+                        "item_id": { "type": "string" },
+                        "slot_id": { "type": "string" }
+                    },
+                    "additionalProperties": false
+                }),
+            },
+            ToolDefinition {
+                name: "split_stack".to_owned(),
+                description: "Split a positive quantity from one owned item stack.".to_owned(),
+                input_schema: json!({
+                    "type": "object",
+                    "required": ["item_id", "quantity"],
+                    "properties": {
+                        "item_id": { "type": "string" },
+                        "quantity": { "type": "integer", "minimum": 1, "maximum": u32::MAX }
+                    },
+                    "additionalProperties": false
+                }),
+            },
+            ToolDefinition {
+                name: "list_available_skills".to_owned(),
+                description: "List the authorized actor's skill grants, readiness, costs and targets using a stable grant-ID cursor.".to_owned(),
+                input_schema: page_schema(),
+            },
+            ToolDefinition {
+                name: "inspect_skill".to_owned(),
+                description: "Inspect one skill grant owned by the authorized actor.".to_owned(),
+                input_schema: json!({
+                    "type": "object",
+                    "required": ["grant_id"],
+                    "properties": { "grant_id": { "type": "string" } },
+                    "additionalProperties": false
+                }),
+            },
+            ToolDefinition {
+                name: "use_skill".to_owned(),
+                description: "Use one active skill grant owned by the authorized actor.".to_owned(),
+                input_schema: json!({
+                    "type": "object",
+                    "required": ["grant_id", "target"],
+                    "properties": {
+                        "grant_id": { "type": "string" },
+                        "target": {
+                            "oneOf": [
+                                {
+                                    "type": "object",
+                                    "required": ["type"],
+                                    "properties": { "type": { "const": "self_target" } },
+                                    "additionalProperties": false
+                                },
+                                {
+                                    "type": "object",
+                                    "required": ["type", "object_id"],
+                                    "properties": {
+                                        "type": { "const": "object" },
+                                        "object_id": { "type": "string" }
+                                    },
+                                    "additionalProperties": false
+                                },
+                                {
+                                    "type": "object",
+                                    "required": ["type", "place_id"],
+                                    "properties": {
+                                        "type": { "const": "place" },
+                                        "place_id": { "type": "string" }
+                                    },
+                                    "additionalProperties": false
+                                }
+                            ]
+                        }
+                    },
                     "additionalProperties": false
                 }),
             },
@@ -761,6 +1044,76 @@ impl ToolExecutor for RuntimeToolExecutor {
                     .inspect_character(runtime.actor_id, runtime.revision)
                     .await
                     .map(|character| json!({ "character": character })),
+                "list_inventory" => match parse_page_arguments(&call.arguments) {
+                    Ok((after, limit)) => self.service.list_inventory(runtime, after, limit).await,
+                    Err(error) => Err(error),
+                },
+                "inspect_item" => match parse_object_id(&call.arguments, "item_id") {
+                    Ok(item_id) => self.service.inspect_item(runtime, item_id).await,
+                    Err(error) => Err(error),
+                },
+                "transfer_item" => match (
+                    parse_object_id(&call.arguments, "item_id"),
+                    parse_object_id(&call.arguments, "container_id"),
+                ) {
+                    (Ok(item_id), Ok(container_id)) => self
+                        .service
+                        .execute(
+                            runtime,
+                            WorldCommandKind::TransferItem {
+                                item_id,
+                                container_id,
+                            },
+                        )
+                        .await
+                        .map(committed_json),
+                    _ => Err(RuntimeError::InvalidInput),
+                },
+                "equip_item" => match (
+                    parse_object_id(&call.arguments, "item_id"),
+                    parse_definition_id(&call.arguments, "slot_id"),
+                ) {
+                    (Ok(item_id), Ok(slot_id)) => self
+                        .service
+                        .execute(runtime, WorldCommandKind::EquipItem { item_id, slot_id })
+                        .await
+                        .map(committed_json),
+                    _ => Err(RuntimeError::InvalidInput),
+                },
+                "split_stack" => match (
+                    parse_object_id(&call.arguments, "item_id"),
+                    parse_u32(&call.arguments, "quantity"),
+                ) {
+                    (Ok(item_id), Ok(quantity)) if quantity > 0 => self
+                        .service
+                        .execute(runtime, WorldCommandKind::SplitStack { item_id, quantity })
+                        .await
+                        .map(committed_json),
+                    _ => Err(RuntimeError::InvalidInput),
+                },
+                "list_available_skills" => match parse_page_arguments(&call.arguments) {
+                    Ok((after, limit)) => {
+                        self.service
+                            .list_available_skills(runtime, after, limit)
+                            .await
+                    }
+                    Err(error) => Err(error),
+                },
+                "inspect_skill" => match parse_object_id(&call.arguments, "grant_id") {
+                    Ok(grant_id) => self.service.inspect_skill(runtime, grant_id).await,
+                    Err(error) => Err(error),
+                },
+                "use_skill" => match (
+                    parse_object_id(&call.arguments, "grant_id"),
+                    parse_skill_target(&call.arguments),
+                ) {
+                    (Ok(grant_id), Ok(target)) => self
+                        .service
+                        .execute(runtime, WorldCommandKind::UseSkill { grant_id, target })
+                        .await
+                        .map(committed_json),
+                    _ => Err(RuntimeError::InvalidInput),
+                },
                 "move_character" => match parse_object_id(&call.arguments, "destination_id") {
                     Ok(destination_id) => self
                         .service
@@ -1502,6 +1855,75 @@ fn tail<T>(values: impl IntoIterator<Item = T>, limit: usize) -> Vec<T> {
     values
 }
 
+fn require_revision(inner: &RuntimeWorld, expected: Revision) -> Result<(), RuntimeError> {
+    if inner.world.revision() == expected {
+        Ok(())
+    } else {
+        Err(RuntimeError::Unavailable)
+    }
+}
+
+fn skill_is_available(
+    character: &loreloom_core::CharacterRecord,
+    grant: &loreloom_core::SkillGrantRecord,
+    skill: &loreloom_content::SkillDefinition,
+    clock: loreloom_core::WorldTime,
+) -> bool {
+    grant.enabled
+        && skill.kind == loreloom_content::SkillKind::Active
+        && grant.ready_at.is_none_or(|ready| ready <= clock)
+        && skill.costs.iter().all(|cost| {
+            character
+                .resources
+                .get(&cost.resource_id)
+                .is_some_and(|pool| pool.current >= cost.amount)
+        })
+}
+
+fn page_schema() -> JsonValue {
+    json!({
+        "type": "object",
+        "properties": {
+            "after": { "type": "string" },
+            "limit": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": TOOL_PAGE_MAXIMUM
+            }
+        },
+        "additionalProperties": false
+    })
+}
+
+fn parse_page_arguments(arguments: &JsonValue) -> Result<(Option<ObjectId>, usize), RuntimeError> {
+    let object = arguments.as_object().ok_or(RuntimeError::InvalidInput)?;
+    if object
+        .keys()
+        .any(|key| !matches!(key.as_str(), "after" | "limit"))
+    {
+        return Err(RuntimeError::InvalidInput);
+    }
+    let after = object
+        .get("after")
+        .map(|value| {
+            value
+                .as_str()
+                .ok_or(RuntimeError::InvalidInput)?
+                .parse()
+                .map_err(RuntimeError::Identity)
+        })
+        .transpose()?;
+    let limit = match object.get("limit") {
+        Some(value) => usize::try_from(value.as_u64().ok_or(RuntimeError::InvalidInput)?)
+            .map_err(|_| RuntimeError::InvalidInput)?,
+        None => TOOL_PAGE_DEFAULT,
+    };
+    if !(1..=TOOL_PAGE_MAXIMUM).contains(&limit) {
+        return Err(RuntimeError::InvalidInput);
+    }
+    Ok((after, limit))
+}
+
 fn parse_object_id(arguments: &JsonValue, field: &str) -> Result<ObjectId, RuntimeError> {
     arguments
         .get(field)
@@ -1509,6 +1931,22 @@ fn parse_object_id(arguments: &JsonValue, field: &str) -> Result<ObjectId, Runti
         .ok_or(RuntimeError::InvalidInput)?
         .parse()
         .map_err(RuntimeError::Identity)
+}
+
+fn parse_u32(arguments: &JsonValue, field: &str) -> Result<u32, RuntimeError> {
+    let value = arguments
+        .get(field)
+        .and_then(JsonValue::as_u64)
+        .ok_or(RuntimeError::InvalidInput)?;
+    u32::try_from(value).map_err(|_| RuntimeError::InvalidInput)
+}
+
+fn parse_skill_target(arguments: &JsonValue) -> Result<SkillTargetRef, RuntimeError> {
+    let target = arguments
+        .get("target")
+        .cloned()
+        .ok_or(RuntimeError::InvalidInput)?;
+    serde_json::from_value(target).map_err(|source| RuntimeError::json("skill_target", source))
 }
 
 fn parse_definition_id(

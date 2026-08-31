@@ -284,13 +284,27 @@ fn response_text(response: &armillae_core::CompletionResponse) -> String {
 
 fn collect_events(result: &ToolResult, events: &mut Vec<EventId>) {
     for content in &result.content {
-        if let ToolResultContent::Json { value } = content
-            && let Some(event) = value.get("event_id").and_then(serde_json::Value::as_str)
-            && let Ok(event) = event.parse()
-            && !events.contains(&event)
-        {
-            events.push(event);
+        if let ToolResultContent::Json { value } = content {
+            if let Some(committed) = value.get("event_ids").and_then(serde_json::Value::as_array) {
+                for event in committed {
+                    if let Some(event) = event.as_str().and_then(|event| event.parse().ok()) {
+                        push_event(events, event);
+                    }
+                }
+            } else if let Some(event) = value
+                .get("event_id")
+                .and_then(serde_json::Value::as_str)
+                .and_then(|event| event.parse().ok())
+            {
+                push_event(events, event);
+            }
         }
+    }
+}
+
+fn push_event(events: &mut Vec<EventId>, event: EventId) {
+    if !events.contains(&event) {
+        events.push(event);
     }
 }
 
