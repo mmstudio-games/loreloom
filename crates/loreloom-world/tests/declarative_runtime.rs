@@ -7,17 +7,17 @@ use loreloom_content::{
     ActionParameterDefinition, CONTENT_SCHEMA_V1, CharacterDefinition, ConditionDefinition,
     ContainerDefinition, ContentDocument, ContentPackContext, Definition, DefinitionRegistry,
     DurationPolicy, EffectDefinition, EventDefinition, EventNodeDefinition, EventOptionDefinition,
-    GameplayActionDefinition, InitialCharacterController, InitialCharacterLifetime, ItemDefinition,
-    ParameterDefinition, ParameterPersistence, ParameterType, ParameterVisibility,
-    PredicateDefinition, ResourceDefinition, ResourceMaximumPolicy, RuleDefinition,
+    GameplayActionDefinition, InitialCharacterController, InitialCharacterLifetime, InitialSkill,
+    ItemDefinition, ParameterDefinition, ParameterPersistence, ParameterType, ParameterVisibility,
+    PredicateDefinition, ResourceCost, ResourceDefinition, ResourceMaximumPolicy, RuleDefinition,
     SceneCharacterDefinition, SceneDefinition, SkillDefinition, SkillKind, SkillTarget,
     StackPolicy, TriggerDefinition, parse_content_hash,
 };
 use loreloom_core::{
     ActionId, BaseAttributes, CharacterProfile, ContentDefinitionId, DisplayName, DomainRecord,
     EventInstanceRecord, EventStatus, Fixed, IntensityPolicy, ModId, ObjectId, ParameterValue,
-    Revision, ShortText, SpawnConstraints, SystemIdGenerator, WorldCommand, WorldCommandKind,
-    WorldEventKind, WorldTime,
+    Revision, ShortText, SkillTargetRef, SpawnConstraints, SystemIdGenerator, WorldCommand,
+    WorldCommandKind, WorldEventKind, WorldTime,
 };
 use loreloom_world::{GameWorld, RuleLimits, WorldConfig, WorldError};
 use semver::Version;
@@ -62,6 +62,7 @@ fn fixture(limits: RuleLimits) -> Fixture {
     let root_id = id("item", "inventory_root");
     let reward_id = id("item", "reward");
     let skill_id = id("skill", "insight");
+    let active_skill_id = id("skill", "archive_ritual");
     let condition_id = id("condition", "focus");
     let save_parameter = id("parameter", "story_step");
     let session_parameter = id("parameter", "hint_seen");
@@ -80,6 +81,7 @@ fn fixture(limits: RuleLimits) -> Fixture {
     let rule_clock = id("rule", "clock_pulse");
     let rule_a = id("rule", "emit_after_study");
     let rule_b = id("rule", "record_chain");
+    let rule_skill = id("rule", "record_skill_use");
 
     let document = ContentDocument {
         schema_version: CONTENT_SCHEMA_V1,
@@ -129,6 +131,46 @@ fn fixture(limits: RuleLimits) -> Fixture {
                 target: SkillTarget::SelfTarget,
                 executor_id: id("skill_executor", "none"),
                 effects: Vec::new(),
+                reaction: None,
+            }),
+            Definition::Skill(SkillDefinition {
+                id: active_skill_id.clone(),
+                display_name: name("Archive ritual"),
+                description: text("Trade stamina for an archive blessing."),
+                kind: SkillKind::Active,
+                costs: vec![ResourceCost {
+                    resource_id: resource_id.clone(),
+                    amount: Fixed::from_integer(2).expect("fixed"),
+                }],
+                cooldown_ticks: 4,
+                target: SkillTarget::SelfTarget,
+                executor_id: id("skill_executor", "declarative"),
+                effects: vec![
+                    EffectDefinition::ResourceDelta {
+                        resource_id: resource_id.clone(),
+                        amount: Fixed::ONE,
+                    },
+                    EffectDefinition::ApplyCondition {
+                        condition_id: condition_id.clone(),
+                        stacks: NonZeroU32::MIN,
+                        intensity: Fixed::ONE,
+                    },
+                    EffectDefinition::GrantItem {
+                        item_id: reward_id.clone(),
+                        quantity: NonZeroU32::MIN,
+                    },
+                    EffectDefinition::GrantSkill {
+                        skill_id: skill_id.clone(),
+                        rank: NonZeroU32::MIN,
+                    },
+                    EffectDefinition::SetParameter {
+                        parameter_id: save_parameter.clone(),
+                        value: ParameterValue::Counter(9),
+                    },
+                    EffectDefinition::EmitEvent {
+                        event_type: text("archive_ritual_completed"),
+                    },
+                ],
                 reaction: None,
             }),
             Definition::Condition(ConditionDefinition {
@@ -313,6 +355,18 @@ fn fixture(limits: RuleLimits) -> Fixture {
                     value: ParameterValue::Counter(2),
                 }],
             }),
+            Definition::Rule(RuleDefinition {
+                id: rule_skill,
+                priority: 0,
+                trigger: TriggerDefinition::WorldEvent {
+                    event_type: text("skill_used"),
+                },
+                predicates: Vec::new(),
+                effects: vec![EffectDefinition::SetParameter {
+                    parameter_id: id("parameter", "story_step"),
+                    value: ParameterValue::Counter(10),
+                }],
+            }),
             Definition::Place(loreloom_content::PlaceDefinition {
                 id: place_definition.clone(),
                 display_name: name("Library"),
@@ -352,7 +406,12 @@ fn fixture(limits: RuleLimits) -> Fixture {
                 }],
                 conditions: Vec::new(),
                 inventory: Vec::new(),
-                skills: Vec::new(),
+                skills: vec![InitialSkill {
+                    skill_id: active_skill_id.clone(),
+                    rank: NonZeroU32::MIN,
+                    proficiency: 0,
+                    enabled: true,
+                }],
                 knowledge: Vec::new(),
                 goals: Vec::new(),
                 spawn_constraints: SpawnConstraints {
@@ -360,8 +419,8 @@ fn fixture(limits: RuleLimits) -> Fixture {
                     maximum_attributes: BTreeMap::new(),
                     maximum_attribute_points: Fixed::ZERO,
                     maximum_items: 0,
-                    maximum_skills: 0,
-                    allowed_definitions: Default::default(),
+                    maximum_skills: 1,
+                    allowed_definitions: [active_skill_id].into_iter().collect(),
                 },
             }),
         ],
@@ -430,6 +489,16 @@ fn parameter(records: &[DomainRecord], parameter_id: &ContentDefinitionId) -> Pa
             _ => None,
         })
         .expect("saved parameter")
+}
+
+fn skill_grant(records: &[DomainRecord], skill_id: &ContentDefinitionId) -> ObjectId {
+    records
+        .iter()
+        .find_map(|record| match record {
+            DomainRecord::SkillGrant(grant) if &grant.skill_id == skill_id => Some(grant.id),
+            _ => None,
+        })
+        .expect("skill grant")
 }
 
 #[test]
@@ -510,7 +579,7 @@ fn gameplay_action_applies_typed_effects_and_fifo_rules_in_one_revision() {
         })
         .collect::<Vec<_>>();
     rule_counts.sort_unstable();
-    assert_eq!(rule_counts, vec![0, 1, 1, 1]);
+    assert_eq!(rule_counts, vec![0, 0, 1, 1, 1]);
 
     let rebuilt = GameWorld::from_records(
         world.revision(),
@@ -523,6 +592,140 @@ fn gameplay_action_applies_typed_effects_and_fifo_rules_in_one_revision() {
         rebuilt.session_parameters()[&id("parameter", "hint_seen")],
         ParameterValue::Bool(false)
     );
+}
+
+#[test]
+fn active_skill_applies_cost_effect_plan_cooldown_and_rules_atomically() {
+    let fixture = fixture(RuleLimits::default());
+    let grant_id = skill_grant(&fixture.records, &id("skill", "archive_ritual"));
+    let mut world = GameWorld::from_records(
+        Revision::ZERO,
+        fixture.records.clone(),
+        fixture.config.clone(),
+        &fixture.registry,
+    )
+    .expect("world");
+    let changes = world
+        .execute(
+            command(
+                &fixture,
+                Revision::ZERO,
+                "6a25",
+                WorldCommandKind::UseSkill {
+                    grant_id,
+                    target: SkillTargetRef::SelfTarget,
+                },
+            ),
+            &fixture.registry,
+            &mut SystemIdGenerator,
+        )
+        .expect("use active skill");
+
+    assert_eq!(changes.revision, Revision::new(1));
+    assert_eq!(
+        world.character(fixture.player).expect("player").resources[&id("resource", "stamina")]
+            .current,
+        Fixed::from_integer(9).expect("fixed")
+    );
+    assert_eq!(
+        parameter(&changes.upserts, &id("parameter", "story_step")),
+        ParameterValue::Counter(10)
+    );
+    for expected in [Fixed::from_integer(-2).expect("fixed"), Fixed::ONE] {
+        assert!(changes.events.iter().any(|event| matches!(
+            &event.kind,
+            WorldEventKind::ResourceChanged { delta, .. } if *delta == expected
+        )));
+    }
+    assert!(
+        changes
+            .events
+            .iter()
+            .any(|event| matches!(event.kind, WorldEventKind::ConditionApplied { .. }))
+    );
+    assert!(
+        changes
+            .events
+            .iter()
+            .any(|event| matches!(event.kind, WorldEventKind::ItemGranted { quantity: 1, .. }))
+    );
+    assert!(
+        changes
+            .events
+            .iter()
+            .any(|event| matches!(event.kind, WorldEventKind::SkillGranted { .. }))
+    );
+    assert!(changes.events.iter().any(|event| matches!(
+        &event.kind,
+        WorldEventKind::DeclarativeEventEmitted { event_type, .. }
+            if event_type.as_str() == "archive_ritual_completed"
+    )));
+    assert!(
+        changes
+            .events
+            .iter()
+            .any(|event| matches!(event.kind, WorldEventKind::SkillUsed { .. }))
+    );
+    assert!(changes.events.iter().any(|event| matches!(
+        &event.kind,
+        WorldEventKind::RuleTriggered { rule_id, .. }
+            if rule_id == &id("rule", "record_skill_use")
+    )));
+
+    let records = world.project_records().expect("records");
+    let grant = records
+        .iter()
+        .find_map(|record| match record {
+            DomainRecord::SkillGrant(grant) if grant.id == grant_id => Some(grant),
+            _ => None,
+        })
+        .expect("active skill grant");
+    assert_eq!(grant.ready_at, Some(WorldTime::from_ticks(4)));
+    let rebuilt = GameWorld::from_records(
+        changes.revision,
+        records.clone(),
+        fixture.config,
+        &fixture.registry,
+    )
+    .expect("rebuild");
+    assert_eq!(rebuilt.project_records().expect("rebuilt records"), records);
+}
+
+#[test]
+fn active_skill_rolls_back_cost_and_partial_effects_when_budget_fails() {
+    let fixture = fixture(RuleLimits {
+        max_applied_effects: 3,
+        ..RuleLimits::default()
+    });
+    let grant_id = skill_grant(&fixture.records, &id("skill", "archive_ritual"));
+    let mut world = GameWorld::from_records(
+        Revision::ZERO,
+        fixture.records.clone(),
+        fixture.config.clone(),
+        &fixture.registry,
+    )
+    .expect("world");
+    let before = world.project_records().expect("before");
+    assert!(matches!(
+        world.execute(
+            command(
+                &fixture,
+                Revision::ZERO,
+                "6a26",
+                WorldCommandKind::UseSkill {
+                    grant_id,
+                    target: SkillTargetRef::SelfTarget,
+                },
+            ),
+            &fixture.registry,
+            &mut SystemIdGenerator,
+        ),
+        Err(WorldError::DomainRule {
+            rule: "rule_effect_budget"
+        })
+    ));
+    assert_eq!(world.revision(), Revision::ZERO);
+    assert_eq!(world.project_records().expect("after"), before);
 }
 
 #[test]

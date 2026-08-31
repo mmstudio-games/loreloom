@@ -416,7 +416,14 @@ impl GameWorld {
                 self.split_stack(actor_id, item_id, quantity, action_id, revision, ids)?
             }
             WorldCommandKind::UseSkill { grant_id, target } => self.use_skill(
-                actor_id, grant_id, target, action_id, revision, registry, ids,
+                actor_id,
+                grant_id,
+                target,
+                action_id,
+                revision,
+                registry,
+                ids,
+                &mut declarative_budget,
             )?,
             WorldCommandKind::AdvanceTime { ticks } => {
                 self.advance_time(actor_id, ticks, action_id, revision, ids)?
@@ -1185,6 +1192,7 @@ impl GameWorld {
         revision: Revision,
         registry: &DefinitionRegistry,
         ids: &mut impl IdGenerator,
+        budget: &mut declarative::ExecutionBudget,
     ) -> Result<ChangeParts, WorldError> {
         let entity = self.require_object(grant_id)?;
         let grant = self
@@ -1234,38 +1242,18 @@ impl GameWorld {
             pool.current = pool.current.checked_sub(cost.amount)?;
         }
         let mut events = Vec::new();
-        for effect in &definition.effects {
-            match effect {
-                EffectDefinition::ResourceDelta {
-                    resource_id,
-                    amount,
-                } => {
-                    let pool =
-                        character
-                            .resources
-                            .get_mut(resource_id)
-                            .ok_or(WorldError::DomainRule {
-                                rule: "skill_resource_missing",
-                            })?;
-                    let next = pool.current.checked_add(*amount)?;
-                    if next < Fixed::ZERO || next > pool.base_maximum {
-                        return domain_rule("skill_resource_out_of_range");
-                    }
-                    pool.current = next;
-                    events.push(event(
-                        ids,
-                        action_id,
-                        actor_id,
-                        revision,
-                        WorldEventKind::ResourceChanged {
-                            character_id: actor_id,
-                            resource_id: resource_id.clone(),
-                            delta: *amount,
-                        },
-                    )?);
-                }
-                _ => return domain_rule("skill_effect_not_supported_by_mvp_executor"),
-            }
+        for cost in &definition.costs {
+            events.push(event(
+                ids,
+                action_id,
+                actor_id,
+                revision,
+                WorldEventKind::ResourceChanged {
+                    character_id: actor_id,
+                    resource_id: cost.resource_id.clone(),
+                    delta: Fixed::ZERO.checked_sub(cost.amount)?,
+                },
+            )?);
         }
         self.world
             .get_mut::<CharacterComponent>(actor_entity)
@@ -1273,6 +1261,19 @@ impl GameWorld {
                 id: actor_id.object_id(),
             })?
             .0 = character.clone();
+        let mut upserts = vec![DomainRecord::Character(character)];
+        self.apply_effects(
+            actor_id,
+            &definition.effects,
+            &definition.id,
+            action_id,
+            revision,
+            registry,
+            ids,
+            budget,
+            &mut upserts,
+            &mut events,
+        )?;
         let mut updated_grant = grant.clone();
         updated_grant.ready_at = if definition.cooldown_ticks == 0 {
             None
@@ -1294,15 +1295,8 @@ impl GameWorld {
                 target,
             },
         )?);
-        Ok((
-            vec![
-                DomainRecord::Character(character),
-                DomainRecord::SkillGrant(updated_grant),
-            ],
-            Vec::new(),
-            events,
-            summary("skill used")?,
-        ))
+        upserts.push(DomainRecord::SkillGrant(updated_grant));
+        Ok((upserts, Vec::new(), events, summary("skill used")?))
     }
 
     fn advance_time(

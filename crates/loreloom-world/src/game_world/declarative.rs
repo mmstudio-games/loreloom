@@ -409,7 +409,7 @@ impl GameWorld {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn apply_effects(
+    pub(super) fn apply_effects(
         &mut self,
         actor_id: ActorId,
         effects: &[EffectDefinition],

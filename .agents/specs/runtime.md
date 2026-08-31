@@ -442,6 +442,11 @@ pub struct SkillCooldown {
 - 冷却使用 World Clock 或领域 Clock，不使用不可回放的进程墙钟；
 - 执行 Active Skill 前必须验证 Grant 所有者、enabled、资源、冷却、目标、可见性、距离和状态；
 - 成功执行必须在同一世界执行边界内扣除资源、设置冷却并生成结构化 WorldEvent；
+- Active Skill 的原子执行顺序固定为：先扣除有序 Resource Cost 并为每项 Cost 生成
+  `ResourceChanged`，再通过通用白名单 Effect executor 执行完整 Effect plan，最后设置冷却并生成
+  `SkillUsed`；由此产生的全部 Event 随后进入同一 candidate 的确定性 Rule cascade；
+- Cost、任一 Effect、冷却计算、Event 构造、Rule cascade 或最终世界校验失败时，整个 candidate
+  回滚，不得保留已扣资源、已创建对象、Parameter、Condition、冷却或部分 Event；
 - 角色未拥有对应 Grant 时，不能凭 Skill 名称、Definition ID 或模型文本使用技能；
 - 最终属性、装备加成、技能可用性和效果预览属于派生数据，可缓存但必须可从权威状态重建。
 
