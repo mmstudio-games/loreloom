@@ -1,7 +1,7 @@
 use std::{io, time::Duration};
 
 use crossterm::event::{self, Event};
-use loreloom_core::UiSnapshot;
+use loreloom_core::{RuntimePhase, UiSnapshot};
 use ratatui::{Terminal, backend::CrosstermBackend};
 use thiserror::Error;
 
@@ -83,6 +83,7 @@ fn run_loop(
             };
             app.apply_runtime_event(event);
         }
+        app.tick_spinner();
         terminal.draw(|frame| {
             render_ui_with_state_width(frame, app, config.state_width_percent);
         })?;
@@ -97,6 +98,9 @@ fn run_loop(
                         app.editor.restore_failed_submission(input);
                         return Err(error.into());
                     }
+                    app.apply_runtime_event(RuntimeUiEvent::PhaseChanged(
+                        RuntimePhase::PersistingInput,
+                    ));
                 }
                 Some(UiIntent::Cancel) => client.cancel()?,
                 Some(UiIntent::Quit) => return Ok(()),

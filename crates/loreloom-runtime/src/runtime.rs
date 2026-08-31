@@ -120,6 +120,17 @@ impl GameRuntime {
         &mut self,
         input: impl Into<String>,
     ) -> impl Future<Output = Result<PlayerTurnOutcome, RuntimeError>> + '_ {
+        self.handle_player_input_with_phase(input, |_| {})
+    }
+
+    pub fn handle_player_input_with_phase<'a, F>(
+        &'a mut self,
+        input: impl Into<String>,
+        mut on_phase: F,
+    ) -> impl Future<Output = Result<PlayerTurnOutcome, RuntimeError>> + 'a
+    where
+        F: FnMut(RuntimePhase) + 'a,
+    {
         let input = input.into();
         let input = if input.trim().is_empty() {
             Err(RuntimeError::InvalidInput)
@@ -131,14 +142,18 @@ impl GameRuntime {
         }
         async move {
             let input = input?;
-            self.handle_valid_player_input(input).await
+            self.handle_valid_player_input(input, &mut on_phase).await
         }
     }
 
-    async fn handle_valid_player_input(
+    async fn handle_valid_player_input<F>(
         &mut self,
         input: LongText,
-    ) -> Result<PlayerTurnOutcome, RuntimeError> {
+        on_phase: &mut F,
+    ) -> Result<PlayerTurnOutcome, RuntimeError>
+    where
+        F: FnMut(RuntimePhase),
+    {
         self.config
             .context_projection
             .validate()
@@ -155,6 +170,7 @@ impl GameRuntime {
             .service
             .observation(self.session_id, input.clone())
             .await?;
+        on_phase(RuntimePhase::PersistingInput);
         let player_transcript = self
             .service
             .append_transcript(
@@ -174,6 +190,7 @@ impl GameRuntime {
         let mut settled_materializations = Vec::new();
         let mut generated_attempts = 0_u32;
         loop {
+            on_phase(RuntimePhase::NarratorThinking);
             orchestration.start_round(self.config.orchestration_budget, started)?;
             orchestration.start_turn(self.config.orchestration_budget, started)?;
             let mut observation = self
@@ -223,6 +240,7 @@ impl GameRuntime {
             let mut pending_turns = self.executor.take_pending_npc_turns().await;
             let pending_transition = self.executor.take_pending_scene_transition().await;
             let narrator_text = require_text(&narrator_turn)?;
+            on_phase(RuntimePhase::ResolvingOrchestration);
             if let Some(pending_transition) = pending_transition {
                 let context = AgentToolContext {
                     actor_id: before.player.actor_id,
@@ -231,6 +249,7 @@ impl GameRuntime {
                     capabilities: self.config.narrator_capabilities.clone(),
                 };
                 let target = pending_transition.target.clone();
+                on_phase(RuntimePhase::UpdatingWorld);
                 let result = self
                     .service
                     .execute(
@@ -282,6 +301,7 @@ impl GameRuntime {
                         &mut orchestration,
                         &mut tool_activity,
                         started,
+                        on_phase,
                     )
                     .await?;
                 settled_materializations.extend(resolved.iter().filter_map(|result| {
@@ -317,6 +337,7 @@ impl GameRuntime {
                     .filter(|event| event.revision > before.revision)
                     .map(|event| event.id)
                     .collect::<Vec<_>>();
+                on_phase(RuntimePhase::UpdatingWorld);
                 self.service
                     .append_transcript(
                         before.player.actor_id,
@@ -439,6 +460,7 @@ impl GameRuntime {
                     context_truncated,
                 )?;
                 let npc_request = agent.request(self.runner.definitions())?;
+                on_phase(RuntimePhase::NpcThinking);
                 let turn = self
                     .runner
                     .run_turn(TurnInvocation {
@@ -493,7 +515,7 @@ impl GameRuntime {
     }
 
     #[allow(clippy::too_many_arguments)]
-    async fn resolve_npc_decisions(
+    async fn resolve_npc_decisions<F>(
         &mut self,
         pending: Vec<PendingNpcDecision>,
         settled_materializations: &[(NarratorNpcDecision, ActorId)],
@@ -504,7 +526,11 @@ impl GameRuntime {
         orchestration: &mut OrchestrationState,
         tool_activity: &mut Vec<ToolActivity>,
         started: Instant,
-    ) -> Result<Vec<NpcMaterializationResult>, RuntimeError> {
+        on_phase: &mut F,
+    ) -> Result<Vec<NpcMaterializationResult>, RuntimeError>
+    where
+        F: FnMut(RuntimePhase),
+    {
         let mut outcomes = Vec::with_capacity(pending.len());
         for pending in pending {
             if self.cancellation.is_cancelled() {
@@ -610,6 +636,7 @@ impl GameRuntime {
                         lifetime,
                         required_agent_profile: required_profile.cloned(),
                     };
+                    on_phase(RuntimePhase::UpdatingWorld);
                     match self
                         .service
                         .spawn_preset_character(character_id, &materialization)
@@ -718,6 +745,7 @@ impl GameRuntime {
                             .filter(|definition| definition.name == "submit_npc_draft")
                             .collect(),
                     )?;
+                    on_phase(RuntimePhase::NarratorThinking);
                     let generation = self
                         .runner
                         .run_turn(TurnInvocation {
@@ -798,6 +826,7 @@ impl GameRuntime {
                             transcript_id: source_transcript,
                         },
                     };
+                    on_phase(RuntimePhase::UpdatingWorld);
                     match self
                         .service
                         .spawn_generated_character(&draft, &policy, origin, &materialization)

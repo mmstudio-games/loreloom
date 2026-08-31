@@ -1,5 +1,5 @@
 use loreloom_core::{
-    NoticeKind, ToolActivityState, TranscriptSpeaker, TranscriptState, UiSnapshot,
+    NoticeKind, RuntimePhase, ToolActivityState, TranscriptSpeaker, TranscriptState, UiSnapshot,
 };
 use ratatui::{
     Frame,
@@ -9,7 +9,7 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph, Wrap},
 };
 
-use crate::{NarrowPage, StreamState, TuiApp};
+use crate::{NarrowPage, TuiApp};
 
 pub const WIDE_LAYOUT_MINIMUM: u16 = 80;
 
@@ -83,7 +83,7 @@ pub(crate) fn render_ui_with_state_width(
     }
 
     render_input(frame, app, input);
-    render_footer(frame, &app.snapshot, footer);
+    render_footer(frame, app, footer);
 }
 
 fn render_state(frame: &mut Frame<'_>, snapshot: &UiSnapshot, area: Rect) {
@@ -201,10 +201,12 @@ fn render_story(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
             style,
         )));
     }
-    if let Some(stream) = &app.stream {
+    if let Some(phase) = app.working_phase {
         lines.push(Line::from(Span::styled(
-            format!("[{}] {}", stream_label(stream.state), stream.text),
-            stream_style(stream.state),
+            format!("{} {}…", spinner(app.spinner_frame), phase_label(phase)),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::ITALIC),
         )));
     }
     for tool in &app.snapshot.tool_activity {
@@ -237,12 +239,12 @@ fn render_story(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
 }
 
 fn render_input(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
-    let title = if app.snapshot.can_submit {
+    let title = if app.can_submit() {
         " Input  Enter: send · Alt+Enter/Ctrl+J: newline "
     } else {
         " Input  waiting · Esc: cancel "
     };
-    let style = if app.snapshot.can_submit {
+    let style = if app.can_submit() {
         Style::default()
     } else {
         Style::default().fg(Color::DarkGray)
@@ -256,12 +258,13 @@ fn render_input(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
     );
 }
 
-fn render_footer(frame: &mut Frame<'_>, snapshot: &UiSnapshot, area: Rect) {
+fn render_footer(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
+    let phase = app.effective_phase();
     frame.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled(
-                format!(" {:?} ", snapshot.phase),
-                Style::default().fg(if snapshot.waiting {
+                format!(" {} ", phase_label(phase)),
+                Style::default().fg(if app.working_phase.is_some() {
                     Color::Yellow
                 } else {
                     Color::Green
@@ -269,7 +272,7 @@ fn render_footer(frame: &mut Frame<'_>, snapshot: &UiSnapshot, area: Rect) {
             ),
             Span::raw(format!(
                 "rev {} · Ctrl+C quit · PgUp/PgDn scroll",
-                snapshot.revision
+                app.snapshot.revision
             )),
         ])),
         area,
@@ -294,22 +297,20 @@ const fn tool_color(state: ToolActivityState) -> Color {
     }
 }
 
-const fn stream_label(state: StreamState) -> &'static str {
-    match state {
-        StreamState::Live => "streaming",
-        StreamState::Final => "final",
-        StreamState::Interrupted => "interrupted",
+const fn phase_label(phase: RuntimePhase) -> &'static str {
+    match phase {
+        RuntimePhase::Idle | RuntimePhase::Completed => "Ready",
+        RuntimePhase::PersistingInput => "Saving your words",
+        RuntimePhase::NarratorThinking => "Narrator is thinking",
+        RuntimePhase::ResolvingOrchestration => "Resolving the scene",
+        RuntimePhase::NpcThinking => "NPC is responding",
+        RuntimePhase::UpdatingWorld => "Updating the world",
+        RuntimePhase::Cancelled => "Cancelled",
+        RuntimePhase::Failed => "Turn failed",
     }
 }
 
-fn stream_style(state: StreamState) -> Style {
-    match state {
-        StreamState::Live => Style::default()
-            .fg(Color::Cyan)
-            .add_modifier(Modifier::ITALIC),
-        StreamState::Final => Style::default().fg(Color::White),
-        StreamState::Interrupted => Style::default()
-            .fg(Color::DarkGray)
-            .add_modifier(Modifier::ITALIC),
-    }
+const fn spinner(frame: u8) -> &'static str {
+    const FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+    FRAMES[(frame as usize) % FRAMES.len()]
 }

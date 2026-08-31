@@ -11,6 +11,5 @@ pub use render::{WIDE_LAYOUT_MINIMUM, render_ui};
 pub use run::{RuntimeClient, TuiConfig, TuiError, run};
 pub use session::{CrosstermTerminalOps, TerminalOps, TerminalSession};
 pub use state::{
-    NarrowPage, RuntimeUiEvent, StreamItem, StreamState, TuiApp, UiClientError, UiIntent,
-    handle_key, handle_paste,
+    NarrowPage, RuntimeUiEvent, TuiApp, UiClientError, UiIntent, handle_key, handle_paste,
 };

@@ -1654,11 +1654,34 @@ Idle
 
 ```text
 PlayerInput
+  -> PersistingInput
   -> NarratorThinking
   -> ResolvingOrchestration
-  -> RunningNpcTurns (zero or more, in accepted ToolCall order)
+  -> NpcThinking (zero or more, in accepted ToolCall order)
+  -> UpdatingWorld (when Runtime commits orchestration or transcript state)
   -> NarratorThinking | Completed | Cancelled | Failed
 ```
+
+面向 Runtime Client/TUI 的稳定粗粒度状态固定为：
+
+```rust
+pub enum RuntimePhase {
+    Idle,
+    PersistingInput,
+    NarratorThinking,
+    ResolvingOrchestration,
+    NpcThinking,
+    UpdatingWorld,
+    Completed,
+    Cancelled,
+    Failed,
+}
+```
+
+这些值不等于内部 Agent Step，也不携带 Actor、Prompt、模型正文、Tool 参数或错误详情。
+`GameRuntime` 在状态实际开始前同步通知应用层提供的 observer；应用 adapter 把它转换为
+`RuntimeUiEvent::PhaseChanged`。observer/channel 关闭不能改变 World 结果，终态仍由 committed 或
+失败 Snapshot 收敛。
 
 规范行为：
 

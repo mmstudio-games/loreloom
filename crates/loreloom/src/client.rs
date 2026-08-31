@@ -52,13 +52,12 @@ impl RuntimeAdapter {
                 while let Ok(command) = command_rx.recv() {
                     match command {
                         RuntimeCommand::Submit(input) => {
-                            let snapshot = tokio.block_on(runtime.initial_snapshot());
-                            let turn = runtime.handle_player_input(input);
-                            if let Ok(snapshot) = snapshot {
-                                let _ = event_tx.send(Ok(RuntimeUiEvent::Snapshot(Box::new(
-                                    working_snapshot(snapshot),
-                                ))));
-                            }
+                            let phase_events = event_tx.clone();
+                            let turn =
+                                runtime.handle_player_input_with_phase(input, move |phase| {
+                                    let _ =
+                                        phase_events.send(Ok(RuntimeUiEvent::PhaseChanged(phase)));
+                                });
                             let result = tokio.block_on(turn);
                             let event = match result {
                                 Ok(outcome) => RuntimeUiEvent::Snapshot(Box::new(outcome.snapshot)),
@@ -154,14 +153,6 @@ impl Drop for RuntimeAdapter {
     }
 }
 
-fn working_snapshot(mut snapshot: UiSnapshot) -> UiSnapshot {
-    snapshot.phase = RuntimePhase::PersistingInput;
-    snapshot.can_submit = false;
-    snapshot.can_cancel = true;
-    snapshot.waiting = true;
-    snapshot
-}
-
 fn failed_snapshot(mut snapshot: UiSnapshot, code: &'static str) -> UiSnapshot {
     snapshot.phase = if code == "cancelled" {
         RuntimePhase::Cancelled
@@ -222,7 +213,7 @@ mod tests {
     }
 
     #[test]
-    fn worker_publishes_working_and_completed_snapshots_and_rearms_cancellation() {
+    fn worker_publishes_phase_events_and_completed_snapshots_and_rearms_cancellation() {
         let temporary = tempfile::tempdir().expect("temporary save root");
         let io = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
@@ -238,11 +229,7 @@ mod tests {
         adapter
             .submit("Ask Mira what she hears in the rain.".to_owned())
             .expect("first turn accepted");
-        let working = wait_for_snapshot(&mut adapter, RuntimePhase::PersistingInput);
-        assert_eq!(working.revision, initial_revision);
-        assert!(working.waiting);
-        assert!(working.can_cancel);
-        assert!(!working.can_submit);
+        wait_for_phase(&mut adapter, RuntimePhase::PersistingInput);
 
         let completed = wait_for_snapshot(&mut adapter, RuntimePhase::Completed);
         assert!(completed.revision > initial_revision);
@@ -255,7 +242,7 @@ mod tests {
         adapter
             .submit("Continue the conversation.".to_owned())
             .expect("second turn accepted");
-        let _ = wait_for_snapshot(&mut adapter, RuntimePhase::PersistingInput);
+        wait_for_phase(&mut adapter, RuntimePhase::PersistingInput);
         assert!(
             !held_cancellation.is_cancelled(),
             "the token must be reset before the cancellable working snapshot is published"
@@ -300,6 +287,21 @@ mod tests {
                     std::thread::yield_now();
                 }
                 Some(_) | None => panic!("timed out waiting for {phase:?} snapshot"),
+            }
+        }
+    }
+
+    fn wait_for_phase(adapter: &mut RuntimeAdapter, phase: RuntimePhase) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            match adapter.try_recv().expect("runtime event") {
+                Some(loreloom_tui::RuntimeUiEvent::PhaseChanged(observed)) if observed == phase => {
+                    return;
+                }
+                Some(_) | None if Instant::now() < deadline => {
+                    std::thread::yield_now();
+                }
+                Some(_) | None => panic!("timed out waiting for {phase:?} phase"),
             }
         }
     }

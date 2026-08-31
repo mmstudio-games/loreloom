@@ -14,8 +14,8 @@ use loreloom_core::{
     TranscriptState, TranscriptWindow, UiNotice, UiSnapshot, WorldTime,
 };
 use loreloom_tui::{
-    EditorError, InputEditor, MAX_INPUT_BYTES, NarrowPage, RuntimeUiEvent, StreamItem, StreamState,
-    TerminalOps, TerminalSession, TuiApp, UiIntent, handle_key, render_ui,
+    EditorError, InputEditor, MAX_INPUT_BYTES, NarrowPage, RuntimeUiEvent, TerminalOps,
+    TerminalSession, TuiApp, UiIntent, handle_key, render_ui,
 };
 use ratatui::{Terminal, backend::TestBackend, buffer::Buffer};
 
@@ -165,10 +165,7 @@ fn tool(name: &str, state: ToolActivityState) -> ToolActivity {
 fn sample_app() -> TuiApp {
     let mut app = TuiApp::new(snapshot());
     app.editor = InputEditor::with_text("Look closer").expect("input");
-    app.stream = Some(StreamItem {
-        text: "Dust turns in the amber light...".to_owned(),
-        state: StreamState::Live,
-    });
+    app.working_phase = Some(RuntimePhase::NarratorThinking);
     app
 }
 
@@ -226,7 +223,7 @@ fn product_renderer_is_deterministic_for_wide_and_narrow_layouts() {
     assert!(wide.contains("┌ State"));
     assert!(wide.contains("┌ Story"));
     assert!(wide.contains("Aster: Ask Mira about the bell."));
-    assert!(wide.contains("[streaming] Dust turns in the amber light..."));
+    assert!(wide.contains("Narrator is thinking…"));
     assert!(wide.contains("[pending] observe_scene"));
     assert!(wide.contains("Look closer▏"));
     assert!(wide.contains("rev 7 · Ctrl+C quit"));
@@ -301,6 +298,7 @@ fn editor_handles_graphemes_multiline_history_and_atomic_limits() {
 #[test]
 fn key_mapping_emits_ui_intents_without_constructing_world_commands() {
     let mut app = sample_app();
+    app.working_phase = None;
     app.editor = InputEditor::with_text("first").expect("input");
     assert_eq!(
         handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT)),
@@ -326,29 +324,25 @@ fn key_mapping_emits_ui_intents_without_constructing_world_commands() {
 }
 
 #[test]
-fn runtime_events_change_only_snapshot_or_ephemeral_stream_state() {
+fn runtime_events_change_only_snapshot_or_ephemeral_thinking_state() {
     let mut app = sample_app();
+    app.working_phase = None;
     let transcript = app.snapshot.transcript.clone();
-    app.apply_runtime_event(RuntimeUiEvent::StreamStarted);
-    app.apply_runtime_event(RuntimeUiEvent::StreamChunk("The bell".to_owned()));
-    app.apply_runtime_event(RuntimeUiEvent::StreamChunk(" answers.".to_owned()));
+    app.apply_runtime_event(RuntimeUiEvent::PhaseChanged(RuntimePhase::NpcThinking));
     assert_eq!(app.snapshot.transcript, transcript);
-    assert_eq!(
-        app.stream.as_ref().map(|stream| stream.text.as_str()),
-        Some("The bell answers.")
-    );
-    app.apply_runtime_event(RuntimeUiEvent::StreamFinished(StreamState::Interrupted));
-    assert_eq!(
-        app.stream.as_ref().map(|stream| stream.state),
-        Some(StreamState::Interrupted)
-    );
+    assert_eq!(app.working_phase, Some(RuntimePhase::NpcThinking));
+    let frame = app.spinner_frame;
+    app.tick_spinner();
+    assert_ne!(app.spinner_frame, frame);
 
     let editor = app.editor.clone();
     let mut next = snapshot();
     next.revision = Revision::new(8);
+    next.phase = RuntimePhase::Completed;
     app.apply_runtime_event(RuntimeUiEvent::Snapshot(Box::new(next)));
     assert_eq!(app.snapshot.revision, Revision::new(8));
     assert_eq!(app.editor, editor);
+    assert_eq!(app.working_phase, None);
 }
 
 #[derive(Clone)]

@@ -1842,10 +1842,25 @@ async fn player_narrator_npc_and_surreal_store_form_a_durable_vertical_slice() {
         npc.clone(),
     );
 
+    let mut phases = Vec::new();
     let outcome = runtime
-        .handle_player_input("Ask Mira to listen to the rain.")
+        .handle_player_input_with_phase("Ask Mira to listen to the rain.", |phase| {
+            phases.push(phase);
+        })
         .await
         .expect("complete player turn");
+
+    assert_eq!(
+        phases.first(),
+        Some(&loreloom_core::RuntimePhase::PersistingInput)
+    );
+    assert!(phases.contains(&loreloom_core::RuntimePhase::NarratorThinking));
+    assert!(phases.contains(&loreloom_core::RuntimePhase::ResolvingOrchestration));
+    assert!(phases.contains(&loreloom_core::RuntimePhase::NpcThinking));
+    assert_eq!(
+        phases.last(),
+        Some(&loreloom_core::RuntimePhase::UpdatingWorld)
+    );
 
     assert_eq!(outcome.snapshot.revision, Revision::new(3));
     assert_eq!(outcome.snapshot.transcript.items.len(), 2);

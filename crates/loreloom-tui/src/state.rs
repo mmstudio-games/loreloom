@@ -2,7 +2,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use loreloom_core::{RuntimePhase, UiSnapshot};
 use thiserror::Error;
 
-use crate::{EditorError, InputEditor, MAX_INPUT_BYTES};
+use crate::{EditorError, InputEditor};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NarrowPage {
@@ -19,25 +19,10 @@ impl NarrowPage {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum StreamState {
-    Live,
-    Final,
-    Interrupted,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StreamItem {
-    pub text: String,
-    pub state: StreamState,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RuntimeUiEvent {
     Snapshot(Box<UiSnapshot>),
-    StreamStarted,
-    StreamChunk(String),
-    StreamFinished(StreamState),
+    PhaseChanged(RuntimePhase),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -66,7 +51,8 @@ pub struct TuiApp {
     pub editor: InputEditor,
     pub narrow_page: NarrowPage,
     pub transcript_scroll: u16,
-    pub stream: Option<StreamItem>,
+    pub working_phase: Option<RuntimePhase>,
+    pub spinner_frame: u8,
 }
 
 impl TuiApp {
@@ -77,7 +63,8 @@ impl TuiApp {
             editor: InputEditor::default(),
             narrow_page: NarrowPage::Story,
             transcript_scroll: 0,
-            stream: None,
+            working_phase: None,
+            spinner_frame: 0,
         }
     }
 
@@ -86,34 +73,51 @@ impl TuiApp {
             RuntimeUiEvent::Snapshot(snapshot) => {
                 if matches!(
                     snapshot.phase,
-                    RuntimePhase::Completed | RuntimePhase::Cancelled | RuntimePhase::Failed
+                    RuntimePhase::Idle
+                        | RuntimePhase::Completed
+                        | RuntimePhase::Cancelled
+                        | RuntimePhase::Failed
                 ) {
-                    self.stream = None;
+                    self.working_phase = None;
                 }
                 self.snapshot = *snapshot;
             }
-            RuntimeUiEvent::StreamStarted => {
-                self.stream = Some(StreamItem {
-                    text: String::new(),
-                    state: StreamState::Live,
-                });
-            }
-            RuntimeUiEvent::StreamChunk(chunk) => {
-                let stream = self.stream.get_or_insert_with(|| StreamItem {
-                    text: String::new(),
-                    state: StreamState::Live,
-                });
-                if stream.text.len().saturating_add(chunk.len()) <= MAX_INPUT_BYTES {
-                    stream.text.push_str(&chunk);
-                }
-                stream.state = StreamState::Live;
-            }
-            RuntimeUiEvent::StreamFinished(state) => {
-                if let Some(stream) = &mut self.stream {
-                    stream.state = state;
+            RuntimeUiEvent::PhaseChanged(phase) => {
+                if matches!(
+                    phase,
+                    RuntimePhase::Idle
+                        | RuntimePhase::Completed
+                        | RuntimePhase::Cancelled
+                        | RuntimePhase::Failed
+                ) {
+                    self.working_phase = None;
+                } else {
+                    self.working_phase = Some(phase);
+                    self.spinner_frame = 0;
                 }
             }
         }
+    }
+
+    pub fn tick_spinner(&mut self) {
+        if self.working_phase.is_some() {
+            self.spinner_frame = self.spinner_frame.wrapping_add(1) % 10;
+        }
+    }
+
+    #[must_use]
+    pub fn effective_phase(&self) -> RuntimePhase {
+        self.working_phase.unwrap_or(self.snapshot.phase)
+    }
+
+    #[must_use]
+    pub fn can_submit(&self) -> bool {
+        self.working_phase.is_none() && self.snapshot.can_submit
+    }
+
+    #[must_use]
+    pub fn can_cancel(&self) -> bool {
+        self.working_phase.is_some() || self.snapshot.can_cancel
     }
 
     pub fn scroll_up(&mut self) {
@@ -141,10 +145,10 @@ pub fn handle_key(app: &mut TuiApp, key: KeyEvent) -> Option<UiIntent> {
             let _ = app.editor.insert("\n");
             None
         }
-        (KeyCode::Enter, KeyModifiers::NONE) if app.snapshot.can_submit => {
+        (KeyCode::Enter, KeyModifiers::NONE) if app.can_submit() => {
             app.editor.submit().map(UiIntent::Submit)
         }
-        (KeyCode::Esc, _) if app.snapshot.can_cancel => Some(UiIntent::Cancel),
+        (KeyCode::Esc, _) if app.can_cancel() => Some(UiIntent::Cancel),
         (KeyCode::Tab, _) => {
             app.narrow_page.toggle();
             None

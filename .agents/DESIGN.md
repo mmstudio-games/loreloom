@@ -203,6 +203,9 @@ Loreloom Runtime ───────────────► Persistence
     ModLock 的 Scene Definition ID，当前 Narrator Turn 结束后才执行单个原子 `TransitionScene`
     Command。切换同时停用旧 Scene、激活或首次物化目标 Scene、移动现有玩家并产生 SceneLeft/
     SceneEntered Event；随后必须基于新 Revision 重新调用 Narrator，不能沿用切换前的 NPC 请求。
+48. Runtime 对 TUI 只发布粗粒度 `RuntimePhase`，不转发 Provider stream 或内部隐藏推理；phase
+    固定覆盖 PersistingInput、NarratorThinking、ResolvingOrchestration、NpcThinking、UpdatingWorld
+    与终态。Phase event 不改变 committed Snapshot，只驱动本地 thinking 文案、spinner 和输入门禁。
 
 项目方已于 2026-08-29 明确确认第 18–23 项的 Mod 子系统方向。该确认把 Content Mod、Rule Mod、
 统一导入路径、类型化参数、结构化 Event Option、通用 Gameplay Tool、ModLock 和 Extension Mod
