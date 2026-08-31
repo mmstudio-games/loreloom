@@ -12,15 +12,15 @@ use armillae_core::{
     ToolCallId, ToolResultContent,
 };
 use armillae_llm::{
-    BoxFuture as BridgeFuture, BridgeCapabilities, BridgeError, CompletionStream, LlmBridge,
-    MockBridge, MockResponse, ProjectionReport,
+    BoxFuture as BridgeFuture, BridgeCapabilities, BridgeError, CompletionStream, ErrorMetadata,
+    LlmBridge, MockBridge, MockResponse, ProjectionReport,
 };
 use armillae_tools::{ToolContext, ToolExecutor};
 use loreloom_agent::{
-    AgentDefinition, AgentRunner, AgentToolContext, CancellationToken, NarrativeImportance,
-    NarratorNpcDecision, NarratorPlan, NpcControllerKind, NpcGenerationRequest, NpcLifetime,
-    NpcNarrativeAction, NpcTarget, NpcTurnRequest, NpcTurnStatus, ResourceBudget, TurnInvocation,
-    TurnStatus,
+    AgentDefinition, AgentRunner, AgentToolContext, CancellationToken, ModelFailureCategory,
+    ModelFailureStage, ModelInvocationKind, NarrativeImportance, NarratorNpcDecision, NarratorPlan,
+    NpcControllerKind, NpcGenerationRequest, NpcLifetime, NpcNarrativeAction, NpcTarget,
+    NpcTurnRequest, NpcTurnStatus, ResourceBudget, TurnInvocation, TurnStatus,
 };
 use loreloom_content::{
     AgentProfileDefinition, AttributeDefinition, CONTENT_SCHEMA_V1, CharacterDefinition,
@@ -954,6 +954,40 @@ struct RecoveringNarratorBridge {
     calls: AtomicUsize,
 }
 
+struct RejectedNpcBridge;
+
+impl LlmBridge for RejectedNpcBridge {
+    fn capabilities(&self) -> BridgeCapabilities {
+        BridgeCapabilities::all()
+    }
+
+    fn project(&self, _request: &CompletionRequest) -> Result<ProjectionReport, BridgeError> {
+        Ok(ProjectionReport::exact("runtime-rejected-npc"))
+    }
+
+    fn complete<'a>(
+        &'a self,
+        _request: CompletionRequest,
+    ) -> BridgeFuture<'a, Result<CompletionResponse, BridgeError>> {
+        Box::pin(async {
+            Err(BridgeError::Timeout {
+                metadata: ErrorMetadata::new("openai-compatible").with_request_id("req_npc-safe"),
+            })
+        })
+    }
+
+    fn stream<'a>(
+        &'a self,
+        _request: CompletionRequest,
+    ) -> BridgeFuture<'a, Result<CompletionStream, BridgeError>> {
+        Box::pin(async {
+            Err(BridgeError::InvalidRequest {
+                message: "streaming is not used".to_owned(),
+            })
+        })
+    }
+}
+
 impl LlmBridge for RecoveringNarratorBridge {
     fn capabilities(&self) -> BridgeCapabilities {
         BridgeCapabilities::all()
@@ -969,8 +1003,12 @@ impl LlmBridge for RecoveringNarratorBridge {
     ) -> BridgeFuture<'a, Result<CompletionResponse, BridgeError>> {
         Box::pin(async move {
             if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
-                return Err(BridgeError::InvalidRequest {
+                return Err(BridgeError::ProviderRejected {
+                    code: Some("must-not-escape".to_owned()),
                     message: "provider rejected credential must-not-escape".to_owned(),
+                    metadata: ErrorMetadata::new("openai-compatible")
+                        .with_http_status(400)
+                        .with_request_id("req_runtime-safe"),
                 });
             }
             Ok(text_response(
@@ -1415,8 +1453,12 @@ impl LlmBridge for RejectedGenerationBridge {
                 ));
             }
             if matches!(self.mode, GenerationRejectionMode::ProviderFailure) && call == 2 {
-                return Err(BridgeError::InvalidRequest {
-                    message: "injected generation failure".to_owned(),
+                return Err(BridgeError::ProviderRejected {
+                    code: Some("must-not-escape".to_owned()),
+                    message: "injected generation failure must-not-escape".to_owned(),
+                    metadata: ErrorMetadata::new("openai-compatible")
+                        .with_http_status(422)
+                        .with_request_id("req_generation-safe"),
                 });
             }
             let replanning_call = match self.mode {
@@ -1447,7 +1489,16 @@ impl LlmBridge for RejectedGenerationBridge {
                 self.saw_rejection.store(
                     result["status"] == json!("rejected")
                         && result["reason"] == json!(expected_reason)
-                        && result.get("actor_id").is_none(),
+                        && result.get("actor_id").is_none()
+                        && (!matches!(self.mode, GenerationRejectionMode::ProviderFailure)
+                            || (result["failure"]["category"] == json!("provider_rejected")
+                                && result["failure"]["http_status"] == json!(422)
+                                && result["failure"]["provider"] == json!("openai-compatible")
+                                && result["failure"]["request_id"]
+                                    == json!("req_generation-safe")
+                                && result["failure"]["correlation_id"]
+                                    .as_str()
+                                    .is_some_and(|value| value.starts_with("err_")))),
                     Ordering::SeqCst,
                 );
                 return Ok(text_response(
@@ -1657,7 +1708,22 @@ async fn provider_failure_is_redacted_and_the_same_runtime_accepts_the_next_turn
         .handle_player_input("Listen for the rain.")
         .await
         .expect_err("the injected provider failure must end the first turn");
-    assert!(matches!(error, RuntimeError::BridgeUnavailable));
+    let RuntimeError::BridgeUnavailable(diagnostic) = &error else {
+        panic!("expected a model failure diagnostic, got {error:?}");
+    };
+    assert_eq!(diagnostic.invocation, ModelInvocationKind::Narrator);
+    assert_eq!(diagnostic.stage, ModelFailureStage::Invocation);
+    assert_eq!(diagnostic.category, ModelFailureCategory::ProviderRejected);
+    assert_eq!(diagnostic.http_status, Some(400));
+    assert_eq!(
+        diagnostic.provider.as_ref().map(|value| value.as_str()),
+        Some("openai-compatible")
+    );
+    assert_eq!(
+        diagnostic.request_id.as_ref().map(|value| value.as_str()),
+        Some("req_runtime-safe")
+    );
+    assert!(diagnostic.correlation_id.to_string().starts_with("err_"));
     assert!(!error.to_string().contains("must-not-escape"));
     assert!(!format!("{error:?}").contains("must-not-escape"));
 
@@ -2009,6 +2075,66 @@ async fn player_narrator_npc_and_surreal_store_form_a_durable_vertical_slice() {
 }
 
 #[tokio::test]
+async fn npc_provider_failure_reaches_narrator_result_and_player_notice() {
+    let directory = TempDir::new().expect("temporary save parent");
+    let fixture = fixture();
+    let store = SaveStore::create(
+        directory.path().join("save"),
+        fixture.manifest.clone(),
+        fixture.records.clone(),
+    )
+    .await
+    .expect("create save");
+    let service = WorldService::open(
+        store,
+        fixture.registry.clone(),
+        &fixture.manifest.mod_lock,
+        fixture.world_config.clone(),
+    )
+    .await
+    .expect("open world service");
+    let plan = NarratorPlan {
+        based_on_revision: Revision::new(1),
+        npc_turns: vec![request(fixture.npc, fixture.scene)],
+    };
+    let mut runtime = GameRuntime::new(
+        service,
+        Arc::new(NarratorBridge::new(plan, SupportMode::Empty)),
+        parse("ses_01890f6a-2b65-7d4e-8f90-123456789abc"),
+        RuntimeConfig::default(),
+    );
+    runtime.register_npc(
+        fixture.npc,
+        definition(fixture.profile_id),
+        Arc::new(RejectedNpcBridge),
+    );
+
+    let outcome = runtime
+        .handle_player_input("Ask Mira to answer despite the distant service.")
+        .await
+        .expect("narrator can synthesize after an NPC failure");
+
+    assert_eq!(outcome.npc_results.len(), 1);
+    assert_eq!(outcome.npc_results[0].status, NpcTurnStatus::Failed);
+    let diagnostic = outcome.npc_results[0]
+        .failure
+        .as_ref()
+        .expect("NPC diagnostic");
+    assert_eq!(diagnostic.invocation, ModelInvocationKind::Npc);
+    assert_eq!(diagnostic.category, ModelFailureCategory::Timeout);
+    assert_eq!(
+        diagnostic.request_id.as_ref().map(|value| value.as_str()),
+        Some("req_npc-safe")
+    );
+    let correlation_id = diagnostic.correlation_id.to_string();
+    assert!(outcome.snapshot.notices.iter().any(|notice| {
+        notice.message.as_str().contains("npc/invocation")
+            && notice.message.as_str().contains("timeout")
+            && notice.message.as_str().contains(&correlation_id)
+    }));
+}
+
+#[tokio::test]
 async fn generated_npc_is_committed_before_narrator_replans_and_dispatches_it() {
     let directory = TempDir::new().expect("temporary save parent");
     let fixture = fixture();
@@ -2314,6 +2440,17 @@ async fn generation_limits_and_provider_failures_return_to_narrator_without_part
         assert!(narrator.saw_rejection.load(Ordering::SeqCst));
         assert!(outcome.npc_results.is_empty());
         assert_eq!(outcome.snapshot.revision, Revision::new(2));
+        if matches!(mode, GenerationRejectionMode::ProviderFailure) {
+            let diagnostic = outcome
+                .snapshot
+                .notices
+                .iter()
+                .find(|notice| notice.message.as_str().contains("provider_rejected"))
+                .expect("generation failure warning");
+            assert!(diagnostic.message.as_str().contains("HTTP 422"));
+            assert!(diagnostic.message.as_str().contains("ref err_"));
+            assert!(!diagnostic.message.as_str().contains("must-not-escape"));
+        }
         let loaded = observer
             .load()
             .await
@@ -3038,6 +3175,7 @@ async fn mock_agent_continuation_splits_stack_then_uses_skill_at_advanced_revisi
     let cancellation = CancellationToken::new();
     let outcome = runner
         .run_turn(TurnInvocation {
+            model_invocation: loreloom_agent::ModelInvocationKind::Npc,
             bridge: &bridge,
             request: CompletionRequest {
                 tools,

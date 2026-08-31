@@ -1,7 +1,7 @@
 # Loreloom 设计索引
 
 > 状态：核心架构已接受；全部 P0 Spike 已完成，MVP 基础协议开始冻结
-> 更新日期：2026-08-31
+> 更新日期：2026-09-01
 > 作用：Loreloom 的权威工程设计入口，不在本文件重复 RFC 或 Spec 的细节
 
 本目录按成熟度区分 `rfcs/` 中的架构提案、`specs/` 中的工程契约和未来 `todos/` 中的实施
@@ -61,6 +61,9 @@ Loreloom Runtime ───────────────► Persistence
   LLM、不渲染 UI；
 - `NpcFactory` 属于 World 领域边界，消费已编译 SpawnSpec，结合当前世界校验属性预算、Scene、
   领域引用和不变量后形成 WorldCommand；Capability、数量和模型预算仍由 Runtime 校验；
+- Agent Harness 把 Armillae `BridgeError` 投影为只含 correlation ID、调用阶段、归一化类别和安全
+  Provider 元数据的诊断；Runtime 必须保持该诊断到模型、玩家和进程错误投影，不能把所有失败折叠
+  成不可判断的 `bridge_unavailable`，也不能传播 Provider 原始错误正文；
 - Persistence 保存稳定逻辑 ID 和拥有所有权的版本化记录，不序列化 Bevy 内部身份或内存布局；
   第一阶段固定为通过 Toasty 使用嵌入式 SurrealDB + SurrealKV，SQLite 只保留为提交契约测试
   对照；durable unit 必须使用显式事务；
@@ -209,6 +212,10 @@ Loreloom Runtime ───────────────► Persistence
 49. Transcript 默认锚定最新内容；本地滚动状态表达“距最新内容的视觉行数”，按当前宽度折行后的
     内容高度和 viewport 约束。`PageUp`/鼠标滚轮向上查看旧内容，`PageDown`/鼠标滚轮向下返回最新；
     位于底部时新 Snapshot 自动跟随，滚动和 resize 都不触发 Runtime 请求或修改世界。
+50. 每次模型调用失败生成 `err_` UUIDv7 correlation ID；Agent Harness 丢弃 Armillae/Provider 原始
+    错误正文，只保留 invocation、失败阶段、归一化类别、经过约束的 Provider/Request ID、HTTP
+    状态与 retry 元数据。Runtime、NpcTurnResult、TUI notice 和 headless 错误复用同一诊断事实，
+    启动期 Bridge 创建失败使用同一安全投影。
 
 项目方已于 2026-08-29 明确确认第 18–23 项的 Mod 子系统方向。该确认把 Content Mod、Rule Mod、
 统一导入路径、类型化参数、结构化 Event Option、通用 Gameplay Tool、ModLock 和 Extension Mod

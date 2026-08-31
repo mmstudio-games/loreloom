@@ -1,4 +1,8 @@
 /target/
+/.loreloom/
+/loreloom.toml
+/loreloom.*.toml
+!/loreloom.example.toml
 .env
 .env.*
 !.env.example

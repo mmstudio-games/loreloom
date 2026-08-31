@@ -9,7 +9,7 @@ use std::{
 
 use loreloom_agent::CancellationToken;
 use loreloom_core::{NoticeKind, RuntimePhase, ShortText, UiNotice, UiSnapshot};
-use loreloom_runtime::GameRuntime;
+use loreloom_runtime::{GameRuntime, RuntimeError};
 use loreloom_tui::{RuntimeClient, RuntimeUiEvent, UiClientError};
 
 use crate::error::AppError;
@@ -63,7 +63,7 @@ impl RuntimeAdapter {
                                 Ok(outcome) => RuntimeUiEvent::Snapshot(Box::new(outcome.snapshot)),
                                 Err(error) => match tokio.block_on(runtime.initial_snapshot()) {
                                     Ok(snapshot) => RuntimeUiEvent::Snapshot(Box::new(
-                                        failed_snapshot(snapshot, error.code()),
+                                        failed_snapshot(snapshot, &error),
                                     )),
                                     Err(_) => {
                                         worker_accepting.store(true, Ordering::SeqCst);
@@ -153,7 +153,8 @@ impl Drop for RuntimeAdapter {
     }
 }
 
-fn failed_snapshot(mut snapshot: UiSnapshot, code: &'static str) -> UiSnapshot {
+fn failed_snapshot(mut snapshot: UiSnapshot, error: &RuntimeError) -> UiSnapshot {
+    let code = error.code();
     snapshot.phase = if code == "cancelled" {
         RuntimePhase::Cancelled
     } else {
@@ -162,7 +163,13 @@ fn failed_snapshot(mut snapshot: UiSnapshot, code: &'static str) -> UiSnapshot {
     snapshot.can_submit = true;
     snapshot.can_cancel = false;
     snapshot.waiting = false;
-    if let Ok(message) = ShortText::new(format!("Turn ended: {code}")) {
+    let message = match error {
+        RuntimeError::BridgeUnavailable(diagnostic) => {
+            format!("Model request failed · {}", diagnostic.user_summary())
+        }
+        _ => format!("Turn ended: {code}"),
+    };
+    if let Ok(message) = ShortText::new(message) {
         snapshot.notices.push(UiNotice {
             kind: if code == "cancelled" {
                 NoticeKind::Info
@@ -179,10 +186,13 @@ fn failed_snapshot(mut snapshot: UiSnapshot, code: &'static str) -> UiSnapshot {
 mod tests {
     use std::time::{Duration, Instant};
 
-    use loreloom_core::RuntimePhase;
+    use armillae_llm::{BridgeError, ErrorMetadata};
+    use loreloom_agent::{ModelFailureDiagnostic, ModelFailureStage, ModelInvocationKind};
+    use loreloom_core::{NoticeKind, RuntimePhase};
+    use loreloom_runtime::RuntimeError;
     use loreloom_tui::RuntimeClient;
 
-    use super::{RuntimeAdapter, RuntimeCommand};
+    use super::{RuntimeAdapter, RuntimeCommand, failed_snapshot};
     use crate::demo::build_demo_with;
 
     #[test]
@@ -210,6 +220,43 @@ mod tests {
             command_rx.try_recv(),
             Ok(RuntimeCommand::Submit(input)) if input == "first"
         ));
+    }
+
+    #[test]
+    fn failed_snapshot_exposes_only_safe_model_diagnostics() {
+        let temporary = tempfile::tempdir().expect("temporary save root");
+        let io = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+        let setup = io
+            .block_on(build_demo_with(&temporary.path().join("save"), &[], None))
+            .expect("demo setup");
+        let bridge_error = BridgeError::ProviderRejected {
+            code: Some("must-not-escape".to_owned()),
+            message: "secret body must-not-escape".to_owned(),
+            metadata: ErrorMetadata::new("openai-compatible")
+                .with_http_status(400)
+                .with_request_id("req_ui-safe"),
+        };
+        let diagnostic = ModelFailureDiagnostic::from_bridge_error(
+            ModelInvocationKind::Narrator,
+            ModelFailureStage::Invocation,
+            &bridge_error,
+        );
+        let correlation_id = diagnostic.correlation_id.to_string();
+        let failed = failed_snapshot(
+            setup.initial_snapshot,
+            &RuntimeError::BridgeUnavailable(diagnostic),
+        );
+
+        assert_eq!(failed.phase, RuntimePhase::Failed);
+        let notice = failed.notices.last().expect("failure notice");
+        assert_eq!(notice.kind, NoticeKind::Error);
+        assert!(notice.message.as_str().contains("provider_rejected"));
+        assert!(notice.message.as_str().contains("HTTP 400"));
+        assert!(notice.message.as_str().contains(&correlation_id));
+        assert!(!notice.message.as_str().contains("must-not-escape"));
     }
 
     #[test]

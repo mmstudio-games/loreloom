@@ -8,15 +8,16 @@ use armillae_core::{CompletionRequest, ContentPart, Message, Role};
 use armillae_llm::LlmBridge;
 use loreloom_agent::{
     AgentDefinition, AgentRunner, AgentToolContext, BudgetReason, CancellationToken,
-    NarratorNpcDecision, NarratorPlan, NpcAgent, NpcAssignment, NpcControllerKind, NpcLifetime,
-    NpcNarrativeAction, NpcTarget, NpcTurnRequest, NpcTurnResult, NpcTurnStatus, ResourceUsage,
-    ToolCallOutcome, TurnInvocation, TurnOutcome, TurnStatus,
+    ModelFailureDiagnostic, ModelInvocationKind, NarratorNpcDecision, NarratorPlan, NpcAgent,
+    NpcAssignment, NpcControllerKind, NpcLifetime, NpcNarrativeAction, NpcTarget, NpcTurnRequest,
+    NpcTurnResult, NpcTurnStatus, ResourceUsage, ToolCallOutcome, TurnInvocation, TurnOutcome,
+    TurnStatus,
 };
 use loreloom_core::{
     ActorId, CharacterController, CharacterLifetime, ContentDefinitionId, GeneratedOrigin,
-    GenerationId, GenerationSource, LongText, Revision, RuntimePhase, SessionId, ShortText,
-    ToolActivity, ToolActivityState, TranscriptItemId, TranscriptSpeaker, UiSnapshot,
-    WorldCommandKind,
+    GenerationId, GenerationSource, LongText, NoticeKind, Revision, RuntimePhase, SessionId,
+    ShortText, ToolActivity, ToolActivityState, TranscriptItemId, TranscriptSpeaker, UiNotice,
+    UiSnapshot, WorldCommandKind,
 };
 use serde::Serialize;
 use serde_json::json;
@@ -162,6 +163,7 @@ impl GameRuntime {
         let mut orchestration = OrchestrationState::default();
         let mut tool_activity = Vec::new();
         let mut npc_results = Vec::new();
+        let mut notices = Vec::new();
         let _ = self.executor.take_pending_npc_decisions().await;
         let _ = self.executor.take_pending_npc_turns().await;
         let _ = self.executor.take_pending_scene_transition().await;
@@ -217,6 +219,7 @@ impl GameRuntime {
             let narrator_turn = self
                 .runner
                 .run_turn(TurnInvocation {
+                    model_invocation: ModelInvocationKind::Narrator,
                     bridge: self.narrator.as_ref(),
                     request: narrator_request,
                     tool_context: AgentToolContext {
@@ -300,6 +303,7 @@ impl GameRuntime {
                         &mut generated_attempts,
                         &mut orchestration,
                         &mut tool_activity,
+                        &mut notices,
                         started,
                         on_phase,
                     )
@@ -353,7 +357,7 @@ impl GameRuntime {
                         self.session_id,
                         RuntimePhase::Completed,
                         tool_activity,
-                        Vec::new(),
+                        notices,
                         supporting_events,
                     )
                     .await?;
@@ -464,6 +468,7 @@ impl GameRuntime {
                 let turn = self
                     .runner
                     .run_turn(TurnInvocation {
+                        model_invocation: ModelInvocationKind::Npc,
                         bridge: registration.bridge.as_ref(),
                         request: npc_request,
                         tool_context: AgentToolContext {
@@ -485,9 +490,12 @@ impl GameRuntime {
                 ) {
                     budget_failure = Some(reason);
                 }
-                let (status, response) = npc_output(&turn);
+                let (status, response, failure) = npc_output(&turn);
                 if let NpcTurnStatus::BudgetExhausted(reason) = status {
                     budget_failure = Some(reason);
+                }
+                if let Some(diagnostic) = &failure {
+                    notices.push(model_failure_notice(diagnostic)?);
                 }
                 npc_results.push(NpcTurnResult {
                     request_id: request.request_id,
@@ -496,6 +504,7 @@ impl GameRuntime {
                     final_revision: self.service.revision().await,
                     status,
                     response,
+                    failure,
                     tool_call_ids: turn
                         .tool_calls
                         .iter()
@@ -525,6 +534,7 @@ impl GameRuntime {
         generated_attempts: &mut u32,
         orchestration: &mut OrchestrationState,
         tool_activity: &mut Vec<ToolActivity>,
+        notices: &mut Vec<UiNotice>,
         started: Instant,
         on_phase: &mut F,
     ) -> Result<Vec<NpcMaterializationResult>, RuntimeError>
@@ -749,6 +759,7 @@ impl GameRuntime {
                     let generation = self
                         .runner
                         .run_turn(TurnInvocation {
+                            model_invocation: ModelInvocationKind::NpcGeneration,
                             bridge: self.narrator.as_ref(),
                             request: generation_request,
                             tool_context: AgentToolContext {
@@ -787,6 +798,15 @@ impl GameRuntime {
                         Err(RuntimeError::Cancelled) => return Err(RuntimeError::Cancelled),
                         Err(RuntimeError::Budget(reason)) => {
                             return Err(RuntimeError::Budget(reason));
+                        }
+                        Err(RuntimeError::BridgeUnavailable(diagnostic)) => {
+                            notices.push(model_failure_notice(&diagnostic)?);
+                            outcomes.push(NpcMaterializationResult::model_failure(
+                                pending,
+                                self.service.revision().await,
+                                diagnostic,
+                            ));
+                            continue;
                         }
                         Err(error) => {
                             outcomes.push(NpcMaterializationResult::rejected(
@@ -909,6 +929,8 @@ struct NpcMaterializationResult {
     revision: Revision,
     #[serde(skip_serializing_if = "Option::is_none")]
     reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    failure: Option<ModelFailureDiagnostic>,
 }
 
 impl NpcMaterializationResult {
@@ -925,6 +947,7 @@ impl NpcMaterializationResult {
             actor_id,
             revision,
             reason: None,
+            failure: None,
         }
     }
 
@@ -936,6 +959,23 @@ impl NpcMaterializationResult {
             actor_id: None,
             revision,
             reason: Some(reason.to_owned()),
+            failure: None,
+        }
+    }
+
+    fn model_failure(
+        pending: PendingNpcDecision,
+        revision: Revision,
+        failure: ModelFailureDiagnostic,
+    ) -> Self {
+        Self {
+            call_id: pending.call_id,
+            decision: pending.decision,
+            status: NpcMaterializationStatus::Rejected,
+            actor_id: None,
+            revision,
+            reason: Some("bridge_unavailable".to_owned()),
+            failure: Some(failure),
         }
     }
 }
@@ -1060,19 +1100,30 @@ fn require_text(outcome: &TurnOutcome) -> Result<String, RuntimeError> {
             }),
         TurnStatus::Cancelled => Err(RuntimeError::Cancelled),
         TurnStatus::BudgetExhausted(reason) => Err(RuntimeError::Budget(reason)),
-        TurnStatus::Failed(_) => Err(RuntimeError::BridgeUnavailable),
+        TurnStatus::Failed(_) => match outcome.failure.clone() {
+            Some(diagnostic) => Err(RuntimeError::BridgeUnavailable(diagnostic)),
+            None => Err(RuntimeError::ModelProtocol {
+                stage: "missing_failure_diagnostic",
+            }),
+        },
     }
 }
 
-fn npc_output(outcome: &TurnOutcome) -> (NpcTurnStatus, Option<LongText>) {
+fn npc_output(
+    outcome: &TurnOutcome,
+) -> (
+    NpcTurnStatus,
+    Option<LongText>,
+    Option<ModelFailureDiagnostic>,
+) {
     match outcome.status {
         TurnStatus::Completed => match outcome.final_text.clone().map(LongText::new) {
-            Some(Ok(response)) => (NpcTurnStatus::Completed, Some(response)),
-            _ => (NpcTurnStatus::Failed, None),
+            Some(Ok(response)) => (NpcTurnStatus::Completed, Some(response), None),
+            _ => (NpcTurnStatus::Failed, None, None),
         },
-        TurnStatus::Cancelled => (NpcTurnStatus::Cancelled, None),
-        TurnStatus::BudgetExhausted(reason) => (NpcTurnStatus::BudgetExhausted(reason), None),
-        TurnStatus::Failed(_) => (NpcTurnStatus::Failed, None),
+        TurnStatus::Cancelled => (NpcTurnStatus::Cancelled, None, None),
+        TurnStatus::BudgetExhausted(reason) => (NpcTurnStatus::BudgetExhausted(reason), None, None),
+        TurnStatus::Failed(_) => (NpcTurnStatus::Failed, None, outcome.failure.clone()),
     }
 }
 
@@ -1088,9 +1139,20 @@ fn unstarted_result(
         final_revision: revision,
         status,
         response: None,
+        failure: None,
         tool_call_ids: Vec::new(),
         world_events: Vec::new(),
     }
+}
+
+fn model_failure_notice(diagnostic: &ModelFailureDiagnostic) -> Result<UiNotice, RuntimeError> {
+    Ok(UiNotice {
+        kind: NoticeKind::Warning,
+        message: ShortText::new(format!(
+            "Model request failed · {}",
+            diagnostic.user_summary()
+        ))?,
+    })
 }
 
 fn append_tool_activity(activity: &mut Vec<ToolActivity>, tools: &[ToolCallOutcome]) {

@@ -2,11 +2,16 @@
 
 mod budget;
 mod cancellation;
+mod failure;
 mod protocol;
 mod runner;
 
 pub use budget::{BudgetReason, ResourceBudget, ResourceUsage};
 pub use cancellation::CancellationToken;
+pub use failure::{
+    DiagnosticLabel, ModelFailureCategory, ModelFailureDiagnostic, ModelFailureStage,
+    ModelInvocationKind,
+};
 pub use protocol::{
     AgentDefinition, AgentError, AssignmentText, NarrationText, NarrativeImportance,
     NarratorNpcDecision, NarratorPlan, NpcAgent, NpcAssignment, NpcContext, NpcControllerKind,

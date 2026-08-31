@@ -12,13 +12,14 @@ use armillae_core::{
     ToolCall, ToolCallId, ToolDefinition, ToolResult, ToolResultContent,
 };
 use armillae_llm::{
-    BoxFuture as BridgeFuture, BridgeCapabilities, BridgeError, CompletionStream, LlmBridge,
-    MockBridge, MockResponse, ProjectionReport,
+    BoxFuture as BridgeFuture, BridgeCapabilities, BridgeError, CompletionStream, ErrorMetadata,
+    LlmBridge, MockBridge, MockResponse, ProjectionReport,
 };
 use armillae_tools::{BoxFuture as ToolFuture, ToolContext, ToolExecutionError, ToolExecutor};
 use futures_executor::block_on;
 use loreloom_agent::{
-    AgentRunner, AgentToolContext, BudgetReason, CancellationToken, NarratorPlan, ResourceBudget,
+    AgentRunner, AgentToolContext, BudgetReason, CancellationToken, ModelFailureCategory,
+    ModelFailureStage, ModelInvocationKind, NarratorPlan, ResourceBudget, TurnFailureStage,
     TurnInvocation, TurnStatus,
 };
 use loreloom_core::{ActorId, Revision, SessionId};
@@ -127,6 +128,7 @@ fn invocation<'a>(
     budget: ResourceBudget,
 ) -> TurnInvocation<'a> {
     TurnInvocation {
+        model_invocation: ModelInvocationKind::Narrator,
         bridge,
         request: CompletionRequest {
             messages: vec![Message::user("act")],
@@ -261,6 +263,75 @@ fn committed_tool_is_retained_when_follow_up_model_budget_is_exhausted() {
     );
     assert_eq!(outcome.tool_results.len(), 1);
     assert_eq!(outcome.committed_events.len(), 2);
+}
+
+struct RejectedBridge;
+
+impl LlmBridge for RejectedBridge {
+    fn capabilities(&self) -> BridgeCapabilities {
+        BridgeCapabilities::all()
+    }
+
+    fn project(&self, _request: &CompletionRequest) -> Result<ProjectionReport, BridgeError> {
+        Ok(ProjectionReport::exact("rejected-test"))
+    }
+
+    fn complete<'a>(
+        &'a self,
+        _request: CompletionRequest,
+    ) -> BridgeFuture<'a, Result<CompletionResponse, BridgeError>> {
+        Box::pin(async {
+            Err(BridgeError::ProviderRejected {
+                code: Some("must-not-escape".to_owned()),
+                message: "secret response body must-not-escape".to_owned(),
+                metadata: ErrorMetadata::new("openai-compatible")
+                    .with_http_status(400)
+                    .with_request_id("req_agent-safe"),
+            })
+        })
+    }
+
+    fn stream<'a>(
+        &'a self,
+        _request: CompletionRequest,
+    ) -> BridgeFuture<'a, Result<CompletionStream, BridgeError>> {
+        Box::pin(async {
+            Err(BridgeError::InvalidRequest {
+                message: "streaming is not used".to_owned(),
+            })
+        })
+    }
+}
+
+#[test]
+fn provider_failure_preserves_safe_diagnostics_and_discards_raw_error_text() {
+    let runner = AgentRunner::new(Arc::new(RecordingExecutor::default()));
+    let cancellation = CancellationToken::new();
+    let outcome = block_on(runner.run_turn(invocation(
+        &RejectedBridge,
+        &cancellation,
+        ResourceBudget::default(),
+    )));
+
+    assert_eq!(
+        outcome.status,
+        TurnStatus::Failed(TurnFailureStage::Provider)
+    );
+    let diagnostic = outcome.failure.expect("failure diagnostic");
+    assert_eq!(diagnostic.invocation, ModelInvocationKind::Narrator);
+    assert_eq!(diagnostic.stage, ModelFailureStage::Invocation);
+    assert_eq!(diagnostic.category, ModelFailureCategory::ProviderRejected);
+    assert_eq!(diagnostic.http_status, Some(400));
+    assert_eq!(
+        diagnostic.provider.as_ref().map(|value| value.as_str()),
+        Some("openai-compatible")
+    );
+    assert_eq!(
+        diagnostic.request_id.as_ref().map(|value| value.as_str()),
+        Some("req_agent-safe")
+    );
+    let diagnostic_text = format!("{diagnostic:?} {diagnostic}");
+    assert!(!diagnostic_text.contains("must-not-escape"));
 }
 
 struct PendingBridge {

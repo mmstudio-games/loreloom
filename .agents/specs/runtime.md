@@ -125,7 +125,8 @@ Registry 和两条输入到 SpawnSpec 的统一纯编译器。不得引入 Conte
 - 共享 `AgentRunner` 对 Armillae Bridge 与 ToolExecutor 的组合；
 - ToolDefinitions 的能力过滤；
 - Loreloom Tool Handler 与 `WorldGateway` 调用；
-- Armillae Bridge/Tool 类型转换和 Mock Agent 场景。
+- Armillae Bridge/Tool 类型转换和 Mock Agent 场景；
+- 把 `BridgeError` 投影为不含原始错误正文的 `ModelFailureDiagnostic`。
 
 依赖 `loreloom-core`、`armillae-llm` 和 `armillae-tools`；具体 `armillae-llm-rig`
 Adapter 优先由二进制装配。不得依赖 Bevy 类型或持久化后端。
@@ -230,8 +231,8 @@ pub struct ContentDefinitionId(String);
 ```
 
 运行期生成的 ID 固定为 RFC 9562 UUIDv7，并使用 canonical lowercase hyphenated UUID 文本。Wire
-格式为 `<prefix>_<uuid>`，前缀固定为 `wld`、`obj`、`act`、`evt`、`ses`、`sav`、`gen`、`ntr` 与
-`trn`；
+格式为 `<prefix>_<uuid>`，前缀固定为 `wld`、`obj`、`act`、`evt`、`ses`、`sav`、`gen`、`ntr`、
+`trn` 与错误 correlation 使用的 `err`；
 因此当前格式长度固定为 40 ASCII bytes。解析必须拒绝大写、非 canonical 文本、错误前缀、非
 RFC 4122 variant 或非 version 7 UUID。`ActorId` 是 `ObjectId` 的语义新类型，序列化仍使用同一
 `obj_` 文本，避免一个角色同时拥有两份运行身份。
@@ -1152,6 +1153,7 @@ pub struct NpcTurnResult {
     pub final_revision: Revision,
     pub status: NpcTurnStatus,
     pub response: Option<LongText>,
+    pub failure: Option<ModelFailureDiagnostic>,
     pub tool_call_ids: Vec<String>,
     pub world_events: Vec<EventId>,
 }
@@ -2210,6 +2212,22 @@ resolve/create 失败必须在创建/打开 World 和 Save 前结束；不能先
 
 错误 Display 不得包含 Secret、完整 Prompt、完整 Tool 参数或私有世界事实。向模型、玩家和日志
 投影的错误内容可以不同，但必须保留共同 correlation ID。
+
+模型调用错误使用临时、非持久化的 `ModelFailureDiagnostic`。每次失败生成 `err_` UUIDv7
+`FailureId`，并固定包含 invocation（`provider_setup | narrator | npc | npc_generation`）、调用阶段
+（`configuration | request_encoding | projection | invocation`）和归一化 category。Category 至少覆盖
+`request_encoding`、`invalid_configuration`、`unsupported_capability`、`invalid_request`、
+`projection_incompatible`、`authentication`、`permission_denied`、`rate_limited`、`timeout`、
+`cancelled`、`transport`、`provider_rejected`、`invalid_provider_response`、`stream_interrupted` 与
+`unknown`。
+
+诊断可以附带经过长度和可打印 ASCII 约束的 Provider 名称与 Provider Request ID、合法 HTTP 状态、
+retryable 和 retry-after 毫秒；不得保留 `BridgeError` 的 message/code、HTTP body、header、URL、
+Prompt、模型正文或 Tool 内容。`TurnOutcome::Failed` 必须携带诊断；NPC 失败时同一诊断进入
+`NpcTurnResult.failure` 和玩家 warning，fatal Narrator 失败进入 `RuntimeError`，TUI 与 headless
+显示同一 correlation ID 和安全字段。Bridge resolve/create 的启动期失败也必须使用该投影，不能
+退化为无类别的 Provider 错误。缺失诊断属于 Loreloom model protocol 错误，不能伪造
+`bridge_unavailable`。
 
 ## 16. 测试与验收门禁
 

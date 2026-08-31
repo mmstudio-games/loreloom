@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use thiserror::Error;
 
-use crate::BudgetReason;
+use crate::{BudgetReason, ModelFailureDiagnostic};
 
 pub type AssignmentText = BoundedText<4096>;
 pub type NarrationText = BoundedText<65536>;
@@ -323,6 +323,8 @@ pub struct NpcTurnResult {
     pub status: NpcTurnStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub response: Option<LongText>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure: Option<ModelFailureDiagnostic>,
     pub tool_call_ids: Vec<String>,
     pub world_events: Vec<EventId>,
 }

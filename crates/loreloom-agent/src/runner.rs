@@ -7,7 +7,10 @@ use futures_util::future::{Either, select};
 use loreloom_core::{ActorId, EventId, Revision, SessionId};
 use serde_json::json;
 
-use crate::{BudgetReason, CancellationToken, ResourceBudget, ResourceUsage};
+use crate::{
+    BudgetReason, CancellationToken, ModelFailureDiagnostic, ModelFailureStage,
+    ModelInvocationKind, ResourceBudget, ResourceUsage,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TurnFailureStage {
@@ -34,6 +37,7 @@ pub struct ToolCallOutcome {
 pub struct TurnOutcome {
     pub status: TurnStatus,
     pub final_text: Option<String>,
+    pub failure: Option<ModelFailureDiagnostic>,
     pub tool_results: Vec<ToolResult>,
     pub tool_calls: Vec<ToolCallOutcome>,
     pub committed_events: Vec<EventId>,
@@ -49,6 +53,7 @@ pub struct AgentToolContext {
 }
 
 pub struct TurnInvocation<'a> {
+    pub model_invocation: ModelInvocationKind,
     pub bridge: &'a dyn LlmBridge,
     pub request: CompletionRequest,
     pub tool_context: AgentToolContext,
@@ -82,6 +87,7 @@ impl AgentRunner {
 
     pub async fn run_turn(&self, invocation: TurnInvocation<'_>) -> TurnOutcome {
         let TurnInvocation {
+            model_invocation,
             bridge,
             mut request,
             mut tool_context,
@@ -112,8 +118,9 @@ impl AgentRunner {
                 );
             }
             let Some(request_tokens) = estimate_request_tokens(&request) else {
-                return outcome(
+                return failure_outcome(
                     TurnStatus::Failed(TurnFailureStage::Projection),
+                    ModelFailureDiagnostic::request_encoding(model_invocation),
                     None,
                     tool_results,
                     tool_calls,
@@ -160,9 +167,14 @@ impl AgentRunner {
                     .unwrap_or(remaining_output)
                     .min(remaining_output),
             );
-            if bridge.project(&request).is_err() {
-                return outcome(
+            if let Err(error) = bridge.project(&request) {
+                return failure_outcome(
                     TurnStatus::Failed(TurnFailureStage::Projection),
+                    ModelFailureDiagnostic::from_bridge_error(
+                        model_invocation,
+                        ModelFailureStage::Projection,
+                        &error,
+                    ),
                     None,
                     tool_results,
                     tool_calls,
@@ -174,9 +186,14 @@ impl AgentRunner {
             let cancellation_wait = Box::pin(cancellation.cancelled());
             let response = match select(model_call, cancellation_wait).await {
                 Either::Left((Ok(response), _)) => response,
-                Either::Left((Err(_), _)) => {
-                    return outcome(
+                Either::Left((Err(error), _)) => {
+                    return failure_outcome(
                         TurnStatus::Failed(TurnFailureStage::Provider),
+                        ModelFailureDiagnostic::from_bridge_error(
+                            model_invocation,
+                            ModelFailureStage::Invocation,
+                            &error,
+                        ),
                         None,
                         tool_results,
                         tool_calls,
@@ -357,6 +374,27 @@ fn outcome(
     TurnOutcome {
         status,
         final_text,
+        failure: None,
+        tool_results,
+        tool_calls,
+        committed_events,
+        usage,
+    }
+}
+
+fn failure_outcome(
+    status: TurnStatus,
+    failure: ModelFailureDiagnostic,
+    final_text: Option<String>,
+    tool_results: Vec<ToolResult>,
+    tool_calls: Vec<ToolCallOutcome>,
+    committed_events: Vec<EventId>,
+    usage: ResourceUsage,
+) -> TurnOutcome {
+    TurnOutcome {
+        status,
+        final_text,
+        failure: Some(failure),
         tool_results,
         tool_calls,
         committed_events,

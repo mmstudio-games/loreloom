@@ -1,4 +1,4 @@
-use loreloom_agent::{AgentError, BudgetReason};
+use loreloom_agent::{AgentError, BudgetReason, ModelFailureDiagnostic};
 use loreloom_content::ContentError;
 use loreloom_core::{IdentityError, RevisionError, TextError};
 use loreloom_store::StoreError;
@@ -17,8 +17,8 @@ pub enum RuntimeError {
     InvalidConfiguration { field: &'static str },
     #[error("agent model protocol is invalid at {stage}")]
     ModelProtocol { stage: &'static str },
-    #[error("agent bridge is unavailable")]
-    BridgeUnavailable,
+    #[error("model request failed: {0}")]
+    BridgeUnavailable(ModelFailureDiagnostic),
     #[error("agent capability is not authorized")]
     CapabilityDenied,
     #[error("agent orchestration budget exhausted: {0:?}")]
@@ -57,7 +57,7 @@ impl RuntimeError {
             Self::InvalidConfiguration { .. } => "invalid_configuration",
             Self::ModelProtocol { .. } | Self::Agent(_) | Self::Json { .. } => "agent_error",
             Self::Content(_) => "content_error",
-            Self::BridgeUnavailable => "bridge_unavailable",
+            Self::BridgeUnavailable(_) => "bridge_unavailable",
             Self::CapabilityDenied => "capability_denied",
             Self::Budget(_) => "budget_exhausted",
             Self::Cancelled => "cancelled",

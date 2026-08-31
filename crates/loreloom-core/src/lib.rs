@@ -26,9 +26,9 @@ pub use domain::{
     TranscriptSpeaker, TranscriptState, WorldStateRecord,
 };
 pub use identity::{
-    ActionId, ActorId, ContentDefinitionId, EventId, GenerationId, IdGenerator, IdentityError,
-    ModId, NpcTurnRequestId, ObjectId, SaveId, SessionId, SystemIdGenerator, TranscriptItemId,
-    WorldId,
+    ActionId, ActorId, ContentDefinitionId, EventId, FailureId, GenerationId, IdGenerator,
+    IdentityError, ModId, NpcTurnRequestId, ObjectId, SaveId, SessionId, SystemIdGenerator,
+    TranscriptItemId, WorldId,
 };
 pub use numeric::{Fixed, FixedError, WorldTime};
 pub use persistence::{

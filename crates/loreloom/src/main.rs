@@ -114,7 +114,7 @@ name = "LORELOOM_TEST_MISSING_NPC_SECRET_A70B67F1"
             OsString::from("hello"),
         ])
         .expect_err("missing Secret must fail");
-        assert!(matches!(error, AppError::Provider));
+        assert!(matches!(error, AppError::Provider(_)));
         assert!(!save_path.exists());
     }
 }

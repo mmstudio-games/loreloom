@@ -149,6 +149,7 @@ runtime_id!(SaveId, "sav");
 runtime_id!(GenerationId, "gen");
 runtime_id!(NpcTurnRequestId, "ntr");
 runtime_id!(TranscriptItemId, "trn");
+runtime_id!(FailureId, "err");
 
 /// A semantic view of an [`ObjectId`] known to identify a character.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -414,6 +415,8 @@ mod tests {
     fn runtime_ids_require_canonical_prefixed_v7() {
         let id: ObjectId = format!("obj_{V7}").parse().expect("valid object id");
         assert_eq!(id.to_string(), format!("obj_{V7}"));
+        let failure: FailureId = format!("err_{V7}").parse().expect("valid failure id");
+        assert_eq!(failure.to_string(), format!("err_{V7}"));
         assert!(format!("act_{V7}").parse::<ObjectId>().is_err());
         assert!(
             "obj_01890F6A-2B3C-7D4E-8F90-123456789ABC"

@@ -1,5 +1,7 @@
 use thiserror::Error;
 
+use loreloom_agent::{ModelFailureDiagnostic, ModelFailureStage, ModelInvocationKind};
+
 #[derive(Debug, Error)]
 pub enum AppError {
     #[error("invalid command line: {0}")]
@@ -18,8 +20,8 @@ pub enum AppError {
     ConfigCodec,
     #[error("application configuration is invalid: {0}")]
     ConfigPolicy(&'static str),
-    #[error("provider configuration or request failed")]
-    Provider,
+    #[error("provider setup failed: {0}")]
+    Provider(ModelFailureDiagnostic),
     #[error(transparent)]
     Store(#[from] loreloom_store::StoreError),
     #[error(transparent)]
@@ -37,7 +39,11 @@ pub enum AppError {
 }
 
 impl From<armillae_llm::BridgeError> for AppError {
-    fn from(_error: armillae_llm::BridgeError) -> Self {
-        Self::Provider
+    fn from(error: armillae_llm::BridgeError) -> Self {
+        Self::Provider(ModelFailureDiagnostic::from_bridge_error(
+            ModelInvocationKind::ProviderSetup,
+            ModelFailureStage::Configuration,
+            &error,
+        ))
     }
 }
