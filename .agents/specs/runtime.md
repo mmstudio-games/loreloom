@@ -565,7 +565,14 @@ pub enum StackPolicy {
 `IndependentInstances` 每次创建新 ID 且受 Definition maximum instances 限制。Intensity merge 固定由
 Definition 选择 `keep`、`replace` 或 `maximum`。Duration 只允许 `permanent` 或非零 finite ticks；
 periodic effect 声明非零 interval 和白名单 Effect plan，按 `(next_tick, definition_id, instance_id)`
-稳定执行。过期、周期 Effect 与 stack 变化在同一 candidate cascade 中 all-or-reject。
+稳定执行。`AdvanceTime` 必须让 Working World Clock 按跨越的 scheduler boundary 前进；每个 boundary
+先按 `(definition_id, instance_id)` 执行该 tick 的 periodic Effect，再重新读取 Condition 并按同一
+顺序过期仍满足 `expires_at <= boundary` 的实例。因而 `next_periodic_at == expires_at` 时固定先执行
+一次 periodic，再过期；periodic Effect 作用于该实例的 `target_id`，下一次 tick 从本次 scheduled
+tick checked-add interval 计算，而不是从 Command 最终时间重新起算。跨越多个 interval 时逐次执行，
+不能合并为一次 Effect。每次周期执行生成包含 instance ID 与 scheduled WorldTime 的结构化
+`ConditionTicked` Event；最终 Clock 再前进到 Command 目标时间。过期、周期 Effect、stack/refresh、
+Event、Rule cascade 和最终 Clock 更新属于同一 candidate，任一失败全部回滚。
 
 互相可并存的角色状态必须使用正交类型：
 
@@ -1118,7 +1125,7 @@ pub struct ResourceView {
 
 pub struct ConditionView {
     pub condition: ConditionRecord,
-    pub display_name: DisplayName,
+    pub display_name: Option<DisplayName>,
     pub symptoms: Vec<ShortText>,
 }
 
@@ -1138,6 +1145,13 @@ pub struct SkillView {
 的 map；`known_facts` 使用 owner 已过滤的 `Vec<KnownFactRecord>`。Condition symptom 只包含
 `minimum_intensity <= instance.intensity` 的当前可感知文本。Resource maximum 是 effective maximum。
 这些都是可丢弃投影，不能写回存档。
+
+Condition 诊断固定使用普通 KnownFact，而不向 ConditionRecord 增加观察者相关字段。观察者 Actor 的
+Fact 满足以下全部条件时，才投影对应 Condition 的真实 `display_name`：subject 为 Condition target
+Actor Object、predicate 为引擎内置 `games.loreloom.core:tag/diagnosed_condition` Tag Definition、value
+为该 Condition Definition ID 的 `FactValue::Tag`、status 为 `confirmed`。否则 `display_name` 为
+`None`，只投影当前 intensity 允许的 symptoms；TUI 使用本地通用占位文本，Agent 不接收真实名称。
+Believed/disputed/forgotten、其它 owner、其它 target 或其它 Condition ID 均不构成诊断。
 
 `NpcTurnStatus` wire 值固定为 `completed | stale | rejected | cancelled | budget_exhausted | failed`；
 `observed_revision` 对未开始的结果为 `None`，开始投影成功后为 `Some`。`NarratorPlan`、
@@ -1276,16 +1290,27 @@ pub struct ContentOrigin {
 ```rust
 pub struct NpcGenerationRequest {
     pub scene_id: ObjectId,
-    pub role: NpcRole,
-    pub purpose: String,
-    pub desired_traits: Vec<TraitId>,
+    pub role: ShortText,
+    pub purpose: LongText,
+    pub desired_traits: BTreeSet<ContentDefinitionId>,
     pub importance: NarrativeImportance,
+}
+
+pub enum NarrativeImportance {
+    Ambient,
+    Supporting,
+    Principal,
 }
 
 pub struct GeneratedOrigin {
     pub generation_id: GenerationId,
-    pub generator_version: String,
-    pub source_event: EventId,
+    pub generator_version: ShortText,
+    pub source: GenerationSource,
+}
+
+pub enum GenerationSource {
+    PlayerInput { transcript_id: TranscriptItemId },
+    WorldEvent { event_id: EventId },
 }
 ```
 
@@ -1354,6 +1379,24 @@ pub struct NarratorNpcDecision {
     pub assignment: Option<NpcAssignment>,
 }
 
+pub enum NpcTarget {
+    Existing {
+        actor_id: ActorId,
+    },
+    Preset {
+        character_id: ContentDefinitionId,
+        place_id: ObjectId,
+    },
+    Generated {
+        generation_policy_id: ContentDefinitionId,
+        place_id: ObjectId,
+        request: NpcGenerationRequest,
+    },
+    Mentioned {
+        display_name: DisplayName,
+    },
+}
+
 pub enum NpcNarrativeAction {
     MentionOnly,
     MaterializeLightweight,
@@ -1375,6 +1418,13 @@ pub enum NpcControllerKind {
 
 Narrator 可以在玩家明确交互时选择 NarratorProxy 或独立 NpcAgent；Runtime 不用关键词、固定
 对话轮数或硬编码“重要性”替 Narrator 做语义判断。
+
+`Existing` 只引用当前 committed Actor；`Preset` 从当前 ModLock 的 Character Definition 编译；
+`Generated` 先用 Host 已授权的 GenerationPolicy 约束请求，再通过现有 Narrator Provider 的独立
+`npc_generation` stage 产生严格 NpcDraft。该 stage 计为一个 started Agent Turn，并累计到同一
+PlayerInput 的 Model/Token/byte/time 预算，不新增 generator Provider 配置。`Mentioned` 只可与
+MentionOnly 组合。Preset/Generated 的 place 必须属于决定中的 Scene；request scene、当前 Scene 与
+place scene 必须一致。
 
 Runtime 只执行受约束决定：
 

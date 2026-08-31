@@ -39,6 +39,8 @@ OPEN 项、后续 RFC 或 P0 Spike；空 crate 不代表相关协议已经实现
 - [x] 冻结 Stable ID 与 Command/Event/RecordOp 重建权威关系；
 - [x] 冻结领域 record payload v1 Schema；record envelope、未知字段、迁移、重建、提交、后端和物理
   恢复顺序均已冻结；
+- [ ] 为 Generated provenance 实现领域 payload v1 -> v2 连续纯 migration，并保持其它 record
+  canonical 等价；
 - [x] 冻结角色、物品、技能、属性、资源、Condition、正交状态、KnownFact/Goal/Transcript Schema；
 - [x] 冻结 Character/Scene/Item/Skill 等 Content Definition v1 字段与迁移版本；
 - [x] 冻结 Mod Manifest/ModLock、Parameter、Event、Gameplay Action 与声明式 Rule 协议边界；
@@ -63,4 +65,8 @@ OPEN 项、后续 RFC 或 P0 Spike；空 crate 不代表相关协议已经实现
   Save/Session Parameter 语义和通用 Tool；
 - [x] 实现外部 Provider、严格非敏感 TOML、Environment/File Secret source、endpoint allowlist、
   Runtime/Rule/TUI budget 与无 Secret demo 回退的二进制装配；
+- [x] 实现 Condition periodic/expiry scheduler、同 tick periodic-first、target Effect 与原子 Rule
+  cascade；
+- [ ] 实现 confirmed KnownFact 驱动的 Condition 诊断投影，未诊断视图不得包含真实名称；
+- [ ] 实现 Existing/Preset/Generated/Mentioned NpcTarget、Narrator generation stage 与统一物化路径；
 - [ ] 满足 Active Spec 第 17 节全部验收条件。

@@ -425,9 +425,15 @@ impl GameWorld {
                 ids,
                 &mut declarative_budget,
             )?,
-            WorldCommandKind::AdvanceTime { ticks } => {
-                self.advance_time(actor_id, ticks, action_id, revision, ids)?
-            }
+            WorldCommandKind::AdvanceTime { ticks } => self.advance_time(
+                actor_id,
+                ticks,
+                action_id,
+                revision,
+                registry,
+                ids,
+                &mut declarative_budget,
+            )?,
             WorldCommandKind::SpawnCharacter { spec } => {
                 self.spawn_character(actor_id, *spec, action_id, revision, registry, ids)?
             }
@@ -744,7 +750,24 @@ impl GameWorld {
                     .ok_or(WorldError::WrongObjectKind {
                         id: value.0.target_id.object_id(),
                     })?;
-                require_definition(registry, &value.0.condition_id, "condition")?;
+                let definition = registry
+                    .get(&value.0.condition_id)
+                    .and_then(|entry| match &entry.definition {
+                        Definition::Condition(definition) => Some(definition),
+                        _ => None,
+                    })
+                    .ok_or_else(|| WorldError::DefinitionNotFound {
+                        id: value.0.condition_id.clone(),
+                    })?;
+                let clock = self.world_state().clock;
+                if value.0.expires_at.is_some_and(|expiry| expiry <= clock)
+                    || value.0.next_periodic_at.is_some_and(|next| next <= clock)
+                    || value.0.next_periodic_at.is_some() != definition.periodic.is_some()
+                    || value.0.expires_at.is_some()
+                        != matches!(definition.duration, DurationPolicy::Finite { .. })
+                {
+                    return invariant("condition.clock_schedule");
+                }
             } else if let Some(value) = self.world.get::<SkillGrantComponent>(*entity) {
                 self.character(value.0.owner_id)
                     .ok_or(WorldError::WrongObjectKind {
@@ -1299,31 +1322,24 @@ impl GameWorld {
         Ok((upserts, Vec::new(), events, summary("skill used")?))
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn advance_time(
         &mut self,
         actor_id: ActorId,
         ticks: u64,
         action_id: ActionId,
         revision: Revision,
+        registry: &DefinitionRegistry,
         ids: &mut impl IdGenerator,
+        budget: &mut declarative::ExecutionBudget,
     ) -> Result<ChangeParts, WorldError> {
         if ticks == 0 {
             return domain_rule("clock_advance_zero");
         }
         let from = self.world_state().clock;
         let to = from.checked_add(ticks)?;
-        self.world.resource_mut::<WorldStateResource>().0.clock = to;
+        let mut upserts = Vec::new();
         let mut deletes = Vec::new();
-        let expired = self
-            .objects
-            .iter()
-            .filter_map(|(id, entity)| {
-                self.world
-                    .get::<ConditionComponent>(*entity)
-                    .filter(|condition| condition.0.expires_at.is_some_and(|expiry| expiry <= to))
-                    .map(|_| (*id, *entity))
-            })
-            .collect::<Vec<_>>();
         let mut events = vec![event(
             ids,
             action_id,
@@ -1334,25 +1350,144 @@ impl GameWorld {
                 to: to.ticks(),
             },
         )?];
-        for (id, entity) in expired {
-            let record = self.project_entity(entity)?;
-            deletes.push(record.key()?);
-            self.world.despawn(entity);
-            self.objects.remove(&id);
-            events.push(event(
-                ids,
-                action_id,
-                actor_id,
-                revision,
-                WorldEventKind::ConditionExpired { condition_id: id },
-            )?);
+
+        while let Some(boundary) = self.next_condition_boundary(to) {
+            self.world.resource_mut::<WorldStateResource>().0.clock = boundary;
+            let periodic = self.conditions_periodic_at(boundary);
+            for (condition_id, instance_id) in periodic {
+                let entity = self.require_object(instance_id)?;
+                let condition = self
+                    .world
+                    .get::<ConditionComponent>(entity)
+                    .map(|component| component.0.clone())
+                    .ok_or(WorldError::WrongObjectKind { id: instance_id })?;
+                if condition.next_periodic_at != Some(boundary) {
+                    continue;
+                }
+                let definition = registry
+                    .get(&condition_id)
+                    .and_then(|entry| match &entry.definition {
+                        Definition::Condition(definition) => Some(definition.clone()),
+                        _ => None,
+                    })
+                    .ok_or_else(|| WorldError::DefinitionNotFound {
+                        id: condition_id.clone(),
+                    })?;
+                let periodic = definition.periodic.ok_or(WorldError::Invariant {
+                    invariant: "condition.periodic_definition",
+                })?;
+                let mut updated = condition;
+                updated.next_periodic_at =
+                    Some(boundary.checked_add(periodic.interval_ticks.get())?);
+                self.world
+                    .get_mut::<ConditionComponent>(entity)
+                    .ok_or(WorldError::WrongObjectKind { id: instance_id })?
+                    .0 = updated.clone();
+                upserts.push(DomainRecord::Condition(updated.clone()));
+                events.push(event(
+                    ids,
+                    action_id,
+                    updated.target_id,
+                    revision,
+                    WorldEventKind::ConditionTicked {
+                        condition_id: instance_id,
+                        scheduled_at: boundary,
+                    },
+                )?);
+                self.apply_effects(
+                    updated.target_id,
+                    &periodic.effects,
+                    &condition_id,
+                    action_id,
+                    revision,
+                    registry,
+                    ids,
+                    budget,
+                    &mut upserts,
+                    &mut events,
+                )?;
+            }
+
+            for (_, instance_id) in self.conditions_expiring_at(boundary) {
+                let entity = self.require_object(instance_id)?;
+                let condition = self
+                    .world
+                    .get::<ConditionComponent>(entity)
+                    .map(|component| component.0.clone())
+                    .ok_or(WorldError::WrongObjectKind { id: instance_id })?;
+                if !condition
+                    .expires_at
+                    .is_some_and(|expiry| expiry <= boundary)
+                {
+                    continue;
+                }
+                upserts.retain(|record| object_id(record) != Some(instance_id));
+                deletes.push(DomainRecord::Condition(condition.clone()).key()?);
+                self.world.despawn(entity);
+                self.objects.remove(&instance_id);
+                events.push(event(
+                    ids,
+                    action_id,
+                    condition.target_id,
+                    revision,
+                    WorldEventKind::ConditionExpired {
+                        condition_id: instance_id,
+                    },
+                )?);
+            }
         }
-        Ok((
-            vec![DomainRecord::WorldState(self.world_state().clone())],
-            deletes,
-            events,
-            summary("world clock advanced")?,
-        ))
+
+        self.world.resource_mut::<WorldStateResource>().0.clock = to;
+        upserts.push(DomainRecord::WorldState(self.world_state().clone()));
+        Ok((upserts, deletes, events, summary("world clock advanced")?))
+    }
+
+    fn next_condition_boundary(&self, to: WorldTime) -> Option<WorldTime> {
+        self.objects
+            .values()
+            .filter_map(|entity| self.world.get::<ConditionComponent>(*entity))
+            .flat_map(|condition| {
+                [condition.0.next_periodic_at, condition.0.expires_at]
+                    .into_iter()
+                    .flatten()
+            })
+            .filter(|boundary| *boundary <= to)
+            .min()
+    }
+
+    fn conditions_periodic_at(&self, boundary: WorldTime) -> Vec<(ContentDefinitionId, ObjectId)> {
+        let mut conditions = self
+            .objects
+            .iter()
+            .filter_map(|(id, entity)| {
+                self.world
+                    .get::<ConditionComponent>(*entity)
+                    .filter(|condition| condition.0.next_periodic_at == Some(boundary))
+                    .map(|condition| (condition.0.condition_id.clone(), *id))
+            })
+            .collect::<Vec<_>>();
+        conditions.sort();
+        conditions
+    }
+
+    fn conditions_expiring_at(&self, boundary: WorldTime) -> Vec<(ContentDefinitionId, ObjectId)> {
+        let mut conditions = self
+            .objects
+            .iter()
+            .filter_map(|(id, entity)| {
+                self.world
+                    .get::<ConditionComponent>(*entity)
+                    .filter(|condition| {
+                        condition
+                            .0
+                            .expires_at
+                            .is_some_and(|expiry| expiry <= boundary)
+                    })
+                    .map(|condition| (condition.0.condition_id.clone(), *id))
+            })
+            .collect::<Vec<_>>();
+        conditions.sort();
+        conditions
     }
 
     #[allow(clippy::too_many_arguments)]

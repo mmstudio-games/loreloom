@@ -1174,6 +1174,7 @@ fn world_event_type(kind: &WorldEventKind) -> Result<Option<ShortText>, WorldErr
         WorldEventKind::CharacterSpawned { .. } => "character_spawned",
         WorldEventKind::CharacterPromoted { .. } => "character_promoted",
         WorldEventKind::ConditionExpired { .. } => "condition_expired",
+        WorldEventKind::ConditionTicked { .. } => "condition_ticked",
         WorldEventKind::ResourceChanged { .. } => "resource_changed",
         WorldEventKind::ConditionApplied { .. } => "condition_applied",
         WorldEventKind::ItemGranted { .. } => "item_granted",

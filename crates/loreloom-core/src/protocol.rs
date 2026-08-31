@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     ActionId, ActorId, CharacterSpawnSpec, ContentDefinitionId, DomainError, DomainRecord, EventId,
     Fixed, ObjectId, ParameterValue, RecordKey, RecordMutation, RecordProvenance, Revision,
-    ShortText, TranscriptItemRecord, VersionedRecordOp,
+    ShortText, TranscriptItemRecord, VersionedRecordOp, WorldTime,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -119,6 +119,10 @@ pub enum WorldEventKind {
     },
     ConditionExpired {
         condition_id: ObjectId,
+    },
+    ConditionTicked {
+        condition_id: ObjectId,
+        scheduled_at: WorldTime,
     },
     ResourceChanged {
         character_id: ActorId,

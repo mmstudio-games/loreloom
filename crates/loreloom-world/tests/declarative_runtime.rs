@@ -9,9 +9,9 @@ use loreloom_content::{
     DurationPolicy, EffectDefinition, EventDefinition, EventNodeDefinition, EventOptionDefinition,
     GameplayActionDefinition, InitialCharacterController, InitialCharacterLifetime, InitialSkill,
     ItemDefinition, ParameterDefinition, ParameterPersistence, ParameterType, ParameterVisibility,
-    PredicateDefinition, ResourceCost, ResourceDefinition, ResourceMaximumPolicy, RuleDefinition,
-    SceneCharacterDefinition, SceneDefinition, SkillDefinition, SkillKind, SkillTarget,
-    StackPolicy, TriggerDefinition, parse_content_hash,
+    PeriodicEffectDefinition, PredicateDefinition, ResourceCost, ResourceDefinition,
+    ResourceMaximumPolicy, RuleDefinition, SceneCharacterDefinition, SceneDefinition,
+    SkillDefinition, SkillKind, SkillTarget, StackPolicy, TriggerDefinition, parse_content_hash,
 };
 use loreloom_core::{
     ActionId, BaseAttributes, CharacterProfile, ContentDefinitionId, DisplayName, DomainRecord,
@@ -183,11 +183,17 @@ fn fixture(limits: RuleLimits) -> Fixture {
                 },
                 intensity_policy: IntensityPolicy::Maximum,
                 duration: DurationPolicy::Finite {
-                    ticks: NonZeroU64::new(5).expect("non-zero"),
+                    ticks: NonZeroU64::new(4).expect("non-zero"),
                 },
                 symptoms: Vec::new(),
                 modifiers: Vec::new(),
-                periodic: None,
+                periodic: Some(PeriodicEffectDefinition {
+                    interval_ticks: NonZeroU64::new(2).expect("non-zero"),
+                    effects: vec![EffectDefinition::ResourceDelta {
+                        resource_id: resource_id.clone(),
+                        amount: Fixed::from_integer(-1).expect("fixed"),
+                    }],
+                }),
             }),
             Definition::Parameter(ParameterDefinition {
                 id: save_parameter.clone(),
@@ -1010,7 +1016,7 @@ fn condition_stacks_and_item_skill_grants_use_persistent_records() {
         .collect::<Vec<_>>();
     assert_eq!(conditions.len(), 1);
     assert_eq!(conditions[0].stacks.get(), 2);
-    assert_eq!(conditions[0].expires_at, Some(WorldTime::from_ticks(5)));
+    assert_eq!(conditions[0].expires_at, Some(WorldTime::from_ticks(4)));
     assert!(
         grant
             .events
@@ -1080,4 +1086,153 @@ fn world_clock_rules_execute_once_for_each_crossed_boundary() {
         .expect("clock rule state");
     assert_eq!(state.trigger_count, 2);
     assert_eq!(state.last_triggered_at, Some(WorldTime::from_ticks(5)));
+}
+
+#[test]
+fn condition_clock_runs_each_periodic_boundary_before_same_tick_expiry() {
+    let fixture = fixture(RuleLimits::default());
+    let mut world = GameWorld::from_records(
+        Revision::ZERO,
+        fixture.records.clone(),
+        fixture.config.clone(),
+        &fixture.registry,
+    )
+    .expect("world");
+    let mut ids = SystemIdGenerator;
+    world
+        .execute(
+            command(
+                &fixture,
+                Revision::ZERO,
+                "6a70",
+                WorldCommandKind::PerformGameplayAction {
+                    action_id: id("gameplay_action", "study"),
+                    arguments: BTreeMap::from([(
+                        id("action_parameter", "effort"),
+                        ParameterValue::Counter(1),
+                    )]),
+                },
+            ),
+            &fixture.registry,
+            &mut ids,
+        )
+        .expect("apply periodic condition");
+
+    let changes = world
+        .execute(
+            command(
+                &fixture,
+                Revision::new(1),
+                "6a71",
+                WorldCommandKind::AdvanceTime { ticks: 4 },
+            ),
+            &fixture.registry,
+            &mut ids,
+        )
+        .expect("advance through periodic expiry");
+    let ticks = changes
+        .events
+        .iter()
+        .filter_map(|event| match event.kind {
+            WorldEventKind::ConditionTicked { scheduled_at, .. } => Some(scheduled_at),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        ticks,
+        vec![WorldTime::from_ticks(2), WorldTime::from_ticks(4)]
+    );
+    assert!(
+        changes
+            .events
+            .iter()
+            .any(|event| matches!(event.kind, WorldEventKind::ConditionExpired { .. }))
+    );
+    assert_eq!(
+        world.character(fixture.player).expect("player").resources[&id("resource", "stamina")]
+            .current,
+        Fixed::from_integer(7).expect("fixed")
+    );
+    assert!(
+        world
+            .project_records()
+            .expect("records")
+            .iter()
+            .all(|record| !matches!(record, DomainRecord::Condition(_)))
+    );
+    assert!(
+        changes
+            .upserts
+            .iter()
+            .all(|record| !matches!(record, DomainRecord::Condition(_)))
+    );
+    assert_eq!(changes.record_ops().expect("record ops").len(), 5);
+
+    let records = world.project_records().expect("final records");
+    let rebuilt = GameWorld::from_records(
+        changes.revision,
+        records.clone(),
+        fixture.config,
+        &fixture.registry,
+    )
+    .expect("rebuild");
+    assert_eq!(rebuilt.project_records().expect("rebuilt records"), records);
+}
+
+#[test]
+fn condition_clock_rolls_back_all_boundaries_when_periodic_budget_fails() {
+    let fixture = fixture(RuleLimits::default());
+    let mut prepared = GameWorld::from_records(
+        Revision::ZERO,
+        fixture.records.clone(),
+        fixture.config.clone(),
+        &fixture.registry,
+    )
+    .expect("prepared world");
+    prepared
+        .execute(
+            command(
+                &fixture,
+                Revision::ZERO,
+                "6a72",
+                WorldCommandKind::PerformGameplayAction {
+                    action_id: id("gameplay_action", "study"),
+                    arguments: BTreeMap::from([(
+                        id("action_parameter", "effort"),
+                        ParameterValue::Counter(1),
+                    )]),
+                },
+            ),
+            &fixture.registry,
+            &mut SystemIdGenerator,
+        )
+        .expect("apply periodic condition");
+    let records = prepared.project_records().expect("prepared records");
+    let mut limited_config = fixture.config.clone();
+    limited_config.rule_limits.max_applied_effects = 1;
+    let mut world = GameWorld::from_records(
+        Revision::new(1),
+        records.clone(),
+        limited_config,
+        &fixture.registry,
+    )
+    .expect("limited world");
+
+    assert!(matches!(
+        world.execute(
+            command(
+                &fixture,
+                Revision::new(1),
+                "6a73",
+                WorldCommandKind::AdvanceTime { ticks: 4 },
+            ),
+            &fixture.registry,
+            &mut SystemIdGenerator,
+        ),
+        Err(WorldError::DomainRule {
+            rule: "rule_effect_budget"
+        })
+    ));
+    assert_eq!(world.revision(), Revision::new(1));
+    assert_eq!(world.project_records().expect("rolled back"), records);
 }

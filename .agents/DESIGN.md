@@ -1,7 +1,7 @@
 # Loreloom 设计索引
 
 > 状态：核心架构已接受；全部 P0 Spike 已完成，MVP 基础协议开始冻结
-> 更新日期：2026-08-30
+> 更新日期：2026-08-31
 > 作用：Loreloom 的权威工程设计入口，不在本文件重复 RFC 或 Spec 的细节
 
 本目录按成熟度区分 `rfcs/` 中的架构提案、`specs/` 中的工程契约和未来 `todos/` 中的实施
@@ -168,9 +168,10 @@ Loreloom Runtime ───────────────► Persistence
 39. 第一阶段所有机械数值使用全局 scale 为 `1_000_000` 的 signed i64 Fixed；中间计算使用 i128，
     乘除采用 ties-to-even，任何最终越界都拒绝完整 candidate。WorldTime 是从 0 开始、只由显式
     Command 推进的逻辑秒 tick。
-40. 持久领域状态使用 v1 typed aggregate records：World、Place/Scene、Character、Item、
+40. 持久领域状态使用 typed aggregate records：World、Place/Scene、Character、Item、
     Condition、SkillGrant、Relationship、KnownFact、Goal、EventInstance、ParameterSet、RuleState 与
-    Transcript。派生属性、背包列表、可用技能和 UI 文本不保存。
+    Transcript。派生属性、背包列表、可用技能和 UI 文本不保存；Generated provenance 扩展使用连续
+    payload migration 升到 v2，不能原地改写 v1。
 41. Content 与运行时生成共享 Core 拥有的 `CharacterSpawnSpec`；Content 拥有 Definition/NpcDraft
     Schema 与纯编译器，World 拥有结合当前状态校验并执行的 NpcFactory。Content document v1 拒绝
     未知字段，升级按 content schema version 显式迁移。
@@ -180,6 +181,12 @@ Loreloom Runtime ───────────────► Persistence
 43. Agent 长期上下文不增加隐藏 Memory 数据库：KnownFact/Goal 是决策事实，Transcript 是有状态的
     对话归档。第一阶段只做确定性、可配置的有界投影，不调用摘要模型；Narrator/NPC 文本不会自动
     写入 KnownFact。
+44. `NpcTarget` 固定区分 Existing、Preset、Generated 与 Mentioned；Generated NPC 的 Draft 使用现有
+    Narrator Provider 的独立 generation stage，并消费同一整轮编排预算，不增加隐式第三 Provider。
+    Generated provenance 明确引用触发本次生成的 PlayerInput Transcript 或 WorldEvent。
+45. Condition Clock 在 periodic 与 expiry 同 tick 时先执行 periodic，再重新校验并执行 expiry；周期
+    Effect 作用于 Condition target。诊断不写回 Condition，而使用观察者拥有、以目标 Actor 为 subject、
+    Condition Definition 为 value 的 confirmed KnownFact 决定是否投影真实名称。
 
 项目方已于 2026-08-29 明确确认第 18–23 项的 Mod 子系统方向。该确认把 Content Mod、Rule Mod、
 统一导入路径、类型化参数、结构化 Event Option、通用 Gameplay Tool、ModLock 和 Extension Mod
@@ -209,8 +216,9 @@ workspace、版本管理和仓库目录约定。尚未冻结的精确协议转�
 - Mod Package Manifest、命名空间、依赖解析、显式 Patch、内容哈希、信任来源和资源限额；
 - Event/Rule/Parameter Schema、Predicate/Effect 白名单、规则执行顺序和 Gameplay Action 协议；
 - Extension Mod 是否采用 WASM Component、Host API、Capability、签名与存档兼容边界；
-- NarratorNpcDecision、Scene cleanup、Agent 化资源门禁和持久引用升级规则已冻结；具体预算值是
-  Host 配置，不进入模型/Mod wire；
+- NarratorNpcDecision、NpcTarget、Scene cleanup、Agent 化资源门禁和持久引用升级规则已冻结；
+  Generated Draft 复用 Narrator Provider 的独立预算阶段，具体预算值是 Host 配置，不进入模型/Mod
+  wire；
 - Store 各领域 payload Schema，以及最终 AGPL 兼容分发方式；record envelope、重建事实源、
   migration 顺序与未知字段策略已冻结；
 - 一个玩家输入、Agent Step、ToolCall、WorldCommand 和世界提交之间的原子性；
