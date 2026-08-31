@@ -14,7 +14,8 @@ use loreloom_content::{
 use loreloom_core::{
     AttributeOperation, AutonomyMode, BaseAttributes, CharacterController, CharacterLifetime,
     CharacterProfile, ContentDefinitionId, DisplayName, EventId, FactSubject, FactValue, Fixed,
-    GeneratedOrigin, GenerationId, ModId, ObjectId, ParameterValue, ShortText, SpawnConstraints,
+    GeneratedOrigin, GenerationId, GenerationSource, ModId, ObjectId, ParameterValue, ShortText,
+    SpawnConstraints,
 };
 use semver::Version;
 
@@ -349,9 +350,11 @@ fn runtime_draft_uses_trusted_generation_policy_and_same_spawn_spec() {
                 .parse::<GenerationId>()
                 .expect("generation id"),
             generator_version: text("draft-v1"),
-            source_event: "evt_01890f6a-2b3f-7d4e-8f90-123456789abc"
-                .parse::<EventId>()
-                .expect("event id"),
+            source: GenerationSource::WorldEvent {
+                event_id: "evt_01890f6a-2b3f-7d4e-8f90-123456789abc"
+                    .parse::<EventId>()
+                    .expect("event id"),
+            },
         },
         scene_id,
         place_id,

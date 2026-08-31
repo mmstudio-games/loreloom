@@ -6,7 +6,7 @@ use std::{
 use loreloom_core::{
     ActionId, DomainRecord, EventId, RecordEnvelope, Revision, SaveManifest, TranscriptItemId,
     TranscriptItemRecord, VersionedRecordOp, WorldCommand, WorldEvent, decode_domain_records,
-    rebuild_records,
+    migrate_domain_records, rebuild_records,
 };
 use serde::Serialize;
 use serde_json::{Value as JsonValue, json};
@@ -44,6 +44,14 @@ pub struct LoadedSave {
     pub records: Vec<DomainRecord>,
     pub events: Vec<WorldEvent>,
     pub transcripts: Vec<TranscriptItemRecord>,
+    migration_required: bool,
+}
+
+impl LoadedSave {
+    #[must_use]
+    pub const fn requires_migration(&self) -> bool {
+        self.migration_required
+    }
 }
 
 pub struct SaveStore {
@@ -322,6 +330,7 @@ impl SaveStore {
         if rebuilt_revision != revision {
             return integrity("rebuilt_revision");
         }
+        let (records, migration_required) = migrate_domain_records(&records)?;
         let typed = decode_domain_records(&records)?;
         let records = typed.values().cloned().collect::<Vec<_>>();
         validate_world_identity(&manifest, &records)?;
@@ -343,6 +352,7 @@ impl SaveStore {
             records,
             events,
             transcripts,
+            migration_required,
         })
     }
 
@@ -350,6 +360,7 @@ impl SaveStore {
         validate_world_identity(&self.manifest, records)?;
         let (envelopes, _) = checkpoint_records(records, self.revision)?;
         let loaded = self.load().await?;
+        let migration_required = loaded.requires_migration();
         let (durable_envelopes, _) = checkpoint_records(&loaded.records, self.revision)?;
         if envelopes != durable_envelopes {
             return integrity("checkpoint_projection");
@@ -377,19 +388,38 @@ impl SaveStore {
             });
         }
         match CheckpointRow::get_by_id(&mut tx, &id).await {
-            Ok(existing) => {
-                let same = existing.save_id == self.manifest.save_id.to_string()
-                    && existing.revision == revision_i64
+            Ok(mut existing) => {
+                let same_identity = existing.save_id == self.manifest.save_id.to_string()
+                    && existing.revision == revision_i64;
+                let valid_existing = existing.id == id
+                    && checkpoint_checksum(self.revision, &existing.records)? == existing.checksum;
+                let same = same_identity
+                    && valid_existing
                     && existing.records == records_json
                     && existing.checksum == checksum;
-                tx.rollback()
+                if same {
+                    tx.rollback().await.map_err(|error| {
+                        StoreError::backend("rollback existing checkpoint", error)
+                    })?;
+                    return Ok(());
+                }
+                if !same_identity || !valid_existing || !migration_required {
+                    tx.rollback().await.map_err(|error| {
+                        StoreError::backend("rollback conflicting checkpoint", error)
+                    })?;
+                    return integrity("checkpoint_identity");
+                }
+                existing
+                    .update()
+                    .records(records_json)
+                    .checksum(checksum)
+                    .exec(&mut tx)
                     .await
-                    .map_err(|error| StoreError::backend("rollback existing checkpoint", error))?;
-                return if same {
-                    Ok(())
-                } else {
-                    integrity("checkpoint_identity")
-                };
+                    .map_err(|error| StoreError::backend("upgrade migrated checkpoint", error))?;
+                tx.commit()
+                    .await
+                    .map_err(|error| StoreError::backend("commit migrated checkpoint", error))?;
+                return Ok(());
             }
             Err(error) if error.is_record_not_found() => {}
             Err(error) => return Err(StoreError::backend("read checkpoint identity", error)),
@@ -1081,4 +1111,211 @@ fn transcript_row_id(revision: Revision, transcript_id: TranscriptItemId) -> Str
 
 fn integrity<T>(item: &'static str) -> Result<T, StoreError> {
     Err(StoreError::Integrity { item })
+}
+
+#[cfg(test)]
+mod tests {
+    use loreloom_core::{
+        ActorId, ExecutionChangeSet, ModLock, RecordMutation, SAVE_FORMAT_V1, SaveId,
+        SchemaVersion, ShortText, WorldCommandKind, WorldEventKind, WorldId, WorldStateRecord,
+        WorldTime,
+    };
+    use tempfile::TempDir;
+
+    use super::*;
+
+    fn parse<T: std::str::FromStr>(value: &str) -> T
+    where
+        T::Err: std::fmt::Debug,
+    {
+        value.parse().expect("fixture id")
+    }
+
+    fn fixture() -> (SaveManifest, DomainRecord, ActorId) {
+        let actor = parse("obj_01890f6a-2b70-7d4e-8f90-123456789abc");
+        let world_id = parse::<WorldId>("wld_01890f6a-2b71-7d4e-8f90-123456789abc");
+        (
+            SaveManifest {
+                format_version: SAVE_FORMAT_V1,
+                save_id: parse::<SaveId>("sav_01890f6a-2b72-7d4e-8f90-123456789abc"),
+                world_id,
+                mod_lock: ModLock::default(),
+            },
+            DomainRecord::WorldState(WorldStateRecord {
+                id: world_id,
+                player_actor: actor,
+                active_scene: parse("obj_01890f6a-2b73-7d4e-8f90-123456789abc"),
+                clock: WorldTime::ZERO,
+                rng_seed: [9; 32],
+            }),
+            actor,
+        )
+    }
+
+    fn legacy_envelope(envelope: RecordEnvelope) -> RecordEnvelope {
+        RecordEnvelope::new(
+            envelope.record_type().clone(),
+            SchemaVersion::V1,
+            envelope.record_id().clone(),
+            envelope.revision(),
+            envelope.payload().clone(),
+            envelope.provenance().cloned(),
+        )
+        .expect("legacy envelope")
+    }
+
+    fn advance_request(
+        actor: ActorId,
+        state: WorldStateRecord,
+    ) -> Result<CommitRequest, StoreError> {
+        let action_id = parse("act_01890f6a-2b74-7d4e-8f90-123456789abc");
+        let command = WorldCommand {
+            action_id,
+            actor_id: actor,
+            expected_revision: Revision::ZERO,
+            kind: WorldCommandKind::AdvanceTime { ticks: 1 },
+        };
+        CommitRequest::from_execution(
+            command,
+            ExecutionChangeSet {
+                action_id,
+                expected_revision: Revision::ZERO,
+                revision: Revision::new(1),
+                upserts: vec![DomainRecord::WorldState(WorldStateRecord {
+                    clock: WorldTime::from_ticks(1),
+                    ..state
+                })],
+                deletes: Vec::new(),
+                events: vec![WorldEvent {
+                    id: parse("evt_01890f6a-2b75-7d4e-8f90-123456789abc"),
+                    action_id,
+                    actor_id: actor,
+                    revision: Revision::new(1),
+                    kind: WorldEventKind::ClockAdvanced { from: 0, to: 1 },
+                }],
+                safe_summary: ShortText::new("legacy migration fixture").expect("safe summary"),
+            },
+        )
+    }
+
+    #[tokio::test]
+    async fn legacy_head_checkpoint_loads_then_publishes_v2_atomically() {
+        let directory = TempDir::new().expect("temporary save parent");
+        let path = directory.path().join("save");
+        let (manifest, initial, _) = fixture();
+        let mut store = SaveStore::create(&path, manifest.clone(), vec![initial.clone()])
+            .await
+            .expect("create save");
+        let checkpoint = load_checkpoint(&mut store.db, &manifest, Revision::ZERO)
+            .await
+            .expect("load current checkpoint");
+        let legacy = checkpoint
+            .records
+            .into_iter()
+            .map(legacy_envelope)
+            .collect::<Vec<_>>();
+        let legacy_json = to_json(&legacy, "encode legacy checkpoint").expect("legacy JSON");
+        let legacy_checksum =
+            checkpoint_checksum(Revision::ZERO, &legacy_json).expect("legacy checksum");
+        let mut row = CheckpointRow::get_by_id(&mut store.db, checkpoint_row_id(Revision::ZERO))
+            .await
+            .expect("load checkpoint row");
+        row.update()
+            .records(legacy_json)
+            .checksum(legacy_checksum)
+            .exec(&mut store.db)
+            .await
+            .expect("write legacy checkpoint");
+
+        let loaded = store.load().await.expect("load migrated save");
+        assert!(loaded.requires_migration());
+        assert_eq!(loaded.records, vec![initial]);
+        let still_legacy = load_checkpoint(&mut store.db, &manifest, Revision::ZERO)
+            .await
+            .expect("legacy checkpoint remains recoverable");
+        assert!(
+            still_legacy
+                .records
+                .iter()
+                .all(|record| record.schema_version() == SchemaVersion::V1)
+        );
+        store
+            .checkpoint(&loaded.records)
+            .await
+            .expect("publish migrated checkpoint");
+        let reloaded = store.load().await.expect("reload v2 save");
+        assert!(!reloaded.requires_migration());
+        let checkpoint = load_checkpoint(&mut store.db, &manifest, Revision::ZERO)
+            .await
+            .expect("load v2 checkpoint");
+        assert!(
+            checkpoint
+                .records
+                .iter()
+                .all(|record| record.schema_version() == SchemaVersion::V2)
+        );
+
+        drop(store);
+    }
+
+    #[tokio::test]
+    async fn legacy_record_op_migrates_after_rebuild_and_compacts_at_head() {
+        let directory = TempDir::new().expect("temporary save parent");
+        let path = directory.path().join("save");
+        let (manifest, initial, actor) = fixture();
+        let DomainRecord::WorldState(state) = initial.clone() else {
+            unreachable!("fixture world state")
+        };
+        let mut store = SaveStore::create(&path, manifest.clone(), vec![initial])
+            .await
+            .expect("create save");
+        let request = advance_request(actor, state).expect("advance request");
+        assert!(matches!(
+            store.commit(&request).await.expect("commit revision one"),
+            CommitResult::Committed(_)
+        ));
+
+        let mut row = RecordOpRow::get_by_id(&mut store.db, record_op_row_id(Revision::new(1), 0))
+            .await
+            .expect("load record operation");
+        let mut operation: VersionedRecordOp =
+            from_json(&row.payload, "decode test record operation").expect("record operation");
+        let RecordMutation::Upsert { record } = operation.mutation else {
+            panic!("upsert operation")
+        };
+        operation.mutation = RecordMutation::Upsert {
+            record: legacy_envelope(record),
+        };
+        let payload = to_json(&operation, "encode legacy record operation").expect("legacy op");
+        let checksum = record_op_checksum_parts(
+            &manifest.save_id.to_string(),
+            Revision::new(1),
+            0,
+            &operation.action_id.to_string(),
+            &payload,
+        )
+        .expect("legacy op checksum");
+        row.update()
+            .payload(payload)
+            .checksum(checksum)
+            .exec(&mut store.db)
+            .await
+            .expect("write legacy record operation");
+
+        let loaded = store.load().await.expect("load rebuilt migration");
+        assert!(loaded.requires_migration());
+        let DomainRecord::WorldState(loaded_state) = &loaded.records[0] else {
+            panic!("loaded world state")
+        };
+        assert_eq!(loaded_state.clock, WorldTime::from_ticks(1));
+        store
+            .checkpoint(&loaded.records)
+            .await
+            .expect("compact migrated head");
+        let reloaded = store.load().await.expect("reload compacted save");
+        assert!(!reloaded.requires_migration());
+        assert_eq!(reloaded.revision, Revision::new(1));
+
+        drop(store);
+    }
 }

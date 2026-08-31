@@ -84,8 +84,12 @@ impl WorldService {
             return Err(RuntimeError::ContentLockMismatch);
         }
         let loaded = store.load().await?;
+        let migration_required = loaded.requires_migration();
         let world =
             GameWorld::from_records(loaded.revision, loaded.records, config.clone(), &registry)?;
+        if migration_required {
+            store.checkpoint(&world.project_records()?).await?;
+        }
         Ok(Arc::new(Self {
             inner: Mutex::new(RuntimeWorld {
                 world,

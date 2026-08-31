@@ -86,7 +86,14 @@ pub struct ContentOrigin {
 pub struct GeneratedOrigin {
     pub generation_id: GenerationId,
     pub generator_version: ShortText,
-    pub source_event: EventId,
+    pub source: GenerationSource,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum GenerationSource {
+    PlayerInput { transcript_id: TranscriptItemId },
+    WorldEvent { event_id: EventId },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

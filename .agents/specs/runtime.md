@@ -289,6 +289,15 @@ Provider/墙钟/随机 I/O，逐步保留 stable identity，并在全部 record�
 通过后才在一个显式事务/checkpoint 中发布升级结果；缺失步骤和 downgrade 均拒绝。原存档在完整
 升级发布前保持可恢复。
 
+当前领域 payload Schema 为 v2。v1 -> v2 的唯一语义变化是把任意
+`EntityOrigin::Generated.origin.source_event: EventId` 替换为
+`source: { type: "world_event", event_id: EventId }`；因为 v1 只能表达 Event 来源，不得在 migration
+中猜测为 PlayerInput。没有该 Generated origin 的 record 必须执行 payload canonical 等价的 identity
+step，但仍显式升级 envelope `schema_version`。Store 必须在 checksum 验证和 checkpoint + RecordOp
+重建之后、typed decode 之前执行这条连续链；Runtime 只有在精确 ModLock、全部 typed record、跨引用
+和 World 不变量验证通过后，才可在当前 committed Revision 的单个显式事务中发布 canonical v2
+checkpoint。发布失败不得覆盖或删除仍可用于恢复的旧 checkpoint/RecordOp。
+
 后端可以用原生 JSON 保存版本化 payload，但“原生 JSON”只是无损存储表示，不授权任意无 Schema
 属性袋。嵌套对象和数组由具体 codec 明确约束；领域数值只使用有范围的 integer 或第 6.4 节 Fixed，
 不保存 JSON float。`null` 只允许出现在 Schema 显式 nullable 的字段，普通 `Option` 缺失使用字段

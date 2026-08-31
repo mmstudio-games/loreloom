@@ -39,7 +39,7 @@ OPEN 项、后续 RFC 或 P0 Spike；空 crate 不代表相关协议已经实现
 - [x] 冻结 Stable ID 与 Command/Event/RecordOp 重建权威关系；
 - [x] 冻结领域 record payload v1 Schema；record envelope、未知字段、迁移、重建、提交、后端和物理
   恢复顺序均已冻结；
-- [ ] 为 Generated provenance 实现领域 payload v1 -> v2 连续纯 migration，并保持其它 record
+- [x] 为 Generated provenance 实现领域 payload v1 -> v2 连续纯 migration，并保持其它 record
   canonical 等价；
 - [x] 冻结角色、物品、技能、属性、资源、Condition、正交状态、KnownFact/Goal/Transcript Schema；
 - [x] 冻结 Character/Scene/Item/Skill 等 Content Definition v1 字段与迁移版本；

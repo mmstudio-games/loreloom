@@ -191,6 +191,7 @@ pub struct SchemaVersion(NonZeroU32);
 
 impl SchemaVersion {
     pub const V1: Self = Self(NonZeroU32::MIN);
+    pub const V2: Self = Self(NonZeroU32::new(2).expect("two is non-zero"));
 
     pub fn new(value: u32) -> Result<Self, RecordError> {
         NonZeroU32::new(value)
