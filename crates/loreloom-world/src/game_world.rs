@@ -5,16 +5,16 @@ use std::{
 
 use bevy_ecs::{entity::Entity, prelude::Resource, world::World};
 use loreloom_content::{
-    Definition, DefinitionRegistry, DurationPolicy, EffectDefinition, ItemDefinition, SkillKind,
-    SkillTarget,
+    CharacterCompileRequest, Definition, DefinitionRegistry, DurationPolicy, EffectDefinition,
+    InitialCharacterLifetime, ItemDefinition, SceneSpawnPlan, SkillKind, SkillTarget,
 };
 use loreloom_core::{
-    ActionId, ActorId, CharacterController, CharacterLifetime, CharacterRecord, ConditionRecord,
-    ContentDefinitionId, DomainRecord, EntityOrigin, EventId, ExecutionChangeSet, Fixed,
-    GoalRecord, GoalStatus, IdGenerator, ItemRecord, KnownFactRecord, LifeState, ObjectId,
+    ActionId, ActorId, CharacterController, CharacterLifetime, CharacterRecord, CharacterSpawnSpec,
+    ConditionRecord, ContentDefinitionId, DomainRecord, EntityOrigin, EventId, ExecutionChangeSet,
+    Fixed, GoalRecord, GoalStatus, IdGenerator, ItemRecord, KnownFactRecord, LifeState, ObjectId,
     PlaceRecord, Posture, RecordKey, Revision, SceneRecord, ShortText, SkillGrantRecord,
     SkillSource, StackState, TranscriptItemRecord, WorldCommand, WorldCommandKind, WorldEvent,
-    WorldEventKind, WorldStateRecord,
+    WorldEventKind, WorldId, WorldStateRecord, WorldTime,
 };
 
 use crate::{
@@ -32,6 +32,15 @@ pub struct WorldConfig {
     pub spawn_system_definition: ContentDefinitionId,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorldBootstrap {
+    pub world_id: WorldId,
+    pub records: Vec<DomainRecord>,
+    pub active_scene: ObjectId,
+    pub player_actor: ActorId,
+    pub characters: BTreeMap<ShortText, ActorId>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Resource)]
 struct WorldStateResource(WorldStateRecord);
 
@@ -44,6 +53,126 @@ pub struct GameWorld {
 }
 
 impl GameWorld {
+    pub fn bootstrap(
+        plan: &SceneSpawnPlan,
+        rng_seed: [u8; 32],
+        registry: &DefinitionRegistry,
+        config: WorldConfig,
+        ids: &mut impl IdGenerator,
+    ) -> Result<WorldBootstrap, WorldError> {
+        let world_id = WorldId::generate_with(ids)?;
+        let scene_id = ObjectId::generate_with(ids)?;
+
+        let mut places = plan.places.clone();
+        places.sort_by(|left, right| left.definition_id.cmp(&right.definition_id));
+        let mut place_ids = BTreeMap::new();
+        for place in &places {
+            if place_ids
+                .insert(place.definition_id.clone(), ObjectId::generate_with(ids)?)
+                .is_some()
+            {
+                return invariant("bootstrap.place_definition_unique");
+            }
+        }
+        let entry_place =
+            place_ids
+                .get(&plan.entry_place)
+                .copied()
+                .ok_or(WorldError::Invariant {
+                    invariant: "bootstrap.entry_place",
+                })?;
+
+        let mut entries = plan.characters.clone();
+        entries.sort_by(|left, right| left.local_key.cmp(&right.local_key));
+        let mut characters = BTreeMap::new();
+        for entry in &entries {
+            if characters
+                .insert(
+                    entry.local_key.clone(),
+                    ActorId::from(ObjectId::generate_with(ids)?),
+                )
+                .is_some()
+            {
+                return invariant("bootstrap.character_local_key_unique");
+            }
+        }
+        let players = entries
+            .iter()
+            .filter(|entry| entry.controller == CharacterController::Player)
+            .collect::<Vec<_>>();
+        if players.len() != 1 {
+            return invariant("bootstrap.exactly_one_player");
+        }
+        let player_actor = characters[&players[0].local_key];
+
+        let mut records = vec![
+            DomainRecord::WorldState(WorldStateRecord {
+                id: world_id,
+                player_actor,
+                active_scene: scene_id,
+                clock: WorldTime::ZERO,
+                rng_seed,
+            }),
+            DomainRecord::Scene(SceneRecord {
+                id: scene_id,
+                display_name: plan.display_name.clone(),
+                framing: plan.framing.clone(),
+                entry_place,
+                active: true,
+                origin: plan.origin.clone(),
+            }),
+        ];
+        records.extend(places.into_iter().map(|place| {
+            DomainRecord::Place(PlaceRecord {
+                id: place_ids[&place.definition_id],
+                scene_id,
+                display_name: place.display_name,
+                description: place.description,
+                tags: place.tags,
+                origin: place.origin,
+            })
+        }));
+        for entry in entries {
+            let place_id =
+                place_ids
+                    .get(&entry.place_id)
+                    .copied()
+                    .ok_or(WorldError::Invariant {
+                        invariant: "bootstrap.character_place",
+                    })?;
+            let lifetime = match entry.lifetime {
+                InitialCharacterLifetime::Scene => CharacterLifetime::Scene { scene_id },
+                InitialCharacterLifetime::Persistent => CharacterLifetime::Persistent,
+            };
+            let spec = registry.compile_character(
+                &entry.character_id,
+                CharacterCompileRequest {
+                    scene_id,
+                    place_id,
+                    controller: entry.controller,
+                    lifetime,
+                },
+            )?;
+            records.extend(materialize_character_records(
+                spec,
+                characters[&entry.local_key],
+                WorldTime::ZERO,
+                registry,
+                &config,
+                ids,
+            )?);
+        }
+        records.sort_by_key(domain_sort_key);
+        Self::from_records(Revision::ZERO, records.iter().cloned(), config, registry)?;
+        Ok(WorldBootstrap {
+            world_id,
+            records,
+            active_scene: scene_id,
+            player_actor,
+            characters,
+        })
+    }
+
     pub fn from_records(
         revision: Revision,
         records: impl IntoIterator<Item = DomainRecord>,
@@ -971,7 +1100,7 @@ impl GameWorld {
     fn spawn_character(
         &mut self,
         actor_id: ActorId,
-        spec: loreloom_core::CharacterSpawnSpec,
+        spec: CharacterSpawnSpec,
         action_id: ActionId,
         revision: Revision,
         registry: &DefinitionRegistry,
@@ -986,221 +1115,16 @@ impl GameWorld {
         {
             return domain_rule("spawn_lifetime_scene_mismatch");
         }
-        if spec.controller == CharacterController::Agent && spec.agent_binding.is_none() {
-            return domain_rule("spawn_agent_binding_missing");
-        }
-        if spec.inventory.len() > spec.trusted_constraints.maximum_items as usize
-            || spec.skills.len() > spec.trusted_constraints.maximum_skills as usize
-        {
-            return domain_rule("spawn_budget_exceeded");
-        }
         let character_id = ActorId::from(ObjectId::generate_with(ids)?);
-        let inventory_root_id = ObjectId::generate_with(ids)?;
-        let root_entry = registry
-            .get(&self.config.inventory_root_definition)
-            .ok_or_else(|| WorldError::DefinitionNotFound {
-                id: self.config.inventory_root_definition.clone(),
-            })?;
-        let Definition::Item(root_definition) = &root_entry.definition else {
-            return Err(WorldError::DefinitionNotFound {
-                id: self.config.inventory_root_definition.clone(),
-            });
-        };
-        let root_container = root_definition.container.ok_or(WorldError::DomainRule {
-            rule: "inventory_root_definition_not_container",
-        })?;
-        let root = ItemRecord {
-            id: inventory_root_id,
-            definition_id: root_definition.id.clone(),
-            stack: StackState(NonZeroU32::MIN),
-            durability: root_definition
-                .durability
-                .map(|value| loreloom_core::Durability {
-                    current: value.maximum,
-                    maximum: value.maximum,
-                }),
-            container: Some(loreloom_core::ContainerState {
-                max_weight_grams: root_container.max_weight_grams,
-                max_children: root_container.max_children,
-            }),
-            contained_by: None,
-            owned_by: Some(character_id),
-            equipped: None,
-            located_at: Some(spec.placement.place_id),
-            custom_name: None,
-            bound_actor: Some(character_id),
-            parameters: BTreeMap::new(),
-            instance_adjustments: Vec::new(),
-            origin: EntityOrigin::Content {
-                origin: root_entry.origin.clone(),
-            },
-        };
-        let character = CharacterRecord {
-            id: character_id,
-            display_name: spec.display_name.clone(),
-            profile: spec.profile.clone(),
-            controller: spec.controller,
-            lifetime: spec.lifetime,
-            location: spec.placement.place_id,
-            inventory_root: inventory_root_id,
-            agent_binding: spec.agent_binding.clone(),
-            base_attributes: spec.attributes.clone(),
-            attribute_adjustments: Vec::new(),
-            resources: spec.resources.clone(),
-            life_state: LifeState::Alive,
-            action_state: loreloom_core::ActionState::Idle,
-            posture: Posture::Standing,
-            origin: spec.origin.clone(),
-        };
-        let mut records = vec![DomainRecord::Character(character), DomainRecord::Item(root)];
-        let mut local_items = BTreeMap::new();
-        let mut inventory = spec.inventory.clone();
-        inventory.sort_by(|left, right| left.local_key.cmp(&right.local_key));
-        for item in &inventory {
-            if local_items
-                .insert(item.local_key.clone(), ObjectId::generate_with(ids)?)
-                .is_some()
-            {
-                return domain_rule("spawn_duplicate_item_local_key");
-            }
-        }
-        for item in inventory {
-            let id = local_items[&item.local_key];
-            let parent = match &item.parent_local_key {
-                Some(key) => local_items
-                    .get(key)
-                    .copied()
-                    .ok_or(WorldError::DomainRule {
-                        rule: "spawn_item_parent_missing",
-                    })?,
-                None => inventory_root_id,
-            };
-            let entry = registry.get(&item.definition_id).ok_or_else(|| {
-                WorldError::DefinitionNotFound {
-                    id: item.definition_id.clone(),
-                }
-            })?;
-            let Definition::Item(definition) = &entry.definition else {
-                return Err(WorldError::DefinitionNotFound {
-                    id: item.definition_id,
-                });
-            };
-            if item.quantity.get() > definition.stack_limit.get()
-                || (definition.container.is_some() && item.quantity.get() != 1)
-            {
-                return domain_rule("spawn_item_stack_invalid");
-            }
-            records.push(DomainRecord::Item(item_from_definition(
-                id,
-                parent,
-                character_id,
-                item.quantity,
-                definition,
-                &entry.origin,
-            )));
-        }
         let clock = self.world_state().clock;
-        let mut conditions = spec.conditions.clone();
-        conditions.sort_by(|left, right| left.condition_id.cmp(&right.condition_id));
-        for condition in conditions {
-            let entry = registry.get(&condition.condition_id).ok_or_else(|| {
-                WorldError::DefinitionNotFound {
-                    id: condition.condition_id.clone(),
-                }
-            })?;
-            let Definition::Condition(definition) = &entry.definition else {
-                return Err(WorldError::DefinitionNotFound {
-                    id: condition.condition_id,
-                });
-            };
-            let expires_at = match definition.duration {
-                DurationPolicy::Permanent => None,
-                DurationPolicy::Finite { ticks } => Some(clock.checked_add(ticks.get())?),
-            };
-            let next_periodic_at = definition
-                .periodic
-                .as_ref()
-                .map(|periodic| clock.checked_add(periodic.interval_ticks.get()))
-                .transpose()?;
-            records.push(DomainRecord::Condition(ConditionRecord {
-                id: ObjectId::generate_with(ids)?,
-                target_id: character_id,
-                condition_id: definition.id.clone(),
-                source: condition.source,
-                stacks: condition.stacks,
-                intensity: condition.intensity,
-                applied_at: clock,
-                expires_at,
-                next_periodic_at,
-                origin: EntityOrigin::Content {
-                    origin: entry.origin.clone(),
-                },
-            }));
-        }
-        let mut skills = spec.skills.clone();
-        skills.sort_by(|left, right| left.skill_id.cmp(&right.skill_id));
-        for skill in skills {
-            let entry =
-                registry
-                    .get(&skill.skill_id)
-                    .ok_or_else(|| WorldError::DefinitionNotFound {
-                        id: skill.skill_id.clone(),
-                    })?;
-            if !matches!(entry.definition, Definition::Skill(_)) {
-                return Err(WorldError::DefinitionNotFound { id: skill.skill_id });
-            }
-            let source = match &spec.origin {
-                EntityOrigin::Content { origin } => SkillSource::CharacterDefinition {
-                    definition_id: origin.definition_id.clone(),
-                },
-                EntityOrigin::Generated { .. } | EntityOrigin::System { .. } => SkillSource::Rule {
-                    rule_id: self.config.spawn_system_definition.clone(),
-                },
-            };
-            records.push(DomainRecord::SkillGrant(SkillGrantRecord {
-                id: ObjectId::generate_with(ids)?,
-                owner_id: character_id,
-                skill_id: skill.skill_id,
-                rank: skill.rank,
-                proficiency: skill.proficiency,
-                source,
-                enabled: skill.enabled,
-                ready_at: None,
-                origin: EntityOrigin::Content {
-                    origin: entry.origin.clone(),
-                },
-            }));
-        }
-        for fact in spec.knowledge {
-            records.push(DomainRecord::KnownFact(KnownFactRecord {
-                id: ObjectId::generate_with(ids)?,
-                owner_id: character_id,
-                subject: fact.subject,
-                predicate_id: fact.predicate_id,
-                value: fact.value,
-                status: fact.status,
-                confidence: fact.confidence,
-                source: fact.source,
-                first_known_at: clock,
-                last_confirmed_at: clock,
-            }));
-        }
-        for goal in spec.goals {
-            records.push(DomainRecord::Goal(GoalRecord {
-                id: ObjectId::generate_with(ids)?,
-                owner_id: character_id,
-                description: goal.description,
-                priority: goal.priority,
-                status: GoalStatus::Active,
-                source: goal.source,
-                updated_at: clock,
-            }));
-        }
+        let records =
+            materialize_character_records(spec, character_id, clock, registry, &self.config, ids)?;
+        let mut candidate_ids = BTreeSet::new();
         for record in &records {
-            record.validate()?;
-        }
-        for record in records.iter().cloned() {
-            self.spawn_record(record)?;
+            let id = object_id(record).ok_or(WorldError::WorldState)?;
+            if !candidate_ids.insert(id) || self.objects.contains_key(&id) {
+                return Err(WorldError::DuplicateIdentity);
+            }
         }
         let event = event(
             ids,
@@ -1209,12 +1133,11 @@ impl GameWorld {
             revision,
             WorldEventKind::CharacterSpawned { character_id },
         )?;
-        Ok((
-            records,
-            Vec::new(),
-            vec![event],
-            summary("character spawned")?,
-        ))
+        let safe_summary = summary("character spawned")?;
+        for record in records.iter().cloned() {
+            self.spawn_record(record)?;
+        }
+        Ok((records, Vec::new(), vec![event], safe_summary))
     }
 
     fn promote_character(
@@ -1305,6 +1228,399 @@ type ChangeParts = (
     Vec<WorldEvent>,
     ShortText,
 );
+
+fn materialize_character_records(
+    spec: CharacterSpawnSpec,
+    character_id: ActorId,
+    clock: WorldTime,
+    registry: &DefinitionRegistry,
+    config: &WorldConfig,
+    ids: &mut impl IdGenerator,
+) -> Result<Vec<DomainRecord>, WorldError> {
+    if let CharacterLifetime::Scene { scene_id } = spec.lifetime
+        && scene_id != spec.placement.scene_id
+    {
+        return domain_rule("spawn_lifetime_scene_mismatch");
+    }
+    if (spec.controller == CharacterController::Agent) != spec.agent_binding.is_some() {
+        return domain_rule("spawn_agent_binding");
+    }
+    validate_spawn_constraints(&spec, registry)?;
+    for tag in &spec.profile.narrative_tags {
+        require_definition(registry, tag, "tag")?;
+    }
+    for (resource_id, pool) in &spec.resources {
+        if resource_id != &pool.resource_id {
+            return domain_rule("spawn_resource_key");
+        }
+        let entry = registry
+            .get(resource_id)
+            .ok_or_else(|| WorldError::DefinitionNotFound {
+                id: resource_id.clone(),
+            })?;
+        let Definition::Resource(definition) = &entry.definition else {
+            return Err(WorldError::DefinitionNotFound {
+                id: resource_id.clone(),
+            });
+        };
+        if pool.current < definition.minimum
+            || pool.current > pool.base_maximum
+            || pool.base_maximum > definition.maximum
+        {
+            return domain_rule("spawn_resource_range");
+        }
+    }
+
+    let inventory_root_id = ObjectId::generate_with(ids)?;
+    let root_entry = registry
+        .get(&config.inventory_root_definition)
+        .ok_or_else(|| WorldError::DefinitionNotFound {
+            id: config.inventory_root_definition.clone(),
+        })?;
+    let Definition::Item(root_definition) = &root_entry.definition else {
+        return Err(WorldError::DefinitionNotFound {
+            id: config.inventory_root_definition.clone(),
+        });
+    };
+    let root_container = root_definition.container.ok_or(WorldError::DomainRule {
+        rule: "inventory_root_definition_not_container",
+    })?;
+    let root = ItemRecord {
+        id: inventory_root_id,
+        definition_id: root_definition.id.clone(),
+        stack: StackState(NonZeroU32::MIN),
+        durability: root_definition
+            .durability
+            .map(|value| loreloom_core::Durability {
+                current: value.maximum,
+                maximum: value.maximum,
+            }),
+        container: Some(loreloom_core::ContainerState {
+            max_weight_grams: root_container.max_weight_grams,
+            max_children: root_container.max_children,
+        }),
+        contained_by: None,
+        owned_by: Some(character_id),
+        equipped: None,
+        located_at: Some(spec.placement.place_id),
+        custom_name: None,
+        bound_actor: Some(character_id),
+        parameters: BTreeMap::new(),
+        instance_adjustments: Vec::new(),
+        origin: EntityOrigin::Content {
+            origin: root_entry.origin.clone(),
+        },
+    };
+    let character = CharacterRecord {
+        id: character_id,
+        display_name: spec.display_name.clone(),
+        profile: spec.profile.clone(),
+        controller: spec.controller,
+        lifetime: spec.lifetime,
+        location: spec.placement.place_id,
+        inventory_root: inventory_root_id,
+        agent_binding: spec.agent_binding.clone(),
+        base_attributes: spec.attributes.clone(),
+        attribute_adjustments: Vec::new(),
+        resources: spec.resources.clone(),
+        life_state: LifeState::Alive,
+        action_state: loreloom_core::ActionState::Idle,
+        posture: Posture::Standing,
+        origin: spec.origin.clone(),
+    };
+    let mut records = vec![DomainRecord::Character(character), DomainRecord::Item(root)];
+
+    let mut local_items = BTreeMap::new();
+    let mut inventory = spec.inventory;
+    inventory.sort_by(|left, right| left.local_key.cmp(&right.local_key));
+    for item in &inventory {
+        if local_items
+            .insert(item.local_key.clone(), ObjectId::generate_with(ids)?)
+            .is_some()
+        {
+            return domain_rule("spawn_duplicate_item_local_key");
+        }
+    }
+    for item in inventory {
+        let id = local_items[&item.local_key];
+        let parent = match &item.parent_local_key {
+            Some(key) => local_items
+                .get(key)
+                .copied()
+                .ok_or(WorldError::DomainRule {
+                    rule: "spawn_item_parent_missing",
+                })?,
+            None => inventory_root_id,
+        };
+        let entry =
+            registry
+                .get(&item.definition_id)
+                .ok_or_else(|| WorldError::DefinitionNotFound {
+                    id: item.definition_id.clone(),
+                })?;
+        let Definition::Item(definition) = &entry.definition else {
+            return Err(WorldError::DefinitionNotFound {
+                id: item.definition_id,
+            });
+        };
+        if item.quantity.get() > definition.stack_limit.get()
+            || (definition.container.is_some() && item.quantity.get() != 1)
+        {
+            return domain_rule("spawn_item_stack_invalid");
+        }
+        records.push(DomainRecord::Item(item_from_definition(
+            id,
+            parent,
+            character_id,
+            item.quantity,
+            definition,
+            &entry.origin,
+        )));
+    }
+
+    let mut conditions = spec.conditions;
+    conditions.sort_by(|left, right| left.condition_id.cmp(&right.condition_id));
+    for condition in conditions {
+        let entry = registry.get(&condition.condition_id).ok_or_else(|| {
+            WorldError::DefinitionNotFound {
+                id: condition.condition_id.clone(),
+            }
+        })?;
+        let Definition::Condition(definition) = &entry.definition else {
+            return Err(WorldError::DefinitionNotFound {
+                id: condition.condition_id,
+            });
+        };
+        let expires_at = match definition.duration {
+            DurationPolicy::Permanent => None,
+            DurationPolicy::Finite { ticks } => Some(clock.checked_add(ticks.get())?),
+        };
+        let next_periodic_at = definition
+            .periodic
+            .as_ref()
+            .map(|periodic| clock.checked_add(periodic.interval_ticks.get()))
+            .transpose()?;
+        records.push(DomainRecord::Condition(ConditionRecord {
+            id: ObjectId::generate_with(ids)?,
+            target_id: character_id,
+            condition_id: definition.id.clone(),
+            source: condition.source,
+            stacks: condition.stacks,
+            intensity: condition.intensity,
+            applied_at: clock,
+            expires_at,
+            next_periodic_at,
+            origin: EntityOrigin::Content {
+                origin: entry.origin.clone(),
+            },
+        }));
+    }
+
+    let mut skills = spec.skills;
+    skills.sort_by(|left, right| left.skill_id.cmp(&right.skill_id));
+    for skill in skills {
+        let entry =
+            registry
+                .get(&skill.skill_id)
+                .ok_or_else(|| WorldError::DefinitionNotFound {
+                    id: skill.skill_id.clone(),
+                })?;
+        if !matches!(entry.definition, Definition::Skill(_)) {
+            return Err(WorldError::DefinitionNotFound { id: skill.skill_id });
+        }
+        let source = match &spec.origin {
+            EntityOrigin::Content { origin } => SkillSource::CharacterDefinition {
+                definition_id: origin.definition_id.clone(),
+            },
+            EntityOrigin::Generated { .. } | EntityOrigin::System { .. } => SkillSource::Rule {
+                rule_id: config.spawn_system_definition.clone(),
+            },
+        };
+        records.push(DomainRecord::SkillGrant(SkillGrantRecord {
+            id: ObjectId::generate_with(ids)?,
+            owner_id: character_id,
+            skill_id: skill.skill_id,
+            rank: skill.rank,
+            proficiency: skill.proficiency,
+            source,
+            enabled: skill.enabled,
+            ready_at: None,
+            origin: EntityOrigin::Content {
+                origin: entry.origin.clone(),
+            },
+        }));
+    }
+
+    for fact in spec.knowledge {
+        require_definition(registry, &fact.predicate_id, "predicate")?;
+        records.push(DomainRecord::KnownFact(KnownFactRecord {
+            id: ObjectId::generate_with(ids)?,
+            owner_id: character_id,
+            subject: fact.subject,
+            predicate_id: fact.predicate_id,
+            value: fact.value,
+            status: fact.status,
+            confidence: fact.confidence,
+            source: fact.source,
+            first_known_at: clock,
+            last_confirmed_at: clock,
+        }));
+    }
+    for goal in spec.goals {
+        records.push(DomainRecord::Goal(GoalRecord {
+            id: ObjectId::generate_with(ids)?,
+            owner_id: character_id,
+            description: goal.description,
+            priority: goal.priority,
+            status: GoalStatus::Active,
+            source: goal.source,
+            updated_at: clock,
+        }));
+    }
+    validate_candidate_inventory(&records, registry)?;
+    for record in &records {
+        record.validate()?;
+    }
+    Ok(records)
+}
+
+fn validate_spawn_constraints(
+    spec: &CharacterSpawnSpec,
+    registry: &DefinitionRegistry,
+) -> Result<(), WorldError> {
+    let constraints = &spec.trusted_constraints;
+    if spec.inventory.len() > constraints.maximum_items as usize
+        || spec.skills.len() > constraints.maximum_skills as usize
+    {
+        return domain_rule("spawn_budget_exceeded");
+    }
+    for definition_id in spec
+        .conditions
+        .iter()
+        .map(|value| &value.condition_id)
+        .chain(spec.inventory.iter().map(|value| &value.definition_id))
+        .chain(spec.skills.iter().map(|value| &value.skill_id))
+    {
+        if !constraints.allowed_definitions.contains(definition_id) {
+            return domain_rule("spawn_definition_not_allowed");
+        }
+    }
+    if constraints.maximum_attribute_points < Fixed::ZERO
+        || constraints.minimum_attributes.keys().any(|id| {
+            constraints
+                .maximum_attributes
+                .get(id)
+                .is_none_or(|maximum| constraints.minimum_attributes[id] > *maximum)
+        })
+        || constraints
+            .maximum_attributes
+            .keys()
+            .any(|id| !constraints.minimum_attributes.contains_key(id))
+    {
+        return domain_rule("spawn_attribute_schema");
+    }
+    let mut points = Fixed::ZERO;
+    for (attribute_id, value) in &spec.attributes.0 {
+        require_definition(registry, attribute_id, "attribute")?;
+        let minimum = constraints
+            .minimum_attributes
+            .get(attribute_id)
+            .copied()
+            .ok_or(WorldError::DomainRule {
+                rule: "spawn_attribute_minimum",
+            })?;
+        let maximum = constraints
+            .maximum_attributes
+            .get(attribute_id)
+            .copied()
+            .ok_or(WorldError::DomainRule {
+                rule: "spawn_attribute_maximum",
+            })?;
+        if minimum > maximum || *value < minimum || *value > maximum {
+            return domain_rule("spawn_attribute_range");
+        }
+        points = points.checked_add(value.checked_sub(minimum)?)?;
+    }
+    if points > constraints.maximum_attribute_points {
+        return domain_rule("spawn_attribute_points");
+    }
+    Ok(())
+}
+
+fn validate_candidate_inventory(
+    records: &[DomainRecord],
+    registry: &DefinitionRegistry,
+) -> Result<(), WorldError> {
+    let items = records
+        .iter()
+        .filter_map(|record| match record {
+            DomainRecord::Item(item) => Some((item.id, item)),
+            _ => None,
+        })
+        .collect::<BTreeMap<_, _>>();
+    for item in items.values() {
+        if let Some(parent_id) = item.contained_by {
+            let parent = items
+                .get(&parent_id)
+                .ok_or(WorldError::WrongObjectKind { id: parent_id })?;
+            if parent.container.is_none() {
+                return domain_rule("spawn_item_parent_not_container");
+            }
+        }
+    }
+    for item in items.values() {
+        let Some(capacity) = item.container else {
+            continue;
+        };
+        let children = items
+            .values()
+            .filter(|child| child.contained_by == Some(item.id))
+            .collect::<Vec<_>>();
+        if children.len() > capacity.max_children as usize {
+            return domain_rule("spawn_container_child_capacity");
+        }
+        let mut weight = Fixed::ZERO;
+        for child in children {
+            weight = weight.checked_add(candidate_item_tree_weight(
+                child.id,
+                &items,
+                registry,
+                &mut BTreeSet::new(),
+            )?)?;
+        }
+        if weight > capacity.max_weight_grams {
+            return domain_rule("spawn_container_weight_capacity");
+        }
+    }
+    Ok(())
+}
+
+fn candidate_item_tree_weight(
+    item_id: ObjectId,
+    items: &BTreeMap<ObjectId, &ItemRecord>,
+    registry: &DefinitionRegistry,
+    visited: &mut BTreeSet<ObjectId>,
+) -> Result<Fixed, WorldError> {
+    if !visited.insert(item_id) {
+        return invariant("spawn_item_container_cycle");
+    }
+    let item = items
+        .get(&item_id)
+        .ok_or(WorldError::WrongObjectKind { id: item_id })?;
+    let definition = item_definition(registry, &item.definition_id)?;
+    let quantity = Fixed::from_integer(i64::from(item.stack.0.get()))?;
+    let mut total = definition.unit_weight_grams.checked_mul(quantity)?;
+    for child in items
+        .values()
+        .filter(|child| child.contained_by == Some(item_id))
+    {
+        total = total.checked_add(candidate_item_tree_weight(
+            child.id, items, registry, visited,
+        )?)?;
+    }
+    visited.remove(&item_id);
+    Ok(total)
+}
 
 fn object_id(record: &DomainRecord) -> Option<ObjectId> {
     match record {

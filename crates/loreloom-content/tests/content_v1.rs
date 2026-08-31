@@ -4,11 +4,11 @@ use loreloom_content::{
     AgentProfileDefinition, AttributeDefinition, CONTENT_SCHEMA_V1, CharacterCompileRequest,
     CharacterDefinition, ContentDocument, ContentError, ContentPackContext, Definition,
     DefinitionRegistry, DraftCompileRequest, EffectDefinition, GameplayActionDefinition,
-    GenerationPolicy, InitialItem, InitialResource, ItemDefinition, NpcDraft, ParameterDefinition,
-    ParameterPersistence, ParameterType, ParameterVisibility, PlaceDefinition, ResourceCost,
-    ResourceDefinition, ResourceMaximumPolicy, RuleDefinition, SceneCharacterDefinition,
-    SceneDefinition, SkillDefinition, SkillKind, SkillTarget, TriggerDefinition,
-    parse_content_hash,
+    GenerationPolicy, InitialCharacterController, InitialCharacterLifetime, InitialItem,
+    InitialResource, ItemDefinition, NpcDraft, ParameterDefinition, ParameterPersistence,
+    ParameterType, ParameterVisibility, PlaceDefinition, ResourceCost, ResourceDefinition,
+    ResourceMaximumPolicy, RuleDefinition, SceneCharacterDefinition, SceneDefinition,
+    SkillDefinition, SkillKind, SkillTarget, TriggerDefinition, parse_content_hash,
 };
 use loreloom_core::{
     AttributeOperation, AutonomyMode, BaseAttributes, CharacterController, CharacterLifetime,
@@ -64,6 +64,8 @@ fn fixture_document() -> ContentDocument {
                     local_key: text("mara"),
                     character_id: character_id.clone(),
                     place_id: place_id.clone(),
+                    controller: InitialCharacterController::Player,
+                    lifetime: InitialCharacterLifetime::Persistent,
                 }],
             }),
             Definition::Character(CharacterDefinition {
@@ -205,6 +207,60 @@ fn content_v1_builds_deterministic_registry_and_compiles_spawn_spec() {
 }
 
 #[test]
+fn content_v1_compiles_an_owned_deterministic_scene_plan() {
+    let registry =
+        DefinitionRegistry::build(context(), [fixture_document()]).expect("build registry");
+    let plan = registry
+        .compile_scene(&id("scene", "harbor"))
+        .expect("compile scene");
+
+    assert_eq!(plan.definition_id, id("scene", "harbor"));
+    assert_eq!(plan.entry_place, id("place", "quay"));
+    assert_eq!(plan.places.len(), 1);
+    assert_eq!(plan.places[0].definition_id, id("place", "quay"));
+    assert_eq!(plan.characters.len(), 1);
+    assert_eq!(plan.characters[0].local_key, text("mara"));
+    assert_eq!(plan.characters[0].controller, CharacterController::Player);
+    assert_eq!(
+        plan.characters[0].lifetime,
+        InitialCharacterLifetime::Persistent
+    );
+}
+
+#[test]
+fn content_v1_rejects_duplicate_scene_keys_and_agent_entries_without_profiles() {
+    let mut duplicate = fixture_document();
+    let Definition::Scene(scene) = &mut duplicate.definitions[0] else {
+        panic!("fixture scene position");
+    };
+    scene.characters.push(scene.characters[0].clone());
+    assert!(matches!(
+        DefinitionRegistry::build(context(), [duplicate]),
+        Err(ContentError::InvalidValue {
+            field: "scene.character.local_key",
+            ..
+        })
+    ));
+
+    let mut unbound_agent = fixture_document();
+    let Definition::Scene(scene) = &mut unbound_agent.definitions[0] else {
+        panic!("fixture scene position");
+    };
+    scene.characters[0].controller = InitialCharacterController::Agent;
+    let Definition::Character(character) = &mut unbound_agent.definitions[1] else {
+        panic!("fixture character position");
+    };
+    character.agent_profile = None;
+    assert!(matches!(
+        DefinitionRegistry::build(context(), [unbound_agent]),
+        Err(ContentError::InvalidValue {
+            field: "scene.character.agent_profile",
+            ..
+        })
+    ));
+}
+
+#[test]
 fn content_v1_rejects_unknown_fields_and_wrong_definition_kind() {
     let mut value = serde_json::to_value(fixture_document()).expect("serialize document");
     value
@@ -230,7 +286,12 @@ fn content_v1_rejects_missing_cross_reference_before_registry_publish() {
     let Definition::Character(character) = &mut document.definitions[1] else {
         panic!("fixture character position");
     };
-    character.inventory[0].item_id = id("item", "missing");
+    let missing = id("item", "missing");
+    character.inventory[0].item_id = missing.clone();
+    character
+        .spawn_constraints
+        .allowed_definitions
+        .insert(missing);
     assert!(matches!(
         DefinitionRegistry::build(context(), [document]),
         Err(ContentError::InvalidReference { .. })

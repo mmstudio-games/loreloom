@@ -2,18 +2,19 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use loreloom_core::{
     AgentBinding, CharacterController, CharacterLifetime, CharacterSpawnSpec, ConditionGrantInput,
-    ConditionSource, ContentDefinitionId, ContentHash, ContentOrigin, DomainValueError,
-    EntityOrigin, FactSource, Fixed, GeneratedOrigin, GoalInput, GoalSource, ItemGrantInput,
-    KnowledgeStatus, KnownFactInput, ModId, PlacementInput, ResourcePool, ShortText,
-    SkillGrantInput,
+    ConditionSource, ContentDefinitionId, ContentHash, ContentOrigin, DisplayName,
+    DomainValueError, EntityOrigin, FactSource, Fixed, GeneratedOrigin, GoalInput, GoalSource,
+    ItemGrantInput, KnowledgeStatus, KnownFactInput, ModId, PlacementInput, ResourcePool,
+    ShortText, SkillGrantInput,
 };
 use semver::Version;
 use thiserror::Error;
 
 use crate::schema::{
     CharacterDefinition, ContentDocument, Definition, EffectDefinition, EventDefinition,
-    GenerationPolicy, NpcDraft, ParameterDefinition, ParameterType, PredicateDefinition, SkillKind,
-    SkillTarget, TriggerDefinition,
+    GenerationPolicy, InitialCharacterController, InitialCharacterLifetime, NpcDraft,
+    ParameterDefinition, ParameterType, PredicateDefinition, SkillKind, SkillTarget,
+    TriggerDefinition,
 };
 
 pub const CONTENT_SCHEMA_V1: u32 = 1;
@@ -50,6 +51,11 @@ pub enum ContentError {
     },
     #[error("character definition {id} cannot be compiled: {reason}")]
     CompileCharacter {
+        id: ContentDefinitionId,
+        reason: &'static str,
+    },
+    #[error("scene definition {id} cannot be compiled: {reason}")]
+    CompileScene {
         id: ContentDefinitionId,
         reason: &'static str,
     },
@@ -97,6 +103,35 @@ pub struct DraftCompileRequest {
     pub place_id: loreloom_core::ObjectId,
     pub controller: CharacterController,
     pub lifetime: CharacterLifetime,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScenePlaceSpawnPlan {
+    pub definition_id: ContentDefinitionId,
+    pub display_name: DisplayName,
+    pub description: ShortText,
+    pub tags: BTreeSet<ContentDefinitionId>,
+    pub origin: ContentOrigin,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SceneCharacterSpawnPlan {
+    pub local_key: ShortText,
+    pub character_id: ContentDefinitionId,
+    pub place_id: ContentDefinitionId,
+    pub controller: CharacterController,
+    pub lifetime: InitialCharacterLifetime,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SceneSpawnPlan {
+    pub definition_id: ContentDefinitionId,
+    pub display_name: DisplayName,
+    pub framing: ShortText,
+    pub entry_place: ContentDefinitionId,
+    pub places: Vec<ScenePlaceSpawnPlan>,
+    pub characters: Vec<SceneCharacterSpawnPlan>,
+    pub origin: ContentOrigin,
 }
 
 impl DefinitionRegistry {
@@ -180,6 +215,80 @@ impl DefinitionRegistry {
 
     pub fn iter(&self) -> impl Iterator<Item = (&ContentDefinitionId, &RegisteredDefinition)> {
         self.definitions.iter()
+    }
+
+    pub fn compile_scene(&self, id: &ContentDefinitionId) -> Result<SceneSpawnPlan, ContentError> {
+        let entry = self
+            .definitions
+            .get(id)
+            .ok_or_else(|| ContentError::CompileScene {
+                id: id.clone(),
+                reason: "definition is missing",
+            })?;
+        let Definition::Scene(scene) = &entry.definition else {
+            return Err(ContentError::CompileScene {
+                id: id.clone(),
+                reason: "definition is not a scene",
+            });
+        };
+        let mut places = Vec::with_capacity(scene.places.len());
+        for place_id in &scene.places {
+            let Some(place_entry) = self.definitions.get(place_id) else {
+                return Err(ContentError::CompileScene {
+                    id: id.clone(),
+                    reason: "place is unavailable",
+                });
+            };
+            let Definition::Place(place) = &place_entry.definition else {
+                return Err(ContentError::CompileScene {
+                    id: id.clone(),
+                    reason: "place has the wrong kind",
+                });
+            };
+            places.push(ScenePlaceSpawnPlan {
+                definition_id: place.id.clone(),
+                display_name: place.display_name.clone(),
+                description: place.description.clone(),
+                tags: place.tags.clone(),
+                origin: place_entry.origin.clone(),
+            });
+        }
+        let mut characters = scene.characters.clone();
+        characters.sort_by(|left, right| left.local_key.cmp(&right.local_key));
+        if characters
+            .iter()
+            .filter(|character| character.controller == InitialCharacterController::Player)
+            .count()
+            != 1
+        {
+            return Err(ContentError::CompileScene {
+                id: id.clone(),
+                reason: "bootstrap scene requires exactly one player",
+            });
+        }
+        Ok(SceneSpawnPlan {
+            definition_id: scene.id.clone(),
+            display_name: scene.display_name.clone(),
+            framing: scene.framing.clone(),
+            entry_place: scene.entry_place.clone(),
+            places,
+            characters: characters
+                .into_iter()
+                .map(|character| SceneCharacterSpawnPlan {
+                    local_key: character.local_key,
+                    character_id: character.character_id,
+                    place_id: character.place_id,
+                    controller: match character.controller {
+                        InitialCharacterController::Player => CharacterController::Player,
+                        InitialCharacterController::Narrator => CharacterController::NarratorProxy,
+                        InitialCharacterController::Rules => CharacterController::Rules,
+                        InitialCharacterController::Agent => CharacterController::Agent,
+                    },
+                    lifetime: character.lifetime,
+                })
+                .collect(),
+            origin: entry.origin.clone(),
+        })
     }
 
     pub fn compile_character(
@@ -453,8 +562,31 @@ fn validate_draft_references(
     if let Some(agent_profile) = &draft.agent_profile {
         require_kind(definitions, &policy.id, agent_profile, "agent_profile")?;
     }
+    for agent_profile in &policy.allowed_agent_profiles {
+        require_kind(definitions, &policy.id, agent_profile, "agent_profile")?;
+    }
+    for tag in &draft.profile.narrative_tags {
+        require_kind(definitions, &policy.id, tag, "tag")?;
+    }
     for attribute in draft.base_attributes.0.keys() {
         require_kind(definitions, &policy.id, attribute, "attribute")?;
+    }
+    for attribute in policy
+        .constraints
+        .minimum_attributes
+        .keys()
+        .chain(policy.constraints.maximum_attributes.keys())
+    {
+        require_kind(definitions, &policy.id, attribute, "attribute")?;
+    }
+    for definition_id in &policy.constraints.allowed_definitions {
+        require_any_kind(
+            definitions,
+            &policy.id,
+            definition_id,
+            &["condition", "item", "skill"],
+            "condition, item, or skill",
+        )?;
     }
     for resource in &draft.resources {
         require_kind(definitions, &policy.id, &resource.resource_id, "resource")?;
@@ -473,6 +605,9 @@ fn validate_draft_references(
     for skill in &draft.skills {
         require_kind(definitions, &policy.id, &skill.skill_id, "skill")?;
     }
+    for fact in &draft.knowledge {
+        require_kind(definitions, &policy.id, &fact.predicate_id, "predicate")?;
+    }
     Ok(())
 }
 
@@ -486,6 +621,22 @@ fn validate_draft_budget(policy: &GenerationPolicy, draft: &NpcDraft) -> Result<
     }
     if draft.skills.len() > policy.constraints.maximum_skills as usize {
         return Err(invalid("draft.skills.budget"));
+    }
+    if policy.constraints.maximum_attribute_points < Fixed::ZERO
+        || policy.constraints.minimum_attributes.keys().any(|id| {
+            policy
+                .constraints
+                .maximum_attributes
+                .get(id)
+                .is_none_or(|maximum| policy.constraints.minimum_attributes[id] > *maximum)
+        })
+        || policy
+            .constraints
+            .maximum_attributes
+            .keys()
+            .any(|id| !policy.constraints.minimum_attributes.contains_key(id))
+    {
+        return Err(invalid("draft.attribute.schema"));
     }
     let used_definitions = draft
         .conditions
@@ -594,8 +745,19 @@ fn validate_local_values(definition: &Definition) -> Result<(), ContentError> {
         Definition::Rule(value) if value.predicates.len() > 64 || value.effects.len() > 32 => {
             Err(invalid("rule.budget"))
         }
-        Definition::Scene(value) if !value.places.contains(&value.entry_place) => {
-            Err(invalid("scene.entry_place"))
+        Definition::Scene(value) => {
+            if !value.places.contains(&value.entry_place) {
+                return Err(invalid("scene.entry_place"));
+            }
+            let local_keys = value
+                .characters
+                .iter()
+                .map(|character| &character.local_key)
+                .collect::<BTreeSet<_>>();
+            if local_keys.len() != value.characters.len() {
+                return Err(invalid("scene.character.local_key"));
+            }
+            Ok(())
         }
         _ => Ok(()),
     }
@@ -703,6 +865,54 @@ fn validate_character(value: &CharacterDefinition) -> Result<(), &'static str> {
     }) {
         return Err("character.inventory.parent_local_key");
     }
+    let constraints = &value.spawn_constraints;
+    if value.inventory.len() > constraints.maximum_items as usize
+        || value.skills.len() > constraints.maximum_skills as usize
+        || constraints.maximum_attribute_points < Fixed::ZERO
+        || value
+            .conditions
+            .iter()
+            .map(|condition| &condition.condition_id)
+            .chain(value.inventory.iter().map(|item| &item.item_id))
+            .chain(value.skills.iter().map(|skill| &skill.skill_id))
+            .any(|id| !constraints.allowed_definitions.contains(id))
+    {
+        return Err("character.spawn_constraints");
+    }
+    if constraints.minimum_attributes.keys().any(|id| {
+        constraints
+            .maximum_attributes
+            .get(id)
+            .is_none_or(|maximum| constraints.minimum_attributes[id] > *maximum)
+    }) || constraints
+        .maximum_attributes
+        .keys()
+        .any(|id| !constraints.minimum_attributes.contains_key(id))
+    {
+        return Err("character.spawn_constraints.attributes");
+    }
+    let mut points = Fixed::ZERO;
+    for (attribute_id, value) in &value.base_attributes.0 {
+        let Some(minimum) = constraints.minimum_attributes.get(attribute_id) else {
+            return Err("character.spawn_constraints.attribute_minimum");
+        };
+        let Some(maximum) = constraints.maximum_attributes.get(attribute_id) else {
+            return Err("character.spawn_constraints.attribute_maximum");
+        };
+        if value < minimum || value > maximum {
+            return Err("character.spawn_constraints.attribute_range");
+        }
+        let Ok(spent) = value.checked_sub(*minimum) else {
+            return Err("character.spawn_constraints.attribute_points");
+        };
+        let Ok(total) = points.checked_add(spent) else {
+            return Err("character.spawn_constraints.attribute_points");
+        };
+        points = total;
+    }
+    if points > constraints.maximum_attribute_points {
+        return Err("character.spawn_constraints.attribute_points");
+    }
     if value
         .goals
         .iter()
@@ -774,6 +984,23 @@ fn validate_references(
                             id: owner.clone(),
                             field: "scene.character.place",
                         });
+                    }
+                    if character.controller == InitialCharacterController::Agent {
+                        let has_agent_profile = definitions
+                            .get(&character.character_id)
+                            .and_then(|entry| match &entry.definition {
+                                Definition::Character(character) => {
+                                    character.agent_profile.as_ref()
+                                }
+                                _ => None,
+                            })
+                            .is_some();
+                        if !has_agent_profile {
+                            return Err(ContentError::InvalidValue {
+                                id: owner.clone(),
+                                field: "scene.character.agent_profile",
+                            });
+                        }
                     }
                 }
             }
@@ -944,8 +1171,28 @@ fn validate_character_references(
     if let Some(agent_profile) = &character.agent_profile {
         require_kind(definitions, owner, agent_profile, "agent_profile")?;
     }
+    for tag in &character.profile.narrative_tags {
+        require_kind(definitions, owner, tag, "tag")?;
+    }
     for attribute in character.base_attributes.0.keys() {
         require_kind(definitions, owner, attribute, "attribute")?;
+    }
+    for attribute in character
+        .spawn_constraints
+        .minimum_attributes
+        .keys()
+        .chain(character.spawn_constraints.maximum_attributes.keys())
+    {
+        require_kind(definitions, owner, attribute, "attribute")?;
+    }
+    for definition_id in &character.spawn_constraints.allowed_definitions {
+        require_any_kind(
+            definitions,
+            owner,
+            definition_id,
+            &["condition", "item", "skill"],
+            "condition, item, or skill",
+        )?;
     }
     for resource in &character.resources {
         require_kind(definitions, owner, &resource.resource_id, "resource")?;
@@ -959,7 +1206,31 @@ fn validate_character_references(
     for skill in &character.skills {
         require_kind(definitions, owner, &skill.skill_id, "skill")?;
     }
+    for fact in &character.knowledge {
+        require_kind(definitions, owner, &fact.predicate_id, "predicate")?;
+    }
     Ok(())
+}
+
+fn require_any_kind(
+    definitions: &BTreeMap<ContentDefinitionId, RegisteredDefinition>,
+    owner: &ContentDefinitionId,
+    target: &ContentDefinitionId,
+    kinds: &[&str],
+    expected: &'static str,
+) -> Result<(), ContentError> {
+    if definitions
+        .get(target)
+        .is_some_and(|entry| kinds.contains(&entry.definition.expected_kind()))
+    {
+        Ok(())
+    } else {
+        Err(ContentError::InvalidReference {
+            owner: owner.clone(),
+            target: target.clone(),
+            expected,
+        })
+    }
 }
 
 fn require_kind(

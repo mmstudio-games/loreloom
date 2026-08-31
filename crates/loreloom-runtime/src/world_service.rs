@@ -1,19 +1,21 @@
-use std::sync::Arc;
+use std::{path::Path, sync::Arc};
 
 use armillae_core::{ToolCall, ToolDefinition, ToolResult, ToolResultContent};
 use armillae_tools::{BoxFuture, ToolContext, ToolExecutionError, ToolExecutor};
 use loreloom_agent::AgentToolContext;
-use loreloom_content::{Definition, DefinitionRegistry, ParameterVisibility, PredicateDefinition};
+use loreloom_content::{
+    Definition, DefinitionRegistry, ParameterVisibility, PredicateDefinition, SceneSpawnPlan,
+};
 use loreloom_core::{
     ActionId, ActiveEventView, ActorId, AttributeAdjustment, AttributeOperation, AttributeView,
     CharacterContext, CharacterController, ConditionView, DomainRecord, EventId, EventOptionView,
     InventoryView, LongText, ModLock, ObjectId, ParameterSetView, ParameterValueView, ResourceView,
-    Revision, RuntimePhase, SceneContext, SceneObservation, SessionId, SkillView,
-    SystemIdGenerator, ToolActivity, TranscriptWindow, UiNotice, UiSnapshot, VisibleActorView,
-    WorldCommand, WorldCommandKind, WorldEvent,
+    Revision, RuntimePhase, SAVE_FORMAT_V1, SaveId, SaveManifest, SceneContext, SceneObservation,
+    SessionId, SkillView, SystemIdGenerator, ToolActivity, TranscriptWindow, UiNotice, UiSnapshot,
+    VisibleActorView, WorldCommand, WorldCommandKind, WorldEvent,
 };
 use loreloom_store::{ActionResolution, CommitRequest, CommitResult, CommittedAction, SaveStore};
-use loreloom_world::{GameWorld, WorldConfig};
+use loreloom_world::{GameWorld, WorldBootstrap, WorldConfig};
 use serde_json::{Value as JsonValue, json};
 use tokio::sync::Mutex;
 
@@ -44,6 +46,32 @@ impl std::fmt::Debug for WorldService {
 }
 
 impl WorldService {
+    pub async fn create(
+        path: impl AsRef<Path>,
+        save_id: SaveId,
+        mod_lock: ModLock,
+        registry: DefinitionRegistry,
+        plan: &SceneSpawnPlan,
+        rng_seed: [u8; 32],
+        config: WorldConfig,
+    ) -> Result<(Arc<Self>, WorldBootstrap), RuntimeError> {
+        let mut ids = SystemIdGenerator;
+        let bootstrap = GameWorld::bootstrap(plan, rng_seed, &registry, config.clone(), &mut ids)?;
+        let store = SaveStore::create(
+            path,
+            SaveManifest {
+                format_version: SAVE_FORMAT_V1,
+                save_id,
+                world_id: bootstrap.world_id,
+                mod_lock: mod_lock.clone(),
+            },
+            bootstrap.records.clone(),
+        )
+        .await?;
+        let service = Self::open(store, registry, &mod_lock, config).await?;
+        Ok((service, bootstrap))
+    }
+
     pub async fn open(
         mut store: SaveStore,
         registry: DefinitionRegistry,

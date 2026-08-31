@@ -1,9 +1,11 @@
 use std::{collections::BTreeMap, num::NonZeroU32};
 
 use loreloom_content::{
-    CONTENT_SCHEMA_V1, ContainerDefinition, ContentDocument, ContentPackContext, Definition,
-    DefinitionRegistry, EquipmentSlotDefinition, ItemDefinition, ResourceCost, ResourceDefinition,
-    ResourceMaximumPolicy, SceneDefinition, SkillDefinition, SkillKind, SkillTarget,
+    AgentProfileDefinition, CONTENT_SCHEMA_V1, CharacterDefinition, ContainerDefinition,
+    ContentDocument, ContentPackContext, Definition, DefinitionRegistry, EquipmentSlotDefinition,
+    InitialCharacterController, InitialCharacterLifetime, InitialItem, InitialResource,
+    InitialSkill, ItemDefinition, ResourceCost, ResourceDefinition, ResourceMaximumPolicy,
+    SceneCharacterDefinition, SceneDefinition, SkillDefinition, SkillKind, SkillTarget,
     parse_content_hash,
 };
 use loreloom_core::{
@@ -68,6 +70,9 @@ fn fixture() -> Fixture {
     let quay_definition = definition_id("place", "quay");
     let inn_definition = definition_id("place", "inn");
     let scene_definition = definition_id("scene", "harbor");
+    let player_definition = definition_id("character", "traveler");
+    let agent_definition = definition_id("character", "warden");
+    let agent_profile = definition_id("agent_profile", "warden");
     let document = ContentDocument {
         schema_version: CONTENT_SCHEMA_V1,
         definitions: vec![
@@ -149,7 +154,99 @@ fn fixture() -> Fixture {
                     quay_definition.clone(),
                     inn_definition.clone(),
                 ]),
-                characters: Vec::new(),
+                characters: vec![
+                    SceneCharacterDefinition {
+                        local_key: text("player"),
+                        character_id: player_definition.clone(),
+                        place_id: quay_definition.clone(),
+                        controller: InitialCharacterController::Player,
+                        lifetime: InitialCharacterLifetime::Persistent,
+                    },
+                    SceneCharacterDefinition {
+                        local_key: text("warden"),
+                        character_id: agent_definition.clone(),
+                        place_id: inn_definition.clone(),
+                        controller: InitialCharacterController::Agent,
+                        lifetime: InitialCharacterLifetime::Scene,
+                    },
+                ],
+            }),
+            Definition::AgentProfile(AgentProfileDefinition {
+                id: agent_profile.clone(),
+                display_name: name("Warden"),
+                system_style: text("Guard the harbor."),
+                model_alias: text("test"),
+                tool_capabilities: Default::default(),
+                autonomy: loreloom_core::AutonomyMode::Directed,
+            }),
+            Definition::Character(CharacterDefinition {
+                id: player_definition,
+                display_name: name("Traveler"),
+                profile: CharacterProfile {
+                    summary: text("A newly arrived traveler."),
+                    values: Vec::new(),
+                    speaking_style: text("Direct."),
+                    narrative_tags: Default::default(),
+                },
+                agent_profile: None,
+                base_attributes: BaseAttributes::default(),
+                resources: vec![InitialResource {
+                    resource_id: resource_id.clone(),
+                    current: Fixed::from_integer(10).expect("fixed"),
+                    base_maximum: Fixed::from_integer(10).expect("fixed"),
+                }],
+                conditions: Vec::new(),
+                inventory: vec![InitialItem {
+                    local_key: text("coin"),
+                    item_id: coin_definition.clone(),
+                    quantity: NonZeroU32::new(3).expect("non-zero"),
+                    parent_local_key: None,
+                }],
+                skills: vec![InitialSkill {
+                    skill_id: skill_id.clone(),
+                    rank: NonZeroU32::MIN,
+                    proficiency: 0,
+                    enabled: true,
+                }],
+                knowledge: Vec::new(),
+                goals: Vec::new(),
+                spawn_constraints: SpawnConstraints {
+                    minimum_attributes: BTreeMap::new(),
+                    maximum_attributes: BTreeMap::new(),
+                    maximum_attribute_points: Fixed::ZERO,
+                    maximum_items: 1,
+                    maximum_skills: 1,
+                    allowed_definitions: std::collections::BTreeSet::from([
+                        coin_definition.clone(),
+                        skill_id.clone(),
+                    ]),
+                },
+            }),
+            Definition::Character(CharacterDefinition {
+                id: agent_definition,
+                display_name: name("Harbor Warden"),
+                profile: CharacterProfile {
+                    summary: text("A watchful harbor warden."),
+                    values: Vec::new(),
+                    speaking_style: text("Measured."),
+                    narrative_tags: Default::default(),
+                },
+                agent_profile: Some(agent_profile),
+                base_attributes: BaseAttributes::default(),
+                resources: Vec::new(),
+                conditions: Vec::new(),
+                inventory: Vec::new(),
+                skills: Vec::new(),
+                knowledge: Vec::new(),
+                goals: Vec::new(),
+                spawn_constraints: SpawnConstraints {
+                    minimum_attributes: BTreeMap::new(),
+                    maximum_attributes: BTreeMap::new(),
+                    maximum_attribute_points: Fixed::ZERO,
+                    maximum_items: 0,
+                    maximum_skills: 0,
+                    allowed_definitions: Default::default(),
+                },
             }),
         ],
     };
@@ -438,6 +535,66 @@ fn world_executes_versioned_commands_and_rebuilds_without_entity_ids() {
     )
     .expect("rebuild world");
     assert_eq!(rebuilt.project_records().expect("reproject"), projected);
+}
+
+#[test]
+fn content_scene_bootstrap_uses_the_shared_factory_and_rebuilds_at_revision_zero() {
+    let fixture = fixture();
+    let plan = fixture
+        .registry
+        .compile_scene(&definition_id("scene", "harbor"))
+        .expect("compile scene plan");
+    let mut ids = SystemIdGenerator;
+    let bootstrap = GameWorld::bootstrap(
+        &plan,
+        [7; 32],
+        &fixture.registry,
+        fixture.config.clone(),
+        &mut ids,
+    )
+    .expect("bootstrap world");
+
+    assert_eq!(bootstrap.characters.len(), 2);
+    assert_eq!(
+        bootstrap.player_actor,
+        bootstrap.characters[&text("player")]
+    );
+    assert_eq!(
+        bootstrap
+            .records
+            .iter()
+            .filter(|record| matches!(record, DomainRecord::Character(_)))
+            .count(),
+        2
+    );
+    assert_eq!(
+        bootstrap
+            .records
+            .iter()
+            .filter(|record| matches!(record, DomainRecord::Item(_)))
+            .count(),
+        3
+    );
+    assert_eq!(
+        bootstrap
+            .records
+            .iter()
+            .filter(|record| matches!(record, DomainRecord::SkillGrant(_)))
+            .count(),
+        1
+    );
+    let rebuilt = GameWorld::from_records(
+        Revision::ZERO,
+        bootstrap.records.clone(),
+        fixture.config,
+        &fixture.registry,
+    )
+    .expect("rebuild bootstrap records");
+    assert_eq!(rebuilt.revision(), Revision::ZERO);
+    assert_eq!(
+        rebuilt.project_records().expect("project bootstrap"),
+        bootstrap.records
+    );
 }
 
 #[test]

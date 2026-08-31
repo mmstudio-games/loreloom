@@ -27,6 +27,8 @@ pub enum WorldError {
     #[error(transparent)]
     Domain(#[from] DomainError),
     #[error(transparent)]
+    Content(#[from] loreloom_content::ContentError),
+    #[error(transparent)]
     Revision(#[from] RevisionError),
     #[error(transparent)]
     Fixed(#[from] FixedError),

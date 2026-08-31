@@ -17,6 +17,8 @@ pub enum AppError {
     #[error(transparent)]
     Store(#[from] loreloom_store::StoreError),
     #[error(transparent)]
+    World(#[from] loreloom_world::WorldError),
+    #[error(transparent)]
     Runtime(#[from] loreloom_runtime::RuntimeError),
     #[error(transparent)]
     Tui(#[from] loreloom_tui::TuiError),

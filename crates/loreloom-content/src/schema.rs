@@ -579,6 +579,24 @@ pub struct SceneCharacterDefinition {
     pub local_key: ShortText,
     pub character_id: ContentDefinitionId,
     pub place_id: ContentDefinitionId,
+    pub controller: InitialCharacterController,
+    pub lifetime: InitialCharacterLifetime,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InitialCharacterController {
+    Player,
+    Narrator,
+    Rules,
+    Agent,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InitialCharacterLifetime {
+    Scene,
+    Persistent,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

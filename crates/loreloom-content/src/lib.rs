@@ -12,6 +12,7 @@ pub use package::{
 
 pub use registry::{
     CONTENT_SCHEMA_V1, CharacterCompileRequest, ContentError, ContentPackContext,
-    DefinitionRegistry, DraftCompileRequest, RegisteredDefinition, parse_content_hash,
+    DefinitionRegistry, DraftCompileRequest, RegisteredDefinition, SceneCharacterSpawnPlan,
+    ScenePlaceSpawnPlan, SceneSpawnPlan, parse_content_hash,
 };
 pub use schema::*;

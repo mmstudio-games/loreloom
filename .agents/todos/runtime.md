@@ -57,7 +57,7 @@ OPEN 项、后续 RFC 或 P0 Spike；空 crate 不代表相关协议已经实现
   Runtime、World、Agent、Store、TUI 纵向切片；
 - [x] 实现正式目录 Mod package discovery、依赖/Patch/hash lock、统一内置/外部 Registry 加载与
   精确 ModLock 重开门禁；
-- [ ] 把内置/外部初始 Scene 统一编译为 spawn plan，并通过共享 NpcFactory/初始化提交物化，不再由
+- [x] 把内置/外部初始 Scene 统一编译为 spawn plan，并通过共享 NpcFactory/初始化提交物化，不再由
   demo 手工构造初始 Character/Item records；
 - [ ] 实现 Event Option、Gameplay Action 与声明式 Rule 的产品 executor 和通用 Tool；
 - [ ] 实现外部 Provider、非敏感配置与 Secret source 的二进制装配；

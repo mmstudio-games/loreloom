@@ -6,4 +6,4 @@ mod game_world;
 
 pub use components::{ObjectKind, PersistentId};
 pub use error::WorldError;
-pub use game_world::{GameWorld, WorldConfig};
+pub use game_world::{GameWorld, WorldBootstrap, WorldConfig};

@@ -1285,6 +1285,20 @@ Scene spawn plan 每个 entry 具有只在该 plan 内有效的唯一 local key�
 第二阶段才把 local key/existing ObjectId 解析为类型化关系。成功的 Content/Generated 角色使用同一
 `character_spawned` WorldEvent 和领域实例形状，Origin 只保留来源/provenance 差异。
 
+Scene Definition v1 的每个初始 Character entry 固定增加 `controller: player | narrator | rules |
+agent` 与 `lifetime: scene | persistent`；`scene` 在物化时绑定新分配的运行 Scene ObjectId，内容不能
+直接填写运行 ID。作为新 World 的 bootstrap Scene 必须恰有一个 `player` entry；`agent` entry 的
+Character Definition 必须引用 AgentProfile。entry local key、Place/Character Definition ID 都必须
+唯一或有效，并按 local key byte-order 物化。
+
+Content 的 `compile_scene` 纯生成拥有所有权的 `SceneSpawnPlan`，包含带 ContentOrigin 的 Scene/Place
+投影和有序 Character entry，不分配 Stable ID 或访问 World。World 的共享 Character Factory 同时被
+正常 `SpawnCharacter` Command 与 bootstrap 使用：Runtime 预先为 Scene、全部 Place、Character 和
+owned child 分配 Stable ID，Factory 用同一 CharacterSpawnSpec、Definition 校验、物品/Condition/
+Skill/Knowledge/Goal 物化逻辑生成 candidate records。全部 records 必须能在 Revision 0 重建并通过
+World 不变量后，才由 Save create 的单个显式事务与精确 ModLock 一起发布；任一 entry 失败不创建
+Save，也不消耗可观察的持久 ID。该初始化事务是第 10.4 节的初始化提交边界，不逐角色发布 Revision。
+
 运行时生成 NPC 在成功提交后保存完整领域状态与 GeneratedOrigin；Load 不调用模型，也不依赖
 原 Prompt 重建角色。Mod/Content version 或内容哈希不匹配时必须迁移或拒绝，不能静默使用不同
 Definition。存档 ModLock 与每个 ContentOrigin 的 mod/pack/definition/content version/hash 必须
