@@ -140,6 +140,7 @@ fn invocation<'a>(
             capabilities: Default::default(),
         },
         budget,
+        max_context_tokens: u64::MAX,
         cancellation,
     }
 }
@@ -165,6 +166,25 @@ fn product_runner_rejects_a_known_tool_that_was_not_offered_to_the_model() {
         &outcome.tool_results[0].content[..],
         [ToolResultContent::Json { value }] if value["code"] == json!("tool_not_offered")
     ));
+}
+
+#[test]
+fn product_runner_rejects_an_oversized_projected_context_before_provider_io() {
+    let executor = Arc::new(RecordingExecutor::default());
+    let runner = AgentRunner::new(executor);
+    let bridge = MockBridge::scripted([MockResponse::text("must not be called")]);
+    let cancellation = CancellationToken::new();
+    let mut invocation = invocation(&bridge, &cancellation, ResourceBudget::default());
+    invocation.max_context_tokens = 1;
+
+    let outcome = block_on(runner.run_turn(invocation));
+
+    assert_eq!(
+        outcome.status,
+        TurnStatus::BudgetExhausted(BudgetReason::InputTokens)
+    );
+    assert!(bridge.requests().expect("request log").is_empty());
+    assert_eq!(outcome.usage.model_calls, 0);
 }
 
 #[test]

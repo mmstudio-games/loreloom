@@ -25,7 +25,8 @@ use tokio::sync::Mutex;
 
 use crate::{NARRATOR_MATERIALIZE_NPC_CAPABILITY, RuntimeError};
 
-const CONTEXT_TRANSCRIPT_LIMIT: usize = 64;
+const CONTEXT_TRANSCRIPT_SOURCE_LIMIT: usize = 256;
+const UI_TRANSCRIPT_LIMIT: usize = 64;
 const CONTEXT_EVENT_LIMIT: usize = 64;
 const TOOL_PAGE_DEFAULT: usize = 32;
 const TOOL_PAGE_MAXIMUM: usize = 64;
@@ -315,8 +316,8 @@ impl WorldService {
         let player = character_context(&records, &inner.registry, player_id, revision)?;
         let scene = scene_context(&records, &inner.events, player_id, revision)?;
         let transcript = transcript_records(&records);
-        let truncated = transcript.len() > CONTEXT_TRANSCRIPT_LIMIT;
-        let recent_transcript = tail(transcript, CONTEXT_TRANSCRIPT_LIMIT);
+        let truncated = transcript.len() > CONTEXT_TRANSCRIPT_SOURCE_LIMIT;
+        let recent_transcript = tail(transcript, CONTEXT_TRANSCRIPT_SOURCE_LIMIT);
         Ok(SceneObservation {
             revision,
             session_id,
@@ -348,7 +349,10 @@ impl WorldService {
         if scene.scene_id != scene_id {
             return Err(RuntimeError::Unavailable);
         }
-        let recent = tail(transcript_records(&records), CONTEXT_TRANSCRIPT_LIMIT);
+        let recent = tail(
+            transcript_records(&records),
+            CONTEXT_TRANSCRIPT_SOURCE_LIMIT,
+        );
         Ok((character, scene, recent))
     }
 
@@ -675,7 +679,7 @@ impl WorldService {
                 &inner.registry,
             )?,
             active_events: active_event_views(&records, &inner.registry, player_id)?,
-            transcript: transcript_window(&records, CONTEXT_TRANSCRIPT_LIMIT),
+            transcript: transcript_window(&records, UI_TRANSCRIPT_LIMIT),
             tool_activity,
             phase,
             can_submit: matches!(phase, RuntimePhase::Idle | RuntimePhase::Completed),
@@ -1420,7 +1424,11 @@ fn character_context(
     let mut known_facts = records
         .iter()
         .filter_map(|record| match record {
-            DomainRecord::KnownFact(fact) if fact.owner_id == actor_id => Some(fact.clone()),
+            DomainRecord::KnownFact(fact)
+                if fact.owner_id == actor_id && fact.status != KnowledgeStatus::Forgotten =>
+            {
+                Some(fact.clone())
+            }
             _ => None,
         })
         .collect::<Vec<_>>();

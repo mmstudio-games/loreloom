@@ -24,6 +24,7 @@ use serde_json::json;
 
 use crate::{
     OrchestrationBudget, RuntimeConfig, RuntimeError, RuntimeToolExecutor, WorldService,
+    context::{project_npc_context, project_observation},
     world_service::{CharacterMaterializationRequest, PendingNpcDecision},
 };
 
@@ -138,6 +139,10 @@ impl GameRuntime {
         &mut self,
         input: LongText,
     ) -> Result<PlayerTurnOutcome, RuntimeError> {
+        self.config
+            .context_projection
+            .validate()
+            .map_err(|field| RuntimeError::InvalidConfiguration { field })?;
         let started = Instant::now();
         let mut orchestration = OrchestrationState::default();
         let mut tool_activity = Vec::new();
@@ -168,10 +173,11 @@ impl GameRuntime {
         let mut plan = loop {
             orchestration.start_round(self.config.orchestration_budget, started)?;
             orchestration.start_turn(self.config.orchestration_budget, started)?;
-            let observation = self
+            let mut observation = self
                 .service
                 .observation(self.session_id, input.clone())
                 .await?;
+            project_observation(&mut observation, self.config.context_projection);
             let planning_request = narrator_request(
                 "narrator_planning",
                 json!({
@@ -194,6 +200,7 @@ impl GameRuntime {
                         capabilities: self.config.narrator_capabilities.clone(),
                     },
                     budget: self.config.turn_budget,
+                    max_context_tokens: self.config.context_projection.max_context_tokens,
                     cancellation: &self.cancellation,
                 })
                 .await;
@@ -295,7 +302,7 @@ impl GameRuntime {
                     ));
                     continue;
                 }
-                let (character, scene, dialogue) = match self
+                let (mut character, mut scene, mut dialogue) = match self
                     .service
                     .npc_context(request.actor_id, request.scene_id)
                     .await
@@ -310,6 +317,12 @@ impl GameRuntime {
                         continue;
                     }
                 };
+                let context_truncated = project_npc_context(
+                    &mut character,
+                    &mut scene,
+                    &mut dialogue,
+                    self.config.context_projection,
+                );
                 if let Err(error) =
                     orchestration.start_turn(self.config.orchestration_budget, started)
                 {
@@ -334,6 +347,7 @@ impl GameRuntime {
                         revision: observed_revision,
                     },
                     dialogue,
+                    context_truncated,
                 )?;
                 let npc_request = agent.request(self.runner.definitions())?;
                 let turn = self
@@ -348,6 +362,7 @@ impl GameRuntime {
                             capabilities: registration.definition.allowed_tools.clone(),
                         },
                         budget: self.config.turn_budget,
+                        max_context_tokens: self.config.context_projection.max_context_tokens,
                         cancellation: &self.cancellation,
                     })
                     .await;
@@ -418,6 +433,7 @@ impl GameRuntime {
                         capabilities: self.config.narrator_capabilities.clone(),
                     },
                     budget: self.config.turn_budget,
+                    max_context_tokens: self.config.context_projection.max_context_tokens,
                     cancellation: &self.cancellation,
                 })
                 .await;
@@ -607,10 +623,11 @@ impl GameRuntime {
                     character_id,
                     place_id,
                 } => {
-                    let observation = self
+                    let mut observation = self
                         .service
                         .observation(self.session_id, player_input.clone())
                         .await?;
+                    project_observation(&mut observation, self.config.context_projection);
                     let scene_id = observation.scene.scene_id;
                     if let Some(reason) = self.materialization_limit(scene_id, false).await? {
                         outcomes.push(NpcMaterializationResult::rejected(
@@ -745,6 +762,7 @@ impl GameRuntime {
                                 capabilities: BTreeSet::new(),
                             },
                             budget: self.config.turn_budget,
+                            max_context_tokens: self.config.context_projection.max_context_tokens,
                             cancellation: &self.cancellation,
                         })
                         .await;

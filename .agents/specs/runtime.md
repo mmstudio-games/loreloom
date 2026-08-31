@@ -914,6 +914,31 @@ Context 总预算默认 32,768 tokens。Host 配置可按模型收紧这些值�
 的 4 倍；Model/Mod/Agent 请求不能改预算。超限按“安全/Tool 合约、身份、当前状态、当前输入、
 Knowledge/Goal、最近 Transcript”的保留顺序确定性裁剪，并在 Observation metadata 标记 truncation。
 
+产品 Runtime 使用以下 Host policy；`0` 可以显式关闭对应可选集合，超过默认值四倍则在配置解析
+阶段拒绝。Runtime 按 Stable ID 排序后裁剪物品、Skill、KnownFact、Goal 与可见 Actor，Transcript
+按 `(Revision, TranscriptItemId)` 保留最新窗口并同时满足条数和正文 UTF-8 byte 上限。
+`SceneObservation.truncated` 与 `NpcContext.truncated` 只表示本次投影发生裁剪，不写入 ECS/Store，
+也不允许模型通过 Tool 改写。
+
+```rust
+pub struct ContextProjectionPolicy {
+    pub transcript_items: usize,       // default 64, hard max 256
+    pub transcript_bytes: usize,       // default 64 KiB, hard max 256 KiB
+    pub known_facts: usize,            // default 256, hard max 1,024
+    pub goals: usize,                  // default 64, hard max 256
+    pub visible_actors: usize,         // default 128, hard max 512
+    pub inventory_items: usize,        // default 128, hard max 512
+    pub skills: usize,                 // default 64, hard max 256
+    pub max_context_tokens: u64,       // default 32,768, hard max 131,072
+}
+```
+
+条目裁剪先于 Provider call；`max_context_tokens` 作为单次投影的独立 Host 上限，并与 Turn 的累计
+`max_input_tokens` 同时生效。Provider 不提供调用前精确 tokenizer 时，Runtime 使用确定性、偏保守的
+UTF-8/Unicode scalar estimate 做 preflight，Provider 返回 usage 后仍以实际 token usage 执行预算
+校验。若保留安全规则、身份、当前状态、当前输入与 Tool 合约后仍超限，则在调用 Provider 前返回
+结构化 context budget error，不能继续静默裁掉这些必需内容。
+
 ## 9. Tool 规范
 
 ### 9.1 分类
@@ -1086,6 +1111,7 @@ pub struct NpcContext {
     pub scene: SceneContext,
     pub assignment: NpcAssignment,
     pub recent_dialogue: Vec<TranscriptItemRecord>,
+    pub truncated: bool,
 }
 
 pub struct NarratorPlan {

@@ -75,4 +75,8 @@ OPEN 项、后续 RFC 或 P0 Spike；空 crate 不代表相关协议已经实现
   `split_stack`、`use_skill` 接到已冻结的 WorldCommand；
 - [ ] 收敛 `promote_npc` 与 Scene cleanup 产品入口：当前 `PromoteCharacter { actor_id }` 只能改变
   lifetime，尚不能满足“与跨 Scene durable reference 在同一 Command 原子建立”的冻结约束；
+- [x] 把 Spec 8.2 的 Character/Scene/Transcript 数量与字节上限接入 Narrator/NpcAgent 产品上下文，
+  并在裁剪时投影 `truncated` metadata；当前只有 Transcript 条数受限；
+- [ ] 把 Provider streaming 接到 Runtime UI event adapter；当前 TUI 已支持确定性
+  `StreamStarted/StreamChunk/StreamFinished`，但产品 RuntimeAdapter 只发布 working/final Snapshot；
 - [ ] 满足 Active Spec 第 17 节全部验收条件。

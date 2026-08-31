@@ -12,7 +12,9 @@ use armillae_llm::{
 use armillae_llm_rig::RigBridgeFactory;
 use loreloom_agent::ResourceBudget;
 use loreloom_content::GenerationPolicy;
-use loreloom_runtime::{NpcResourcePolicy, OrchestrationBudget, RuntimeConfig};
+use loreloom_runtime::{
+    ContextProjectionPolicy, NpcResourcePolicy, OrchestrationBudget, RuntimeConfig,
+};
 use loreloom_tui::TuiConfig;
 use loreloom_world::RuleLimits;
 use serde::Deserialize;
@@ -40,6 +42,8 @@ pub struct ProductConfig {
     npc_resources: NpcResourceConfig,
     #[serde(default)]
     generation_policies: Vec<GenerationPolicy>,
+    #[serde(default)]
+    context_projection: ContextProjectionPolicy,
     #[serde(default)]
     rule_limits: RuleLimitConfig,
     #[serde(default)]
@@ -195,6 +199,7 @@ impl ProductConfig {
                         .into_iter()
                         .map(|policy| (policy.id.clone(), policy))
                         .collect::<BTreeMap<_, _>>(),
+                    context_projection: self.context_projection,
                 },
                 rules: self.rule_limits.into(),
             },
@@ -225,6 +230,9 @@ impl ProductConfig {
         {
             return Err(AppError::ConfigPolicy("duplicate generation policy"));
         }
+        self.context_projection
+            .validate()
+            .map_err(AppError::ConfigPolicy)?;
         let configured_limits: RuleLimits = self.rule_limits.into();
         let maximum = RuleLimits::default();
         if configured_limits.max_triggered_rules > maximum.max_triggered_rules
@@ -388,6 +396,13 @@ event_poll_ms = 25
             (
                 "http",
                 config("http://gateway.example.com", "\"gateway.example.com\""),
+            ),
+            (
+                "context",
+                format!(
+                    "{}\n[context_projection]\nmax_context_tokens = 131073\n",
+                    config("https://gateway.example.com", "\"gateway.example.com\"")
+                ),
             ),
         ] {
             let path = directory.path().join(format!("{name}.toml"));

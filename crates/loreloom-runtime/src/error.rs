@@ -13,6 +13,8 @@ pub enum RuntimeError {
     Unavailable,
     #[error("save ModLock does not match the configured content packages")]
     ContentLockMismatch,
+    #[error("runtime configuration is invalid at {field}")]
+    InvalidConfiguration { field: &'static str },
     #[error("agent model protocol is invalid at {stage}")]
     ModelProtocol { stage: &'static str },
     #[error("agent bridge is unavailable")]
@@ -52,6 +54,7 @@ impl RuntimeError {
             Self::InvalidInput => "invalid_input",
             Self::Unavailable => "unavailable",
             Self::ContentLockMismatch => "content_lock_mismatch",
+            Self::InvalidConfiguration { .. } => "invalid_configuration",
             Self::ModelProtocol { .. } | Self::Agent(_) | Self::Json { .. } => "agent_error",
             Self::Content(_) => "content_error",
             Self::BridgeUnavailable => "bridge_unavailable",

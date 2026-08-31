@@ -199,6 +199,7 @@ pub struct NpcContext {
     pub scene: SceneContext,
     pub assignment: NpcAssignment,
     pub recent_dialogue: Vec<TranscriptItemRecord>,
+    pub truncated: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -214,6 +215,7 @@ impl NpcAgent {
         scene: SceneContext,
         assignment: NpcAssignment,
         recent_dialogue: Vec<TranscriptItemRecord>,
+        truncated: bool,
     ) -> Result<Self, AgentError> {
         if character.revision != scene.revision || character.revision != assignment.revision {
             return Err(AgentError::ContextRevision);
@@ -226,6 +228,7 @@ impl NpcAgent {
                 scene,
                 assignment,
                 recent_dialogue,
+                truncated,
             },
             definition,
         })

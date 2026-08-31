@@ -37,16 +37,17 @@ use loreloom_core::{
     BaseAttributes, CharacterController, CharacterLifetime, CharacterProfile, CharacterRecord,
     ConditionRecord, ConditionSource, ContentDefinitionId, ContentOrigin,
     DIAGNOSED_CONDITION_PREDICATE_ID, DisplayName, DomainRecord, EntityOrigin, EventInstanceRecord,
-    EventStatus, FactSource, FactSubject, FactValue, Fixed, GenerationSource, IntensityPolicy,
-    ItemRecord, KnowledgeStatus, KnownFactRecord, LifeState, LockedMod, LongText, ModId, ModLock,
-    ModSourceKind, ObjectId, ParameterSetRecord, ParameterValue, PlaceRecord, Posture,
-    ResourcePool, Revision, SAVE_FORMAT_V1, SaveId, SaveManifest, SceneRecord, SessionId,
-    ShortText, SkillGrantRecord, SkillSource, SpawnConstraints, StackState, SystemIdGenerator,
-    TranscriptSpeaker, WorldCommand, WorldCommandKind, WorldEventKind, WorldId, WorldStateRecord,
-    WorldTime,
+    EventStatus, FactSource, FactSubject, FactValue, Fixed, GenerationSource, GoalRecord,
+    GoalSource, GoalStatus, IntensityPolicy, ItemRecord, KnowledgeStatus, KnownFactRecord,
+    LifeState, LockedMod, LongText, ModId, ModLock, ModSourceKind, ObjectId, ParameterSetRecord,
+    ParameterValue, PlaceRecord, Posture, ResourcePool, Revision, SAVE_FORMAT_V1, SaveId,
+    SaveManifest, SceneRecord, SessionId, ShortText, SkillGrantRecord, SkillSource,
+    SpawnConstraints, StackState, SystemIdGenerator, TranscriptSpeaker, WorldCommand,
+    WorldCommandKind, WorldEventKind, WorldId, WorldStateRecord, WorldTime,
 };
 use loreloom_runtime::{
-    GameRuntime, RuntimeConfig, RuntimeError, RuntimeToolExecutor, WorldService,
+    ContextProjectionPolicy, GameRuntime, RuntimeConfig, RuntimeError, RuntimeToolExecutor,
+    WorldService,
 };
 use loreloom_store::{CommitRequest, CommitResult, SaveStore};
 use loreloom_world::{GameWorld, WorldConfig};
@@ -791,6 +792,7 @@ struct NarratorBridge {
     plan: NarratorPlan,
     support: SupportMode,
     calls: AtomicUsize,
+    planning_observation: std::sync::Mutex<Option<JsonValue>>,
 }
 
 impl NarratorBridge {
@@ -799,7 +801,16 @@ impl NarratorBridge {
             plan,
             support,
             calls: AtomicUsize::new(0),
+            planning_observation: std::sync::Mutex::new(None),
         }
+    }
+
+    fn planning_observation(&self) -> JsonValue {
+        self.planning_observation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+            .expect("planning observation")
     }
 }
 
@@ -819,6 +830,25 @@ impl LlmBridge for NarratorBridge {
         Box::pin(async move {
             let call = self.calls.fetch_add(1, Ordering::SeqCst);
             if call == 0 {
+                let payload = request
+                    .messages
+                    .iter()
+                    .rev()
+                    .flat_map(|message| message.content.iter())
+                    .find_map(|part| match part {
+                        armillae_core::ContentPart::Text(text) => {
+                            serde_json::from_str::<JsonValue>(&text.text).ok()
+                        }
+                        _ => None,
+                    })
+                    .ok_or_else(|| BridgeError::InvalidRequest {
+                        message: "missing planning payload".to_owned(),
+                    })?;
+                *self
+                    .planning_observation
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                    Some(payload["payload"]["observation"].clone());
                 return Ok(text_response(
                     serde_json::to_string(&self.plan).expect("plan serialization"),
                 ));
@@ -2285,6 +2315,154 @@ async fn synthesis_cannot_cite_an_uncommitted_world_event() {
 }
 
 #[tokio::test]
+async fn narrator_and_npc_contexts_apply_host_projection_limits_before_provider_calls() {
+    let directory = TempDir::new().expect("temporary save parent");
+    let mut fixture = fixture();
+    let _ = add_tool_records(&mut fixture);
+    fixture.records.extend([
+        DomainRecord::KnownFact(KnownFactRecord {
+            id: object_id("2bb9"),
+            owner_id: fixture.npc,
+            subject: FactSubject::World,
+            predicate_id: ContentDefinitionId::parse(DIAGNOSED_CONDITION_PREDICATE_ID)
+                .expect("fact predicate"),
+            value: FactValue::Bool(true),
+            status: KnowledgeStatus::Confirmed,
+            confidence: Fixed::ONE,
+            source: FactSource::Content {
+                definition_id: fixture.preset_id.clone(),
+            },
+            first_known_at: WorldTime::ZERO,
+            last_confirmed_at: WorldTime::ZERO,
+        }),
+        DomainRecord::Goal(GoalRecord {
+            id: object_id("2bba"),
+            owner_id: fixture.npc,
+            description: text("Keep the inn quiet."),
+            priority: 1,
+            status: GoalStatus::Active,
+            source: GoalSource::CharacterDefinition {
+                definition_id: fixture.preset_id.clone(),
+            },
+            updated_at: WorldTime::ZERO,
+        }),
+    ]);
+    let candidate_mod_lock = fixture.manifest.mod_lock.clone();
+    let store = SaveStore::create(
+        directory.path().join("save"),
+        fixture.manifest,
+        fixture.records,
+    )
+    .await
+    .expect("create save");
+    let service = WorldService::open(
+        store,
+        fixture.registry,
+        &candidate_mod_lock,
+        fixture.world_config,
+    )
+    .await
+    .expect("open service");
+    let narrator = Arc::new(NarratorBridge::new(
+        NarratorPlan {
+            based_on_revision: Revision::new(1),
+            npc_turns: vec![request(fixture.npc, fixture.scene)],
+        },
+        SupportMode::Empty,
+    ));
+    let npc = npc_bridge();
+    let mut runtime = GameRuntime::new(
+        service,
+        narrator.clone(),
+        parse("ses_01890f6a-2bbe-7d4e-8f90-123456789abc"),
+        RuntimeConfig {
+            context_projection: ContextProjectionPolicy {
+                transcript_items: 0,
+                transcript_bytes: 0,
+                known_facts: 0,
+                goals: 0,
+                visible_actors: 0,
+                inventory_items: 0,
+                skills: 0,
+                max_context_tokens: 131_072,
+            },
+            ..RuntimeConfig::default()
+        },
+    );
+    runtime.register_npc(fixture.npc, definition(fixture.profile_id), npc.clone());
+
+    runtime
+        .handle_player_input("Ask Mira to answer without exposing unrelated state.")
+        .await
+        .expect("bounded turn");
+
+    let observation = narrator.planning_observation();
+    assert_eq!(observation["truncated"], json!(true));
+    assert!(
+        observation["player"]["inventory"]
+            .as_array()
+            .expect("inventory")
+            .is_empty()
+    );
+    assert!(
+        observation["player"]["skills"]
+            .as_array()
+            .expect("skills")
+            .is_empty()
+    );
+    assert!(
+        observation["scene"]["visible_actors"]
+            .as_array()
+            .expect("visible actors")
+            .is_empty()
+    );
+    assert!(
+        observation["recent_transcript"]
+            .as_array()
+            .expect("transcript")
+            .is_empty()
+    );
+
+    let npc_requests = npc.requests().expect("NPC request log");
+    let npc_context = npc_requests[0]
+        .messages
+        .iter()
+        .flat_map(|message| message.content.iter())
+        .find_map(|part| match part {
+            armillae_core::ContentPart::Text(text) => {
+                serde_json::from_str::<JsonValue>(&text.text).ok()
+            }
+            _ => None,
+        })
+        .expect("NPC context envelope");
+    assert_eq!(npc_context["context"]["truncated"], json!(true));
+    assert!(
+        npc_context["context"]["character"]["inventory"]
+            .as_array()
+            .expect("NPC inventory")
+            .is_empty()
+    );
+    assert!(
+        npc_context["context"]["character"]["known_facts"]
+            .as_array()
+            .expect("NPC known facts")
+            .is_empty()
+    );
+    assert!(
+        npc_context["context"]["character"]["goals"]
+            .as_array()
+            .expect("NPC goals")
+            .is_empty()
+    );
+    assert!(
+        npc_context["context"]["recent_dialogue"]
+            .as_array()
+            .expect("NPC dialogue")
+            .is_empty()
+    );
+}
+
+#[tokio::test]
 async fn inventory_tools_page_by_stable_id_enforce_actor_ownership_and_update_snapshot() {
     let directory = TempDir::new().expect("temporary save parent");
     let mut fixture = fixture();
@@ -2584,6 +2762,7 @@ async fn mock_agent_continuation_splits_stack_then_uses_skill_at_advanced_revisi
                 capabilities: BTreeSet::from(["split_stack".to_owned(), "use_skill".to_owned()]),
             },
             budget: ResourceBudget::default(),
+            max_context_tokens: u64::MAX,
             cancellation: &cancellation,
         })
         .await;

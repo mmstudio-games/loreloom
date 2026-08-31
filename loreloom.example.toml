@@ -49,6 +49,16 @@ max_generated_per_orchestration = 32
 max_materialized_per_scene = 256
 max_persistent_generated = 1024
 
+[context_projection]
+transcript_items = 64
+transcript_bytes = 65536
+known_facts = 256
+goals = 64
+visible_actors = 128
+inventory_items = 128
+skills = 64
+max_context_tokens = 32768
+
 [[generation_policies]]
 id = "games.loreloom.demo:generation_policy/default"
 allowed_agent_profiles = ["games.loreloom.demo:agent_profile/mira"]

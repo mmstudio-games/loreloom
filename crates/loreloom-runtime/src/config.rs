@@ -3,8 +3,79 @@ use std::collections::{BTreeMap, BTreeSet};
 use loreloom_agent::ResourceBudget;
 use loreloom_content::GenerationPolicy;
 use loreloom_core::ContentDefinitionId;
+use serde::{Deserialize, Serialize};
 
 pub const NARRATOR_MATERIALIZE_NPC_CAPABILITY: &str = "narrator.materialize_npc";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ContextProjectionPolicy {
+    pub transcript_items: usize,
+    pub transcript_bytes: usize,
+    pub known_facts: usize,
+    pub goals: usize,
+    pub visible_actors: usize,
+    pub inventory_items: usize,
+    pub skills: usize,
+    pub max_context_tokens: u64,
+}
+
+impl Default for ContextProjectionPolicy {
+    fn default() -> Self {
+        Self {
+            transcript_items: 64,
+            transcript_bytes: 64 * 1_024,
+            known_facts: 256,
+            goals: 64,
+            visible_actors: 128,
+            inventory_items: 128,
+            skills: 64,
+            max_context_tokens: 32_768,
+        }
+    }
+}
+
+impl ContextProjectionPolicy {
+    const MAXIMUM: Self = Self {
+        transcript_items: 256,
+        transcript_bytes: 256 * 1_024,
+        known_facts: 1_024,
+        goals: 256,
+        visible_actors: 512,
+        inventory_items: 512,
+        skills: 256,
+        max_context_tokens: 131_072,
+    };
+
+    pub fn validate(self) -> Result<(), &'static str> {
+        let maximum = Self::MAXIMUM;
+        if self.transcript_items > maximum.transcript_items {
+            return Err("context_projection.transcript_items");
+        }
+        if self.transcript_bytes > maximum.transcript_bytes {
+            return Err("context_projection.transcript_bytes");
+        }
+        if self.known_facts > maximum.known_facts {
+            return Err("context_projection.known_facts");
+        }
+        if self.goals > maximum.goals {
+            return Err("context_projection.goals");
+        }
+        if self.visible_actors > maximum.visible_actors {
+            return Err("context_projection.visible_actors");
+        }
+        if self.inventory_items > maximum.inventory_items {
+            return Err("context_projection.inventory_items");
+        }
+        if self.skills > maximum.skills {
+            return Err("context_projection.skills");
+        }
+        if self.max_context_tokens == 0 || self.max_context_tokens > maximum.max_context_tokens {
+            return Err("context_projection.max_context_tokens");
+        }
+        Ok(())
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OrchestrationBudget {
@@ -56,6 +127,7 @@ pub struct RuntimeConfig {
     pub narrator_capabilities: BTreeSet<String>,
     pub npc_resources: NpcResourcePolicy,
     pub generation_policies: BTreeMap<ContentDefinitionId, GenerationPolicy>,
+    pub context_projection: ContextProjectionPolicy,
 }
 
 impl Default for RuntimeConfig {
@@ -66,6 +138,7 @@ impl Default for RuntimeConfig {
             narrator_capabilities: BTreeSet::from([NARRATOR_MATERIALIZE_NPC_CAPABILITY.to_owned()]),
             npc_resources: NpcResourcePolicy::default(),
             generation_policies: BTreeMap::new(),
+            context_projection: ContextProjectionPolicy::default(),
         }
     }
 }

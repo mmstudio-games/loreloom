@@ -53,6 +53,7 @@ pub struct TurnInvocation<'a> {
     pub request: CompletionRequest,
     pub tool_context: AgentToolContext,
     pub budget: ResourceBudget,
+    pub max_context_tokens: u64,
     pub cancellation: &'a CancellationToken,
 }
 
@@ -85,6 +86,7 @@ impl AgentRunner {
             mut request,
             mut tool_context,
             budget,
+            max_context_tokens,
             cancellation,
         } = invocation;
         let offered_tools = request
@@ -102,6 +104,26 @@ impl AgentRunner {
             if cancellation.is_cancelled() {
                 return outcome(
                     TurnStatus::Cancelled,
+                    None,
+                    tool_results,
+                    tool_calls,
+                    committed_events,
+                    usage,
+                );
+            }
+            let Some(request_tokens) = estimate_request_tokens(&request) else {
+                return outcome(
+                    TurnStatus::Failed(TurnFailureStage::Projection),
+                    None,
+                    tool_results,
+                    tool_calls,
+                    committed_events,
+                    usage,
+                );
+            };
+            if request_tokens > max_context_tokens {
+                return outcome(
+                    TurnStatus::BudgetExhausted(BudgetReason::InputTokens),
                     None,
                     tool_results,
                     tool_calls,
@@ -310,6 +332,18 @@ fn push_event(events: &mut Vec<EventId>, event: EventId) {
 
 fn elapsed_ms(started: Instant) -> u64 {
     u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
+}
+
+fn estimate_request_tokens(request: &CompletionRequest) -> Option<u64> {
+    let encoded = serde_json::to_string(request).ok()?;
+    let (ascii, non_ascii) = encoded.chars().fold((0_u64, 0_u64), |counts, character| {
+        if character.is_ascii() {
+            (counts.0.saturating_add(1), counts.1)
+        } else {
+            (counts.0, counts.1.saturating_add(1))
+        }
+    });
+    Some(ascii.div_ceil(3).saturating_add(non_ascii))
 }
 
 fn outcome(
