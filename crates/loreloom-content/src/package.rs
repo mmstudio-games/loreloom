@@ -1235,7 +1235,10 @@ fn read_payload_directory(
         entries.push((name, entry.path()));
     }
     entries.sort_by(|left, right| left.0.cmp(&right.0));
-    for (_, path) in entries {
+    for (name, path) in entries {
+        if directory == root && name == ".gitignore" {
+            continue;
+        }
         *entries_seen = entries_seen.saturating_add(1);
         if *entries_seen > limits.max_files.saturating_mul(2) {
             return Err(PackageError::ResourceLimit {

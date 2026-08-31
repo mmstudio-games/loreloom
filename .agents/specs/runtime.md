@@ -1643,6 +1643,8 @@ Manifest TOML 空白不影响 hash，JSON/asset 原始 bytes 或路径变化会�
 包路径统一使用 `/` 的相对路径。加载器在解析内容前拒绝 absolute、反斜杠、NUL、空/`.`/`..`
 segment、symlink 和重复规范路径。Host 默认上限为 256 个 payload 文件、单文件 1 MiB、总 payload
 16 MiB、路径深度 8、Manifest 256 KiB；内置与外部包相同，Host 可收紧，Manifest 不可扩大。
+目录包根级 `.gitignore` 是唯一跳过的本地作者元数据，不计入目录项、payload、资源限额或内容哈希；
+其它未知根文件、嵌套 `.gitignore` 与隐藏文件仍按普通 payload 执行严格路径和类型校验。
 
 Runtime/Content 加载顺序必须是：
 
