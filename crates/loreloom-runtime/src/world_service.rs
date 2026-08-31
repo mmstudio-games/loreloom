@@ -16,9 +16,9 @@ use loreloom_core::{
     EventOptionView, FactSubject, FactValue, GeneratedOrigin, InventoryView, KnowledgeStatus,
     LongText, ModLock, NpcTurnRequestId, ObjectId, ParameterSetView, ParameterValue,
     ParameterValueView, ResourceView, Revision, RuntimePhase, SAVE_FORMAT_V1, SaveId, SaveManifest,
-    SceneContext, SceneObservation, SessionId, SkillTargetRef, SkillView, SystemIdGenerator,
-    ToolActivity, TranscriptWindow, UiNotice, UiSnapshot, VisibleActorView, WorldCommand,
-    WorldCommandKind, WorldEvent, WorldEventKind,
+    SceneContext, SceneObservation, SceneTransitionTarget, SessionId, SkillTargetRef, SkillView,
+    SystemIdGenerator, ToolActivity, TranscriptWindow, UiNotice, UiSnapshot, VisibleActorView,
+    WorldCommand, WorldCommandKind, WorldEvent, WorldEventKind,
 };
 use loreloom_store::{ActionResolution, CommitRequest, CommitResult, CommittedAction, SaveStore};
 use loreloom_world::{GameWorld, WorldBootstrap, WorldConfig};
@@ -27,7 +27,7 @@ use tokio::sync::Mutex;
 
 use crate::{
     NARRATOR_MATERIALIZE_NPC_CAPABILITY, NARRATOR_REQUEST_NPC_TURN_CAPABILITY,
-    NARRATOR_SUBMIT_NPC_DRAFT_CAPABILITY, RuntimeError,
+    NARRATOR_SUBMIT_NPC_DRAFT_CAPABILITY, NARRATOR_TRANSITION_SCENE_CAPABILITY, RuntimeError,
 };
 
 const CONTEXT_TRANSCRIPT_SOURCE_LIMIT: usize = 256;
@@ -134,6 +134,10 @@ impl WorldService {
 
     pub async fn player_actor(&self) -> ActorId {
         self.inner.lock().await.world.world_state().player_actor
+    }
+
+    pub(crate) async fn active_scene(&self) -> ObjectId {
+        self.inner.lock().await.world.world_state().active_scene
     }
 
     pub async fn agent_profile(
@@ -714,6 +718,7 @@ pub struct RuntimeToolExecutor {
     pending_npc_decisions: Mutex<Vec<PendingNpcDecision>>,
     pending_npc_turns: Mutex<Vec<NpcTurnRequest>>,
     pending_npc_drafts: Mutex<Vec<NpcDraft>>,
+    pending_scene_transition: Mutex<Option<PendingSceneTransition>>,
     request_ids: Mutex<SystemIdGenerator>,
 }
 
@@ -724,6 +729,13 @@ pub(crate) struct PendingNpcDecision {
     pub decision: NarratorNpcDecision,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PendingSceneTransition {
+    pub call_id: String,
+    pub revision: Revision,
+    pub target: SceneTransitionTarget,
+}
+
 impl RuntimeToolExecutor {
     #[must_use]
     pub fn new(service: Arc<WorldService>) -> Self {
@@ -732,6 +744,7 @@ impl RuntimeToolExecutor {
             pending_npc_decisions: Mutex::new(Vec::new()),
             pending_npc_turns: Mutex::new(Vec::new()),
             pending_npc_drafts: Mutex::new(Vec::new()),
+            pending_scene_transition: Mutex::new(None),
             request_ids: Mutex::new(SystemIdGenerator),
         }
     }
@@ -746,6 +759,10 @@ impl RuntimeToolExecutor {
 
     pub(crate) async fn take_pending_npc_drafts(&self) -> Vec<NpcDraft> {
         std::mem::take(&mut *self.pending_npc_drafts.lock().await)
+    }
+
+    pub(crate) async fn take_pending_scene_transition(&self) -> Option<PendingSceneTransition> {
+        self.pending_scene_transition.lock().await.take()
     }
 }
 
@@ -948,6 +965,39 @@ impl ToolExecutor for RuntimeToolExecutor {
                         "actor_id": { "type": "string" },
                         "scene_id": { "type": "string" },
                         "assignment": { "type": "string" }
+                    },
+                    "additionalProperties": false
+                }),
+            },
+            ToolDefinition {
+                name: "transition_scene".to_owned(),
+                description: "Transition to one existing or content-defined scene after this narrator turn. The runtime preserves inactive scene state and replans after the transition.".to_owned(),
+                input_schema: json!({
+                    "type": "object",
+                    "required": ["target"],
+                    "properties": {
+                        "target": {
+                            "oneOf": [
+                                {
+                                    "type": "object",
+                                    "required": ["type", "scene_id"],
+                                    "properties": {
+                                        "type": { "const": "existing" },
+                                        "scene_id": { "type": "string" }
+                                    },
+                                    "additionalProperties": false
+                                },
+                                {
+                                    "type": "object",
+                                    "required": ["type", "scene_definition_id"],
+                                    "properties": {
+                                        "type": { "const": "definition" },
+                                        "scene_definition_id": { "type": "string" }
+                                    },
+                                    "additionalProperties": false
+                                }
+                            ]
+                        }
                     },
                     "additionalProperties": false
                 }),
@@ -1209,6 +1259,8 @@ impl ToolExecutor for RuntimeToolExecutor {
                         Err(RuntimeError::CapabilityDenied)
                     } else if self.service.revision().await != runtime.revision {
                         Err(RuntimeError::Unavailable)
+                    } else if self.pending_scene_transition.lock().await.is_some() {
+                        Err(RuntimeError::InvalidInput)
                     } else {
                         match serde_json::from_value::<NarratorNpcDecision>(call.arguments.clone())
                         {
@@ -1243,6 +1295,8 @@ impl ToolExecutor for RuntimeToolExecutor {
                         Err(RuntimeError::CapabilityDenied)
                     } else if self.service.revision().await != runtime.revision {
                         Err(RuntimeError::Unavailable)
+                    } else if self.pending_scene_transition.lock().await.is_some() {
+                        Err(RuntimeError::InvalidInput)
                     } else {
                         match (
                             parse_actor_id(&call.arguments, "actor_id"),
@@ -1281,6 +1335,49 @@ impl ToolExecutor for RuntimeToolExecutor {
                                 }
                             }
                             _ => Err(RuntimeError::InvalidInput),
+                        }
+                    }
+                }
+                "transition_scene" => {
+                    if !runtime
+                        .capabilities
+                        .contains(NARRATOR_TRANSITION_SCENE_CAPABILITY)
+                        || self.service.player_actor().await != runtime.actor_id
+                    {
+                        Err(RuntimeError::CapabilityDenied)
+                    } else if self.service.revision().await != runtime.revision {
+                        Err(RuntimeError::Unavailable)
+                    } else if !self.pending_npc_decisions.lock().await.is_empty()
+                        || !self.pending_npc_turns.lock().await.is_empty()
+                    {
+                        Err(RuntimeError::InvalidInput)
+                    } else {
+                        match call
+                            .arguments
+                            .get("target")
+                            .cloned()
+                            .ok_or(RuntimeError::InvalidInput)
+                            .and_then(|value| {
+                                serde_json::from_value::<SceneTransitionTarget>(value)
+                                    .map_err(|_| RuntimeError::InvalidInput)
+                            }) {
+                            Ok(target) => {
+                                let mut pending = self.pending_scene_transition.lock().await;
+                                if pending.is_some() {
+                                    Err(RuntimeError::InvalidInput)
+                                } else {
+                                    *pending = Some(PendingSceneTransition {
+                                        call_id: call.id.as_str().to_owned(),
+                                        revision: runtime.revision,
+                                        target,
+                                    });
+                                    Ok(json!({
+                                        "status": "accepted_pending",
+                                        "revision": runtime.revision
+                                    }))
+                                }
+                            }
+                            Err(error) => Err(error),
                         }
                     }
                 }

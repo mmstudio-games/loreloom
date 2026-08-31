@@ -36,7 +36,8 @@ pub use persistence::{
     SaveManifest,
 };
 pub use protocol::{
-    ExecutionChangeSet, SkillTargetRef, WorldCommand, WorldCommandKind, WorldEvent, WorldEventKind,
+    ExecutionChangeSet, SceneTransitionTarget, SkillTargetRef, WorldCommand, WorldCommandKind,
+    WorldEvent, WorldEventKind,
 };
 pub use record::{
     MigrationRegistry, MigrationStep, RecordEnvelope, RecordError, RecordId, RecordKey,

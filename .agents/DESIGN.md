@@ -199,6 +199,10 @@ Loreloom Runtime ───────────────► Persistence
     编译或 `npc_generation`、经统一 `CharacterSpawnSpec -> SpawnCharacter` 路径提交；随后 Runtime
     在同一次玩家输入中把物化结果和更新后的 Scene Observation 交给 Narrator。Narrator 看过完整
     角色投影后才能为其调用 `request_npc_turn`；不增加角色重要度、可选复核或未物化 target 的 wire。
+47. `transition_scene` 是 Narrator 专用的延迟编排 Tool：它只接受已提交 Scene ObjectId 或当前
+    ModLock 的 Scene Definition ID，当前 Narrator Turn 结束后才执行单个原子 `TransitionScene`
+    Command。切换同时停用旧 Scene、激活或首次物化目标 Scene、移动现有玩家并产生 SceneLeft/
+    SceneEntered Event；随后必须基于新 Revision 重新调用 Narrator，不能沿用切换前的 NPC 请求。
 
 项目方已于 2026-08-29 明确确认第 18–23 项的 Mod 子系统方向。该确认把 Content Mod、Rule Mod、
 统一导入路径、类型化参数、结构化 Event Option、通用 Gameplay Tool、ModLock 和 Extension Mod

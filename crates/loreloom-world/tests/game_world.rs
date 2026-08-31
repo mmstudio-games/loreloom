@@ -12,10 +12,11 @@ use loreloom_core::{
     ActionId, ActionState, ActorId, BaseAttributes, CharacterController, CharacterLifetime,
     CharacterProfile, CharacterRecord, CharacterSpawnSpec, ContentDefinitionId, ContentOrigin,
     DisplayName, DomainRecord, EntityOrigin, Fixed, ItemRecord, LifeState, ModId, ObjectId,
-    PlaceRecord, PlacementInput, Posture, ResourcePool, Revision, SceneRecord, ShortText,
-    SkillGrantRecord, SkillSource, SkillTargetRef, SpawnConstraints, StackState, SystemIdGenerator,
-    TranscriptItemId, TranscriptItemRecord, TranscriptSpeaker, TranscriptState, WorldCommand,
-    WorldCommandKind, WorldEventKind, WorldId, WorldStateRecord, WorldTime,
+    PlaceRecord, PlacementInput, Posture, ResourcePool, Revision, SceneRecord,
+    SceneTransitionTarget, ShortText, SkillGrantRecord, SkillSource, SkillTargetRef,
+    SpawnConstraints, StackState, SystemIdGenerator, TranscriptItemId, TranscriptItemRecord,
+    TranscriptSpeaker, TranscriptState, WorldCommand, WorldCommandKind, WorldEventKind, WorldId,
+    WorldStateRecord, WorldTime,
 };
 use loreloom_world::{GameWorld, WorldConfig, WorldError};
 use semver::Version;
@@ -52,6 +53,7 @@ struct Fixture {
     config: WorldConfig,
     player: ActorId,
     scene: ObjectId,
+    forest_scene_definition: ContentDefinitionId,
     quay: ObjectId,
     inn: ObjectId,
     root: ObjectId,
@@ -70,6 +72,8 @@ fn fixture() -> Fixture {
     let quay_definition = definition_id("place", "quay");
     let inn_definition = definition_id("place", "inn");
     let scene_definition = definition_id("scene", "harbor");
+    let forest_place_definition = definition_id("place", "forest_path");
+    let forest_scene_definition = definition_id("scene", "forest");
     let player_definition = definition_id("character", "traveler");
     let agent_definition = definition_id("character", "warden");
     let agent_profile = definition_id("agent_profile", "warden");
@@ -145,6 +149,13 @@ fn fixture() -> Fixture {
                 tags: Default::default(),
                 edges: std::collections::BTreeSet::from([quay_definition.clone()]),
             }),
+            Definition::Place(loreloom_content::PlaceDefinition {
+                id: forest_place_definition.clone(),
+                display_name: name("Forest Path"),
+                description: text("Pines close around an old path."),
+                tags: Default::default(),
+                edges: Default::default(),
+            }),
             Definition::Scene(SceneDefinition {
                 id: scene_definition.clone(),
                 display_name: name("Harbor"),
@@ -166,6 +177,29 @@ fn fixture() -> Fixture {
                         local_key: text("warden"),
                         character_id: agent_definition.clone(),
                         place_id: inn_definition.clone(),
+                        controller: InitialCharacterController::Agent,
+                        lifetime: InitialCharacterLifetime::Scene,
+                    },
+                ],
+            }),
+            Definition::Scene(SceneDefinition {
+                id: forest_scene_definition.clone(),
+                display_name: name("Forest"),
+                framing: text("Mist gathers beneath the pines."),
+                entry_place: forest_place_definition.clone(),
+                places: std::collections::BTreeSet::from([forest_place_definition.clone()]),
+                characters: vec![
+                    SceneCharacterDefinition {
+                        local_key: text("player"),
+                        character_id: player_definition.clone(),
+                        place_id: forest_place_definition.clone(),
+                        controller: InitialCharacterController::Player,
+                        lifetime: InitialCharacterLifetime::Persistent,
+                    },
+                    SceneCharacterDefinition {
+                        local_key: text("warden"),
+                        character_id: agent_definition.clone(),
+                        place_id: forest_place_definition,
                         controller: InitialCharacterController::Agent,
                         lifetime: InitialCharacterLifetime::Scene,
                     },
@@ -404,12 +438,183 @@ fn fixture() -> Fixture {
         },
         player,
         scene,
+        forest_scene_definition,
         quay,
         inn,
         root,
         coin,
         grant,
     }
+}
+
+#[test]
+fn scene_transition_materializes_once_and_reactivates_preserved_scene_state() {
+    let fixture = fixture();
+    let mut world = GameWorld::from_records(
+        Revision::ZERO,
+        fixture.records,
+        fixture.config.clone(),
+        &fixture.registry,
+    )
+    .expect("world");
+    let mut ids = SystemIdGenerator;
+
+    let first = world
+        .execute(
+            WorldCommand {
+                action_id: action_id("2b80"),
+                actor_id: fixture.player,
+                expected_revision: Revision::ZERO,
+                kind: WorldCommandKind::TransitionScene {
+                    target: SceneTransitionTarget::Definition {
+                        scene_definition_id: fixture.forest_scene_definition.clone(),
+                    },
+                },
+            },
+            &fixture.registry,
+            &mut ids,
+        )
+        .expect("materialize and enter forest");
+    let forest_scene = world.world_state().active_scene;
+    assert_ne!(forest_scene, fixture.scene);
+    assert_eq!(first.revision, Revision::new(1));
+    assert!(first.events.iter().any(|event| {
+        event.kind
+            == WorldEventKind::SceneLeft {
+                scene_id: fixture.scene,
+            }
+    }));
+    assert!(first.events.iter().any(|event| {
+        event.kind
+            == WorldEventKind::SceneEntered {
+                scene_id: forest_scene,
+            }
+    }));
+
+    let first_records = world.project_records().expect("project first transition");
+    let forest_entry = first_records
+        .iter()
+        .find_map(|record| match record {
+            DomainRecord::Scene(scene) if scene.id == forest_scene => Some(scene.entry_place),
+            _ => None,
+        })
+        .expect("forest scene");
+    assert_eq!(
+        world.character(fixture.player).expect("player").location,
+        forest_entry
+    );
+    assert_eq!(
+        first_records
+            .iter()
+            .filter(|record| matches!(
+                record,
+                DomainRecord::Character(character)
+                    if character.controller == CharacterController::Player
+            ))
+            .count(),
+        1,
+        "a scene bootstrap player entry must not create a second player"
+    );
+    let forest_npc = first_records
+        .iter()
+        .find_map(|record| match record {
+            DomainRecord::Character(character)
+                if character.id != fixture.player
+                    && character.lifetime
+                        == CharacterLifetime::Scene {
+                            scene_id: forest_scene,
+                        } =>
+            {
+                Some(character.id)
+            }
+            _ => None,
+        })
+        .expect("forest scene NPC");
+
+    world
+        .execute(
+            WorldCommand {
+                action_id: action_id("2b81"),
+                actor_id: fixture.player,
+                expected_revision: Revision::new(1),
+                kind: WorldCommandKind::TransitionScene {
+                    target: SceneTransitionTarget::Existing {
+                        scene_id: fixture.scene,
+                    },
+                },
+            },
+            &fixture.registry,
+            &mut ids,
+        )
+        .expect("return to harbor");
+    assert!(world.character(forest_npc).is_some());
+
+    world
+        .execute(
+            WorldCommand {
+                action_id: action_id("2b82"),
+                actor_id: fixture.player,
+                expected_revision: Revision::new(2),
+                kind: WorldCommandKind::TransitionScene {
+                    target: SceneTransitionTarget::Definition {
+                        scene_definition_id: fixture.forest_scene_definition,
+                    },
+                },
+            },
+            &fixture.registry,
+            &mut ids,
+        )
+        .expect("re-enter materialized forest");
+    let final_records = world.project_records().expect("project final transition");
+    assert_eq!(world.world_state().active_scene, forest_scene);
+    assert!(world.character(forest_npc).is_some());
+    assert_eq!(
+        final_records
+            .iter()
+            .filter(|record| matches!(record, DomainRecord::Scene(_)))
+            .count(),
+        2,
+        "a content scene has one instance per world"
+    );
+    GameWorld::from_records(
+        world.revision(),
+        final_records,
+        fixture.config,
+        &fixture.registry,
+    )
+    .expect("rebuild transitioned world");
+}
+
+#[test]
+fn rejected_scene_transition_restores_the_candidate_world() {
+    let fixture = fixture();
+    let mut world = GameWorld::from_records(
+        Revision::ZERO,
+        fixture.records,
+        fixture.config,
+        &fixture.registry,
+    )
+    .expect("world");
+    let before = world.project_records().expect("before records");
+    let error = world
+        .execute(
+            WorldCommand {
+                action_id: action_id("2b83"),
+                actor_id: fixture.player,
+                expected_revision: Revision::ZERO,
+                kind: WorldCommandKind::TransitionScene {
+                    target: SceneTransitionTarget::Existing {
+                        scene_id: fixture.scene,
+                    },
+                },
+            },
+            &fixture.registry,
+            &mut SystemIdGenerator,
+        )
+        .expect_err("active scene cannot be re-entered");
+    assert!(matches!(error, WorldError::DomainRule { .. }));
+    assert_eq!(world.revision(), Revision::ZERO);
+    assert_eq!(world.project_records().expect("after records"), before);
 }
 
 #[test]

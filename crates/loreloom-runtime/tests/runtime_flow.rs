@@ -27,8 +27,9 @@ use loreloom_content::{
     ConditionDefinition, ContainerDefinition, ContentDocument, ContentPackContext, Definition,
     DefinitionRegistry, DurationPolicy, EffectDefinition, EquipmentSlotDefinition, EventDefinition,
     EventNodeDefinition, EventOptionDefinition, GameplayActionDefinition, GenerationPolicy,
-    ItemDefinition, NpcDraft, ParameterDefinition, ParameterPersistence, ParameterType,
-    ParameterVisibility, PlaceDefinition, ResourceCost, ResourceDefinition, ResourceMaximumPolicy,
+    InitialCharacterController, InitialCharacterLifetime, ItemDefinition, NpcDraft,
+    ParameterDefinition, ParameterPersistence, ParameterType, ParameterVisibility, PlaceDefinition,
+    ResourceCost, ResourceDefinition, ResourceMaximumPolicy, SceneCharacterDefinition,
     SceneDefinition, SkillDefinition, SkillKind, SkillTarget, StackPolicy, SymptomDefinition,
     TagDefinition, parse_content_hash,
 };
@@ -94,6 +95,7 @@ struct Fixture {
     profile_id: ContentDefinitionId,
     preset_id: ContentDefinitionId,
     condition_id: ContentDefinitionId,
+    forest_scene_definition: ContentDefinitionId,
 }
 
 fn fixture() -> Fixture {
@@ -118,6 +120,8 @@ fn fixture() -> Fixture {
     let condition_id = definition_id("condition", "shivering");
     let place_definition = definition_id("place", "hall");
     let scene_definition = definition_id("scene", "inn");
+    let forest_place_definition = definition_id("place", "forest_path");
+    let forest_scene_definition = definition_id("scene", "forest");
     let diagnosis_predicate = ContentDefinitionId::parse(DIAGNOSED_CONDITION_PREDICATE_ID)
         .expect("diagnosis predicate ID");
     let core_mod_id = ModId::parse("games.loreloom.core").expect("core mod id");
@@ -344,6 +348,13 @@ fn fixture() -> Fixture {
                         tags: BTreeSet::new(),
                         edges: BTreeSet::new(),
                     }),
+                    Definition::Place(PlaceDefinition {
+                        id: forest_place_definition.clone(),
+                        display_name: name("Forest Path"),
+                        description: text("Mist softens the old pines."),
+                        tags: BTreeSet::new(),
+                        edges: BTreeSet::new(),
+                    }),
                     Definition::Scene(SceneDefinition {
                         id: scene_definition.clone(),
                         display_name: name("Old Inn"),
@@ -351,6 +362,29 @@ fn fixture() -> Fixture {
                         entry_place: place_definition.clone(),
                         places: BTreeSet::from([place_definition.clone()]),
                         characters: Vec::new(),
+                    }),
+                    Definition::Scene(SceneDefinition {
+                        id: forest_scene_definition.clone(),
+                        display_name: name("Forest"),
+                        framing: text("Mist gathers beneath the pines."),
+                        entry_place: forest_place_definition.clone(),
+                        places: BTreeSet::from([forest_place_definition.clone()]),
+                        characters: vec![
+                            SceneCharacterDefinition {
+                                local_key: text("player"),
+                                character_id: preset_id.clone(),
+                                place_id: forest_place_definition.clone(),
+                                controller: InitialCharacterController::Player,
+                                lifetime: InitialCharacterLifetime::Persistent,
+                            },
+                            SceneCharacterDefinition {
+                                local_key: text("watcher"),
+                                character_id: preset_id.clone(),
+                                place_id: forest_place_definition,
+                                controller: InitialCharacterController::Agent,
+                                lifetime: InitialCharacterLifetime::Scene,
+                            },
+                        ],
                     }),
                 ],
             }],
@@ -504,6 +538,7 @@ fn fixture() -> Fixture {
         profile_id,
         preset_id,
         condition_id,
+        forest_scene_definition,
     }
 }
 
@@ -1546,6 +1581,227 @@ async fn world_service_rejects_a_candidate_mod_lock_before_world_materialization
         WorldService::open(store, fixture.registry, &candidate, fixture.world_config).await,
         Err(RuntimeError::ContentLockMismatch)
     ));
+}
+
+#[tokio::test]
+async fn narrator_scene_transition_materializes_replans_and_revisits_without_regeneration() {
+    let directory = TempDir::new().expect("temporary save parent");
+    let fixture = fixture();
+    let store = SaveStore::create(
+        directory.path().join("save"),
+        fixture.manifest.clone(),
+        fixture.records.clone(),
+    )
+    .await
+    .expect("create save");
+    let service = WorldService::open(
+        store,
+        fixture.registry,
+        &fixture.manifest.mod_lock,
+        fixture.world_config,
+    )
+    .await
+    .expect("open world service");
+    let narrator = Arc::new(MockBridge::scripted([
+        MockResponse::tool_call(
+            ToolCallId::new("enter-forest").expect("tool call ID"),
+            "transition_scene",
+            json!({
+                "target": {
+                    "type": "definition",
+                    "scene_definition_id": fixture.forest_scene_definition
+                }
+            }),
+        ),
+        MockResponse::text("I will lead the story into the forest."),
+        MockResponse::text("Mist gathers as the forest path opens before you."),
+        MockResponse::tool_call(
+            ToolCallId::new("return-inn").expect("tool call ID"),
+            "transition_scene",
+            json!({
+                "target": {
+                    "type": "existing",
+                    "scene_id": fixture.scene
+                }
+            }),
+        ),
+        MockResponse::text("I will return the story to the inn."),
+        MockResponse::text("The inn receives you with rain against its shutters."),
+        MockResponse::tool_call(
+            ToolCallId::new("reenter-forest").expect("tool call ID"),
+            "transition_scene",
+            json!({
+                "target": {
+                    "type": "definition",
+                    "scene_definition_id": fixture.forest_scene_definition
+                }
+            }),
+        ),
+        MockResponse::text("I will return to the forest already in this world."),
+        MockResponse::text("The same watcher remains beneath the same pines."),
+    ]));
+    let mut runtime = GameRuntime::new(
+        Arc::clone(&service),
+        narrator,
+        parse("ses_01890f6a-2b88-7d4e-8f90-123456789abc"),
+        RuntimeConfig::default(),
+    );
+
+    let first = runtime
+        .handle_player_input("Take the forest road.")
+        .await
+        .expect("enter forest");
+    assert_eq!(first.snapshot.scene.display_name.as_str(), "Forest");
+    assert_eq!(first.snapshot.revision, Revision::new(3));
+    let forest_scene = first.snapshot.scene.scene_id;
+    let forest_npc = first
+        .snapshot
+        .scene
+        .visible_actors
+        .iter()
+        .find(|actor| actor.actor_id != fixture.player)
+        .map(|actor| actor.actor_id)
+        .expect("materialized forest NPC");
+
+    let second = runtime
+        .handle_player_input("Return to the inn.")
+        .await
+        .expect("return to inn");
+    assert_eq!(second.snapshot.scene.scene_id, fixture.scene);
+    assert_eq!(second.snapshot.revision, Revision::new(6));
+
+    let third = runtime
+        .handle_player_input("Go back to the forest.")
+        .await
+        .expect("re-enter forest");
+    assert_eq!(third.snapshot.scene.scene_id, forest_scene);
+    assert_eq!(third.snapshot.revision, Revision::new(9));
+    assert!(
+        third
+            .snapshot
+            .scene
+            .visible_actors
+            .iter()
+            .any(|actor| actor.actor_id == forest_npc),
+        "revisiting restores the original scene-owned NPC"
+    );
+    let events = service.events().await;
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event.kind, WorldEventKind::SceneEntered { .. }))
+            .count(),
+        3
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event.kind, WorldEventKind::SceneLeft { .. }))
+            .count(),
+        3
+    );
+}
+
+#[tokio::test]
+async fn scene_transition_is_mutually_exclusive_with_scene_bound_npc_orchestration() {
+    let directory = TempDir::new().expect("temporary save parent");
+    let fixture = fixture();
+    let store = SaveStore::create(
+        directory.path().join("save"),
+        fixture.manifest.clone(),
+        fixture.records.clone(),
+    )
+    .await
+    .expect("create save");
+    let service = WorldService::open(
+        store,
+        fixture.registry,
+        &fixture.manifest.mod_lock,
+        fixture.world_config,
+    )
+    .await
+    .expect("open world service");
+    let context = || {
+        ToolContext::new().with_extension(AgentToolContext {
+            actor_id: fixture.player,
+            revision: Revision::ZERO,
+            session_id: parse("ses_01890f6a-2b89-7d4e-8f90-123456789abc"),
+            capabilities: BTreeSet::from([
+                "narrator.request_npc_turn".to_owned(),
+                "narrator.transition_scene".to_owned(),
+            ]),
+        })
+    };
+
+    let npc_first = RuntimeToolExecutor::new(Arc::clone(&service));
+    let accepted_npc = npc_first
+        .execute(
+            context(),
+            ToolCall {
+                id: ToolCallId::new("npc-before-transition").expect("tool call ID"),
+                name: "request_npc_turn".to_owned(),
+                arguments: json!({
+                    "actor_id": fixture.npc,
+                    "scene_id": fixture.scene,
+                    "assignment": "Remain in the current scene."
+                }),
+            },
+        )
+        .await
+        .expect("correlated NPC request");
+    assert!(!accepted_npc.is_error);
+    let rejected_transition = npc_first
+        .execute(
+            context(),
+            ToolCall {
+                id: ToolCallId::new("transition-after-npc").expect("tool call ID"),
+                name: "transition_scene".to_owned(),
+                arguments: json!({
+                    "target": {
+                        "type": "definition",
+                        "scene_definition_id": fixture.forest_scene_definition
+                    }
+                }),
+            },
+        )
+        .await
+        .expect("correlated transition rejection");
+    assert!(rejected_transition.is_error);
+
+    let transition_first = RuntimeToolExecutor::new(service);
+    let accepted_transition = transition_first
+        .execute(
+            context(),
+            ToolCall {
+                id: ToolCallId::new("transition-before-npc").expect("tool call ID"),
+                name: "transition_scene".to_owned(),
+                arguments: json!({
+                    "target": {
+                        "type": "definition",
+                        "scene_definition_id": fixture.forest_scene_definition
+                    }
+                }),
+            },
+        )
+        .await
+        .expect("correlated transition request");
+    assert!(!accepted_transition.is_error);
+    let rejected_npc = transition_first
+        .execute(
+            context(),
+            ToolCall {
+                id: ToolCallId::new("npc-after-transition").expect("tool call ID"),
+                name: "request_npc_turn".to_owned(),
+                arguments: json!({
+                    "actor_id": fixture.npc,
+                    "scene_id": fixture.scene,
+                    "assignment": "This request must wait for replanning."
+                }),
+            },
+        )
+        .await
+        .expect("correlated NPC rejection");
+    assert!(rejected_npc.is_error);
 }
 
 #[tokio::test]

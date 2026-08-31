@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 pub const NARRATOR_MATERIALIZE_NPC_CAPABILITY: &str = "narrator.materialize_npc";
 pub const NARRATOR_REQUEST_NPC_TURN_CAPABILITY: &str = "narrator.request_npc_turn";
 pub const NARRATOR_SUBMIT_NPC_DRAFT_CAPABILITY: &str = "narrator.submit_npc_draft";
+pub const NARRATOR_TRANSITION_SCENE_CAPABILITY: &str = "narrator.transition_scene";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -140,6 +141,7 @@ impl Default for RuntimeConfig {
             narrator_capabilities: BTreeSet::from([
                 NARRATOR_MATERIALIZE_NPC_CAPABILITY.to_owned(),
                 NARRATOR_REQUEST_NPC_TURN_CAPABILITY.to_owned(),
+                NARRATOR_TRANSITION_SCENE_CAPABILITY.to_owned(),
             ]),
             npc_resources: NpcResourcePolicy::default(),
             generation_policies: BTreeMap::new(),

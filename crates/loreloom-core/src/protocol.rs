@@ -19,6 +19,17 @@ pub struct WorldCommand {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum SceneTransitionTarget {
+    Existing {
+        scene_id: ObjectId,
+    },
+    Definition {
+        scene_definition_id: ContentDefinitionId,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum WorldCommandKind {
     Move {
         destination_id: ObjectId,
@@ -47,6 +58,9 @@ pub enum WorldCommandKind {
     },
     PromoteCharacter {
         actor_id: ActorId,
+    },
+    TransitionScene {
+        target: SceneTransitionTarget,
     },
     AppendTranscript {
         items: Vec<TranscriptItemRecord>,
@@ -116,6 +130,12 @@ pub enum WorldEventKind {
     },
     CharacterPromoted {
         character_id: ActorId,
+    },
+    SceneLeft {
+        scene_id: ObjectId,
+    },
+    SceneEntered {
+        scene_id: ObjectId,
     },
     ConditionExpired {
         condition_id: ObjectId,

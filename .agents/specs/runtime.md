@@ -792,6 +792,11 @@ pub struct WorldCommand {
     pub kind: WorldCommandKind,
 }
 
+pub enum SceneTransitionTarget {
+    Existing { scene_id: ObjectId },
+    Definition { scene_definition_id: ContentDefinitionId },
+}
+
 #[non_exhaustive]
 pub enum WorldCommandKind {
     Move { destination_id: ObjectId },
@@ -802,6 +807,7 @@ pub enum WorldCommandKind {
     AdvanceTime { ticks: u64 },
     SpawnCharacter { spec: Box<CharacterSpawnSpec> },
     PromoteCharacter { actor_id: ActorId },
+    TransitionScene { target: SceneTransitionTarget },
     AppendTranscript { items: Vec<TranscriptItemRecord> },
     ChooseEventOption {
         event_instance_id: ObjectId,
@@ -850,6 +856,10 @@ Tool 参数中的 Actor、Action 和 Revision 不得覆盖可信 Runtime Context
 
 WorldEvent 是已经发生的领域事实，不是待执行命令。它必须包含稳定 Event ID、Action ID、
 Actor、Revision、事件类型、拥有所有权的 payload 与必要 provenance。
+
+`TransitionScene` 成功至少产生 `SceneLeft { scene_id }`、`SceneEntered { scene_id }` 和玩家的
+`CharacterMoved` Event；Scene Rule trigger 只由前两个显式 Event 驱动，不能把普通 Persistent NPC
+跨 Scene 移动误判成世界 active Scene 的切换。
 
 重建的唯一事实源固定为“目标 Revision 之前最近的已验证完整 checkpoint + 其后的连续有序
 `RecordOp`”。每个修改 Revision 的 RecordOp 具有 action identity 和从零开始的无缺口 order，
@@ -1036,6 +1046,11 @@ Narrator 可以使用：
 这些 Tool 不允许 Narrator 提供原始 Component、Provider、无限属性、未注册 Definition 或自定义
 Executor。Runtime 只验证和执行 Narrator 通过原生 ToolCall 提交的结构化叙事决定，不从模型正文
 解析控制协议，也不用关键词或硬编码剧情规则改写 Mention/Materialize/NpcTurn 选择。
+
+同一 Narrator Turn 最多接受一个 `transition_scene`，且它不能与待处理的 `materialize_npc` 或
+`request_npc_turn` 共存；后出现的冲突 ToolCall 返回结构化拒绝。Narrator Turn 结束后 Runtime 才以
+ToolCall 被接受时的 Revision 执行切换；成功、stale 或领域拒绝都形成下一次 Narrator 输入并强制
+重新规划，切换前的 NPC 请求不得在新 Scene 中启动。
 
 ### 9.6 Event 与 Gameplay Action Tool 面
 
@@ -1520,6 +1535,9 @@ ModLock 中的 Scene Definition ID：
  其它领域状态，不重新从 Definition 覆盖；
 - Definition 目标若已在本 World 物化，Runtime 重新激活既有实例；尚未物化时才通过共享
   `compile_scene -> SceneSpawnPlan -> NpcFactory` 路径创建一次；
+- Scene Definition 中唯一的 Player entry 只用于新 World bootstrap；首次把该 Definition 物化到已有
+  World 时忽略此 entry，不创建第二个玩家，现有 `WorldState.player_actor` 移动到目标
+  `SceneRecord.entry_place`；其余 Character entry 按既有 Factory 路径创建一次；
 - 当前 Scene 标记为 inactive，目标 Scene 标记为 active，WorldState.active_scene、玩家 Location 和
   Scene left/entered Event 在一个 candidate/durable unit 内提交；
 - 目标创建或校验任一步失败时，当前 Scene、玩家 Location 与 Revision 都保持不变；
@@ -1529,7 +1547,8 @@ ModLock 中的 Scene Definition ID：
   事实或 Agent 可见性规则。
 
 Scene Definition 第一阶段在单个 World 中采用单实例语义；需要同一模板的多个独立实例属于后续
-Schema 扩展，不能靠重复物化产生无法区分的副本。
+Schema 扩展，不能靠重复物化产生无法区分的副本。World 不变量要求恰好一个 Scene 为 active，且
+必须与 `WorldState.active_scene` 一致。
 
 ### 10.4 Mod 加载、冲突与扩展边界
 

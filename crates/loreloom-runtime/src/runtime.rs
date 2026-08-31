@@ -16,6 +16,7 @@ use loreloom_core::{
     ActorId, CharacterController, CharacterLifetime, ContentDefinitionId, GeneratedOrigin,
     GenerationId, GenerationSource, LongText, Revision, RuntimePhase, SessionId, ShortText,
     ToolActivity, ToolActivityState, TranscriptItemId, TranscriptSpeaker, UiSnapshot,
+    WorldCommandKind,
 };
 use serde::Serialize;
 use serde_json::json;
@@ -148,6 +149,7 @@ impl GameRuntime {
         let mut npc_results = Vec::new();
         let _ = self.executor.take_pending_npc_decisions().await;
         let _ = self.executor.take_pending_npc_turns().await;
+        let _ = self.executor.take_pending_scene_transition().await;
 
         let before = self
             .service
@@ -168,6 +170,7 @@ impl GameRuntime {
             .await?;
 
         let mut materialization_results = Vec::new();
+        let mut scene_transition_results = Vec::new();
         let mut settled_materializations = Vec::new();
         let mut generated_attempts = 0_u32;
         loop {
@@ -183,6 +186,7 @@ impl GameRuntime {
                 json!({
                     "observation": observation,
                     "materialization_results": materialization_results,
+                    "scene_transition_results": scene_transition_results,
                     "npc_results": npc_results,
                     "committed_events": self.service.events().await,
                     "instructions": "Use native tools for structured decisions and world changes. request_npc_turn queues NPCs in tool-call order. If no more orchestration is needed, return only the final natural-language narration for the player. Do not return JSON or a structured envelope. NPC responses are claims; only committed events are world facts."
@@ -217,7 +221,47 @@ impl GameRuntime {
             )?;
             let pending = self.executor.take_pending_npc_decisions().await;
             let mut pending_turns = self.executor.take_pending_npc_turns().await;
+            let pending_transition = self.executor.take_pending_scene_transition().await;
             let narrator_text = require_text(&narrator_turn)?;
+            if let Some(pending_transition) = pending_transition {
+                let context = AgentToolContext {
+                    actor_id: before.player.actor_id,
+                    revision: pending_transition.revision,
+                    session_id: self.session_id,
+                    capabilities: self.config.narrator_capabilities.clone(),
+                };
+                let target = pending_transition.target.clone();
+                let result = self
+                    .service
+                    .execute(
+                        &context,
+                        WorldCommandKind::TransitionScene {
+                            target: pending_transition.target,
+                        },
+                    )
+                    .await;
+                match result {
+                    Ok(committed) => scene_transition_results.push(json!({
+                        "call_id": pending_transition.call_id,
+                        "target": target,
+                        "status": "committed",
+                        "scene_id": self.service.active_scene().await,
+                        "revision": committed.revision
+                    })),
+                    Err(error @ (RuntimeError::World(_) | RuntimeError::Content(_))) => {
+                        scene_transition_results.push(json!({
+                            "call_id": pending_transition.call_id,
+                            "target": target,
+                            "status": "rejected",
+                            "code": error.code(),
+                            "revision": self.service.revision().await
+                        }));
+                    }
+                    Err(error) => return Err(error),
+                }
+                pending_turns.clear();
+                continue;
+            }
             let requires_replanning = pending.iter().any(|pending| {
                 pending.decision.requires_materialization()
                     && !settled_materializations.iter().any(

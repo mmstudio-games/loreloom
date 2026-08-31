@@ -14,8 +14,8 @@ use loreloom_core::{
     ConditionRecord, ConditionSource, ContentDefinitionId, DomainRecord, EntityOrigin, EventId,
     EventStatus, ExecutionChangeSet, Fixed, GoalRecord, GoalStatus, IdGenerator, IntensityPolicy,
     ItemRecord, KnownFactRecord, LifeState, ObjectId, ParameterSetRecord, ParameterValue,
-    PlaceRecord, Posture, RecordKey, Revision, RuleStateRecord, SceneRecord, ShortText,
-    SkillGrantRecord, SkillSource, StackState, TranscriptItemRecord, WorldCommand,
+    PlaceRecord, Posture, RecordKey, Revision, RuleStateRecord, SceneRecord, SceneTransitionTarget,
+    ShortText, SkillGrantRecord, SkillSource, StackState, TranscriptItemRecord, WorldCommand,
     WorldCommandKind, WorldEvent, WorldEventKind, WorldId, WorldStateRecord, WorldTime,
 };
 
@@ -440,6 +440,9 @@ impl GameWorld {
             WorldCommandKind::PromoteCharacter { actor_id: target } => {
                 self.promote_character(actor_id, target, action_id, revision, ids)?
             }
+            WorldCommandKind::TransitionScene { target } => {
+                self.transition_scene(actor_id, target, action_id, revision, registry, ids)?
+            }
             WorldCommandKind::AppendTranscript { items } => {
                 self.append_transcripts(actor_id, items, revision)?
             }
@@ -509,6 +512,8 @@ impl GameWorld {
         if !scene.active {
             return invariant("world.active_scene");
         }
+        let mut active_scenes = 0_u32;
+        let mut scene_definitions = BTreeSet::new();
         for (id, entity) in &self.objects {
             let persistent = self
                 .world
@@ -517,7 +522,21 @@ impl GameWorld {
             if persistent.0 != *id {
                 return invariant("persistent_id.index");
             }
+            if let Some(scene) = self.world.get::<SceneComponent>(*entity) {
+                if !scene_definitions.insert(scene.0.origin.definition_id.clone()) {
+                    return invariant("scene.definition_single_instance");
+                }
+                if scene.0.active {
+                    active_scenes += 1;
+                    if scene.0.id != state.active_scene {
+                        return invariant("scene.active_world_state");
+                    }
+                }
+            }
             self.project_entity(*entity)?.validate()?;
+        }
+        if active_scenes != 1 {
+            return invariant("scene.exactly_one_active");
         }
         self.validate_references(registry)
     }
@@ -1569,6 +1588,254 @@ impl GameWorld {
             vec![event],
             summary("character promoted")?,
         ))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn transition_scene(
+        &mut self,
+        actor_id: ActorId,
+        target: SceneTransitionTarget,
+        action_id: ActionId,
+        revision: Revision,
+        registry: &DefinitionRegistry,
+        ids: &mut impl IdGenerator,
+    ) -> Result<ChangeParts, WorldError> {
+        let state = self.world_state().clone();
+        if actor_id != state.player_actor {
+            return domain_rule("only_player_can_transition_scene");
+        }
+        let player = self
+            .character(actor_id)
+            .cloned()
+            .ok_or(WorldError::WrongObjectKind {
+                id: actor_id.object_id(),
+            })?;
+        if player.lifetime != CharacterLifetime::Persistent {
+            return domain_rule("player_must_be_persistent_to_transition_scene");
+        }
+
+        let mut created = Vec::new();
+        let target_scene_id = match target {
+            SceneTransitionTarget::Existing { scene_id } => {
+                self.scene(scene_id)?;
+                scene_id
+            }
+            SceneTransitionTarget::Definition {
+                scene_definition_id,
+            } => {
+                let matches = self
+                    .objects
+                    .iter()
+                    .filter_map(|(id, entity)| {
+                        self.world
+                            .get::<SceneComponent>(*entity)
+                            .filter(|scene| scene.0.origin.definition_id == scene_definition_id)
+                            .map(|_| *id)
+                    })
+                    .collect::<Vec<_>>();
+                match matches.as_slice() {
+                    [scene_id] => *scene_id,
+                    [] => {
+                        let plan = registry.compile_scene(&scene_definition_id)?;
+                        let (scene_id, records) = self.materialize_scene(&plan, registry, ids)?;
+                        created = records;
+                        scene_id
+                    }
+                    _ => return invariant("scene.definition_single_instance"),
+                }
+            }
+        };
+        if target_scene_id == state.active_scene {
+            return domain_rule("scene_already_active");
+        }
+        let target_scene = self.scene(target_scene_id)?.clone();
+        if target_scene.active {
+            return domain_rule("target_scene_already_active");
+        }
+        let destination = target_scene.entry_place;
+        let destination_place = self.place(destination)?;
+        if destination_place.scene_id != target_scene_id {
+            return invariant("scene.entry_place");
+        }
+
+        let current_scene_entity = self.require_object(state.active_scene)?;
+        let current_scene_record = {
+            let mut current = self
+                .world
+                .get_mut::<SceneComponent>(current_scene_entity)
+                .ok_or(WorldError::WrongObjectKind {
+                    id: state.active_scene,
+                })?;
+            current.0.active = false;
+            current.0.clone()
+        };
+        let target_scene_entity = self.require_object(target_scene_id)?;
+        let target_scene_record = {
+            let mut target = self
+                .world
+                .get_mut::<SceneComponent>(target_scene_entity)
+                .ok_or(WorldError::WrongObjectKind {
+                    id: target_scene_id,
+                })?;
+            target.0.active = true;
+            target.0.clone()
+        };
+        let player_entity = self.require_object(actor_id.object_id())?;
+        let player_record = {
+            let mut player = self
+                .world
+                .get_mut::<CharacterComponent>(player_entity)
+                .ok_or(WorldError::WrongObjectKind {
+                    id: actor_id.object_id(),
+                })?;
+            player.0.location = destination;
+            player.0.clone()
+        };
+        let world_state = {
+            let mut world_state = self.world.resource_mut::<WorldStateResource>();
+            world_state.0.active_scene = target_scene_id;
+            world_state.0.clone()
+        };
+
+        created.extend([
+            DomainRecord::WorldState(world_state),
+            DomainRecord::Scene(current_scene_record),
+            DomainRecord::Scene(target_scene_record),
+            DomainRecord::Character(player_record),
+        ]);
+        let events = vec![
+            event(
+                ids,
+                action_id,
+                actor_id,
+                revision,
+                WorldEventKind::CharacterMoved {
+                    character_id: actor_id,
+                    from: player.location,
+                    to: destination,
+                },
+            )?,
+            event(
+                ids,
+                action_id,
+                actor_id,
+                revision,
+                WorldEventKind::SceneLeft {
+                    scene_id: state.active_scene,
+                },
+            )?,
+            event(
+                ids,
+                action_id,
+                actor_id,
+                revision,
+                WorldEventKind::SceneEntered {
+                    scene_id: target_scene_id,
+                },
+            )?,
+        ];
+        Ok((created, Vec::new(), events, summary("scene transitioned")?))
+    }
+
+    fn materialize_scene(
+        &mut self,
+        plan: &SceneSpawnPlan,
+        registry: &DefinitionRegistry,
+        ids: &mut impl IdGenerator,
+    ) -> Result<(ObjectId, Vec<DomainRecord>), WorldError> {
+        let scene_id = ObjectId::generate_with(ids)?;
+        let mut places = plan.places.clone();
+        places.sort_by(|left, right| left.definition_id.cmp(&right.definition_id));
+        let mut place_ids = BTreeMap::new();
+        for place in &places {
+            if place_ids
+                .insert(place.definition_id.clone(), ObjectId::generate_with(ids)?)
+                .is_some()
+            {
+                return invariant("scene.place_definition_unique");
+            }
+        }
+        let entry_place =
+            place_ids
+                .get(&plan.entry_place)
+                .copied()
+                .ok_or(WorldError::Invariant {
+                    invariant: "scene.entry_place",
+                })?;
+        let mut records = vec![DomainRecord::Scene(SceneRecord {
+            id: scene_id,
+            display_name: plan.display_name.clone(),
+            framing: plan.framing.clone(),
+            entry_place,
+            active: false,
+            origin: plan.origin.clone(),
+        })];
+        records.extend(places.into_iter().map(|place| {
+            DomainRecord::Place(PlaceRecord {
+                id: place_ids[&place.definition_id],
+                scene_id,
+                display_name: place.display_name,
+                description: place.description,
+                tags: place.tags,
+                origin: place.origin,
+            })
+        }));
+
+        let mut entries = plan.characters.clone();
+        entries.sort_by(|left, right| left.local_key.cmp(&right.local_key));
+        if entries
+            .iter()
+            .filter(|entry| entry.controller == CharacterController::Player)
+            .count()
+            != 1
+        {
+            return invariant("scene.exactly_one_bootstrap_player");
+        }
+        let clock = self.world_state().clock;
+        for entry in entries
+            .into_iter()
+            .filter(|entry| entry.controller != CharacterController::Player)
+        {
+            let place_id =
+                place_ids
+                    .get(&entry.place_id)
+                    .copied()
+                    .ok_or(WorldError::Invariant {
+                        invariant: "scene.character_place",
+                    })?;
+            let lifetime = match entry.lifetime {
+                InitialCharacterLifetime::Scene => CharacterLifetime::Scene { scene_id },
+                InitialCharacterLifetime::Persistent => CharacterLifetime::Persistent,
+            };
+            let spec = registry.compile_character(
+                &entry.character_id,
+                CharacterCompileRequest {
+                    scene_id,
+                    place_id,
+                    controller: entry.controller,
+                    lifetime,
+                },
+            )?;
+            records.extend(materialize_character_records(
+                spec,
+                ActorId::from(ObjectId::generate_with(ids)?),
+                clock,
+                registry,
+                &self.config,
+                ids,
+            )?);
+        }
+        let mut candidate_ids = BTreeSet::new();
+        for record in &records {
+            let id = object_id(record).ok_or(WorldError::WorldState)?;
+            if !candidate_ids.insert(id) || self.objects.contains_key(&id) {
+                return Err(WorldError::DuplicateIdentity);
+            }
+        }
+        for record in records.iter().cloned() {
+            self.spawn_record(record)?;
+        }
+        Ok((scene_id, records))
     }
 
     fn append_transcripts(

@@ -74,7 +74,7 @@ OPEN 项、后续 RFC 或 P0 Spike；空 crate 不代表相关协议已经实现
 - [x] 暴露有界 Stable ID 游标分页的 `list_inventory`/`inspect_item` 与
   `list_available_skills`/`inspect_skill` Query Tool，并把 `transfer_item`、`equip_item`、
   `split_stack`、`use_skill` 接到已冻结的 WorldCommand；
-- [ ] 实现 Scene 停用/重新激活与切换产品入口；Scene、Scene-owned entity 和状态不因离开而删除，
+- [x] 实现 Scene 停用/重新激活与切换产品入口；Scene、Scene-owned entity 和状态不因离开而删除，
   `promote_npc` 只改变角色的领域归属；
 - [x] 把 Spec 8.2 的 Character/Scene/Transcript 数量与字节上限接入 Narrator/NpcAgent 产品上下文，
   并在裁剪时投影 `truncated` metadata；
