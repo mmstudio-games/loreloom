@@ -1,0 +1,55 @@
+schema_version = 1
+allowed_endpoint_hosts = []
+narrator_capabilities = []
+
+[narrator]
+api_version = "armillae.llm/v1alpha1"
+provider = "openai"
+model = "gpt-5-mini"
+
+[narrator.credential]
+type = "environment"
+name = "OPENAI_API_KEY"
+
+[npc]
+api_version = "armillae.llm/v1alpha1"
+provider = "openai"
+model = "gpt-5-mini"
+
+[npc.credential]
+type = "environment"
+name = "OPENAI_API_KEY"
+
+[turn_budget]
+max_model_calls = 8
+max_tool_calls = 16
+max_input_tokens = 131072
+max_output_tokens = 16384
+max_total_tokens = 147456
+max_model_output_bytes = 262144
+max_elapsed_ms = 180000
+require_reported_tokens = false
+
+[orchestration_budget]
+max_started_agent_turns = 24
+max_orchestration_rounds = 4
+
+[orchestration_budget.resources]
+max_model_calls = 64
+max_tool_calls = 128
+max_input_tokens = 1048576
+max_output_tokens = 131072
+max_total_tokens = 1179648
+max_model_output_bytes = 2097152
+max_elapsed_ms = 900000
+require_reported_tokens = false
+
+[rule_limits]
+max_triggered_rules = 128
+max_evaluated_predicates = 1024
+max_applied_effects = 512
+max_cascade_depth = 8
+
+[tui]
+state_width_percent = 30
+event_poll_ms = 50

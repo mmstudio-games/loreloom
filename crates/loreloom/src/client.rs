@@ -192,7 +192,7 @@ mod tests {
     use loreloom_tui::RuntimeClient;
 
     use super::{RuntimeAdapter, RuntimeCommand};
-    use crate::demo::build_demo;
+    use crate::demo::build_demo_with;
 
     #[test]
     fn submit_queues_without_waiting_for_a_worker_and_reports_busy() {
@@ -229,7 +229,7 @@ mod tests {
             .build()
             .expect("test runtime");
         let setup = io
-            .block_on(build_demo(&temporary.path().join("save"), &[]))
+            .block_on(build_demo_with(&temporary.path().join("save"), &[], None))
             .expect("demo setup");
         let initial_revision = setup.initial_snapshot.revision;
         let mut adapter = RuntimeAdapter::spawn(setup.runtime).expect("runtime worker");

@@ -14,6 +14,12 @@ pub enum AppError {
     Package(#[from] loreloom_content::PackageError),
     #[error("built-in demo content could not be encoded")]
     DemoCodec(#[source] serde_json::Error),
+    #[error("application configuration could not be parsed")]
+    ConfigCodec,
+    #[error("application configuration is invalid: {0}")]
+    ConfigPolicy(&'static str),
+    #[error("provider configuration or request failed")]
+    Provider,
     #[error(transparent)]
     Store(#[from] loreloom_store::StoreError),
     #[error(transparent)]
@@ -28,4 +34,10 @@ pub enum AppError {
     Text(#[from] loreloom_core::TextError),
     #[error(transparent)]
     Fixed(#[from] loreloom_core::FixedError),
+}
+
+impl From<armillae_llm::BridgeError> for AppError {
+    fn from(_error: armillae_llm::BridgeError) -> Self {
+        Self::Provider
+    }
 }

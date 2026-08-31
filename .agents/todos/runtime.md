@@ -61,5 +61,6 @@ OPEN 项、后续 RFC 或 P0 Spike；空 crate 不代表相关协议已经实现
   demo 手工构造初始 Character/Item records；
 - [x] 实现 Event Option、Gameplay Action 与声明式 Rule 的产品 executor、可信 capability 门禁、
   Save/Session Parameter 语义和通用 Tool；
-- [ ] 实现外部 Provider、非敏感配置与 Secret source 的二进制装配；
+- [x] 实现外部 Provider、严格非敏感 TOML、Environment/File Secret source、endpoint allowlist、
+  Runtime/Rule/TUI budget 与无 Secret demo 回退的二进制装配；
 - [ ] 满足 Active Spec 第 17 节全部验收条件。

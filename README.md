@@ -15,16 +15,38 @@ dependencies.
 
 ## Status
 
-Loreloom has entered workspace bootstrap. Its accepted architecture and active runtime baseline are
-recorded in:
+Loreloom now has a playable vertical slice: durable SurrealKV saves, content and rule Mods, a
+Bevy ECS working world, Narrator/NPC orchestration, declarative gameplay Tools, and a responsive
+two-pane TUI. Its accepted architecture and active runtime baseline are recorded in:
 
 - [Design index](.agents/DESIGN.md)
 - [RFC 0001: persistent agentic world and TUI architecture](.agents/rfcs/0001-loreloom-architecture.md)
 - [Active runtime specification](.agents/specs/runtime.md)
 - [Runtime implementation checklist](.agents/todos/runtime.md)
 
-RFC 0001 is Accepted and the runtime specification is Active. Unresolved protocol details remain
-scoped implementation gates and do not receive default answers from workspace scaffolding.
+RFC 0001 is Accepted and the runtime specification is Active. Deterministic Store shutdown and the
+physical backup/restore/save-switch APIs remain gated on the configured database driver.
+
+## Run
+
+The no-Secret demo uses deterministic local model bridges:
+
+```sh
+cargo run -p loreloom -- --save .loreloom/demo-save
+```
+
+Use `--headless "your input"` for a single non-TTY turn, and repeat `--mod PATH` to add explicit
+directory Mod package roots. Existing saves must reopen with the same exact ModLock.
+
+For real models, copy [loreloom.example.toml](loreloom.example.toml), keep credentials in the named
+environment variable or a referenced Secret file, and run:
+
+```sh
+cargo run -p loreloom -- --config loreloom.toml --save .loreloom/world
+```
+
+The strict config rejects unknown fields and raw `api_key`/`token` values. Custom endpoints also
+require an exact `allowed_endpoint_hosts` entry; non-loopback custom endpoints require HTTPS.
 
 ## Rust policy
 

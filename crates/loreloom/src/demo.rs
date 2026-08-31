@@ -27,6 +27,7 @@ use semver::{Version, VersionReq};
 
 use crate::{
     bridge::{DemoNarratorBridge, DemoNpcBridge},
+    config::ConfiguredProviders,
     error::AppError,
 };
 
@@ -35,13 +36,20 @@ pub struct DemoSetup {
     pub initial_snapshot: UiSnapshot,
 }
 
-pub async fn build_demo(path: &Path, mod_paths: &[PathBuf]) -> Result<DemoSetup, AppError> {
+pub async fn build_demo_with(
+    path: &Path,
+    mod_paths: &[PathBuf],
+    configured: Option<ConfiguredProviders>,
+) -> Result<DemoSetup, AppError> {
     if let Some(parent) = path.parent()
         && !parent.as_os_str().is_empty()
     {
         std::fs::create_dir_all(parent)?;
     }
-    let content = demo_content(mod_paths)?;
+    let rule_limits = configured
+        .as_ref()
+        .map_or_else(Default::default, |value| value.rules);
+    let content = demo_content(mod_paths, rule_limits)?;
     let candidate_mod_lock = content.mod_lock.clone();
     let mut ids = SystemIdGenerator;
     let (service, initial_records) = if path.exists() {
@@ -78,9 +86,19 @@ pub async fn build_demo(path: &Path, mod_paths: &[PathBuf]) -> Result<DemoSetup,
     };
     let (scene_id, npc_id) = demo_runtime_ids(&initial_records, &content.npc_definition_id)?;
     let session_id = SessionId::generate_with(&mut ids)?;
-    let narrator = Arc::new(DemoNarratorBridge::new(npc_id, scene_id));
-    let npc = Arc::new(DemoNpcBridge);
-    let mut runtime = GameRuntime::new(service, narrator, session_id, RuntimeConfig::default());
+    let (narrator, npc, runtime_config): (
+        Arc<dyn armillae_llm::LlmBridge>,
+        Arc<dyn armillae_llm::LlmBridge>,
+        RuntimeConfig,
+    ) = match configured {
+        Some(configured) => (configured.narrator, configured.npc, configured.runtime),
+        None => (
+            Arc::new(DemoNarratorBridge::new(npc_id, scene_id)),
+            Arc::new(DemoNpcBridge),
+            RuntimeConfig::default(),
+        ),
+    };
+    let mut runtime = GameRuntime::new(service, narrator, session_id, runtime_config);
     runtime.register_npc(npc_id, content.agent_definition, npc);
     let initial_snapshot = runtime.initial_snapshot().await?;
     Ok(DemoSetup {
@@ -128,7 +146,10 @@ struct DemoContent {
     agent_definition: AgentDefinition,
 }
 
-fn demo_content(mod_paths: &[PathBuf]) -> Result<DemoContent, AppError> {
+fn demo_content(
+    mod_paths: &[PathBuf],
+    rule_limits: loreloom_world::RuleLimits,
+) -> Result<DemoContent, AppError> {
     let mod_id = ModId::parse("games.loreloom.demo")?;
     let pack_id = definition_id("pack", "demo")?;
     let agent_profile_id = definition_id("agent_profile", "mira")?;
@@ -308,7 +329,7 @@ fn demo_content(mod_paths: &[PathBuf]) -> Result<DemoContent, AppError> {
         world_config: WorldConfig {
             inventory_root_definition: inventory_definition,
             spawn_system_definition: definition_id("system", "spawn")?,
-            rule_limits: Default::default(),
+            rule_limits,
         },
         scene_definition_id: scene_definition,
         npc_definition_id: npc_definition,
@@ -354,8 +375,8 @@ mod tests {
         let package = weather_package();
         write_package(&package_root, &package);
 
-        let content =
-            demo_content(std::slice::from_ref(&package_root)).expect("compiled demo Mods");
+        let content = demo_content(std::slice::from_ref(&package_root), Default::default())
+            .expect("compiled demo Mods");
         assert_eq!(content.mod_lock.mods.len(), 2);
         assert!(
             content
@@ -373,9 +394,10 @@ mod tests {
             .build()
             .expect("test runtime");
         let mut setup = io
-            .block_on(build_demo(
+            .block_on(build_demo_with(
                 &temporary.path().join("save"),
                 std::slice::from_ref(&package_root),
+                None,
             ))
             .expect("demo with external Mod");
         let outcome = io
@@ -392,7 +414,7 @@ mod tests {
     fn failed_content_bootstrap_does_not_create_a_partial_save() {
         let temporary = tempfile::tempdir().expect("temporary demo root");
         let save_path = temporary.path().join("save");
-        let content = demo_content(&[]).expect("compiled demo content");
+        let content = demo_content(&[], Default::default()).expect("compiled demo content");
         let plan = content
             .registry
             .compile_scene(&content.scene_definition_id)

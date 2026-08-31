@@ -1974,6 +1974,22 @@ stream。Snapshot 更新不得覆盖这些本地交互字段；resize 只重新 
   文本、规则参数或资源内容；
 - 自定义 Provider endpoint 遵守 Armillae 的 URL/host 安全策略。
 
+第一阶段产品二进制以可选 `--config PATH` 读取严格、`deny_unknown_fields` 的 TOML v1；未提供时保留
+无 Secret 的确定性 demo bridge。配置文件必须提供 `schema_version = 1`、`narrator` 与 `npc` 两个
+Armillae `BridgeConfig`，并可收紧/配置单 Turn、整轮编排、Rule 与 TUI budget。`--save` 与可重复的
+`--mod` 仍是非敏感 CLI 配置源；它们不写入 Provider 配置或 Secret source。
+
+Provider credential 只能使用 Armillae `CredentialRef::Environment` 或 `CredentialRef::File`；TOML
+不能出现原始 key/token 字段，第一阶段二进制也不安装通用 `Resolver`。配置解析、错误 Display、
+`Debug`、测试 Fixture 和存档都不得暴露解析后的 `SecretString`。二进制通过固定 Armillae revision 的
+Rig factory 装配其支持的 Provider；真实网络测试保持 ignored，只有用户显式提供配置和凭证时运行。
+
+显式 endpoint 必须同时通过 Armillae 结构校验和 Host `allowed_endpoint_hosts` 精确 allowlist；非
+loopback host 只允许 HTTPS，HTTP 只允许显式列出的 localhost 或 loopback IP。未配置 endpoint 的
+命名 Provider 使用 Adapter 自身默认 endpoint，不经过自定义 host 例外。配置加载或任一 Bridge
+resolve/create 失败必须在创建/打开 World 和 Save 前结束；不能先发布 World 再发现 Provider Secret
+或 endpoint 无效。
+
 ## 14. 并发、取消与故障
 
 - Runtime Command 在 Working World 外部排队，由单一逻辑 owner 处理；
