@@ -1,0 +1,18 @@
+ LORELOOM  Old Mill · Bell Room  working  rev 7
+────────────────────────────────────────────────
+ STATE   STORY   Tab to switch
+ Aster
+ STATUS
+ Alive · Standing · Idle
+ RESOURCES
+ Stamina  ━━─────  4/12
+ ATTRIBUTES
+ Resolve  12  base 10
+ CONDITIONS
+ ◇ Unknown condition · Hands tremble.
+
+ ╭ Working · Esc to cancel ───────────────────╮
+ │› Look closer▏                              │
+ │                                            │
+ ╰────────────────────────────────────────────╯
+   working  ·  rev 7  ·  Tab view  ·  ^C quit

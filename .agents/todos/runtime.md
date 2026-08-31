@@ -79,5 +79,5 @@ OPEN 项、后续 RFC 或 P0 Spike；空 crate 不代表相关协议已经实现
 - [x] 把 Spec 8.2 的 Character/Scene/Transcript 数量与字节上限接入 Narrator/NpcAgent 产品上下文，
   并在裁剪时投影 `truncated` metadata；
 - [x] 用 Runtime phase/status event 驱动 TUI thinking 展示，并移除 Provider 文本 streaming 产品协议；
-- [ ] 完成面向叙事阅读的 TUI 视觉重构；
+- [x] 完成面向叙事阅读的 TUI 视觉重构；
 - [ ] 满足 Active Spec 第 17 节全部验收条件。

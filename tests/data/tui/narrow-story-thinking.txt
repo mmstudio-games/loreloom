@@ -1,0 +1,18 @@
+ LORELOOM  Old Mill · Bell Room  working  rev 7
+────────────────────────────────────────────────
+ STATE   STORY   Tab to switch
+ STORY
+ › Ask Mira about the bell.
+
+ Mira says it rang before dawn.
+
+ ⠋ Narrator is thinking…
+ ◌ observe_scene  running
+ ✓ npc_speak  done
+ ! take_crown  rejected
+ × provider_call  failed
+ ╭ Working · Esc to cancel ───────────────────╮
+ │› Look closer▏                              │
+ │                                            │
+ ╰────────────────────────────────────────────╯
+   working  ·  rev 7  ·  Tab view  ·  ^C quit

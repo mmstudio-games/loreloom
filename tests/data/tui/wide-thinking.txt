@@ -1,0 +1,18 @@
+ LORELOOM  Old Mill · Bell Room                                  working  rev 7
+────────────────────────────────────────────────────────────────────────────────
+ Aster                 │ STORY
+ Old Mill · Bell Room  │ › Ask Mira about the bell.
+ 00:00:42              │
+ STATUS                │ Mira says it rang before dawn.
+ Alive · Standing ·    │
+ Idle                  │ ⠋ Narrator is thinking…
+ RESOURCES             │ ◌ observe_scene  running
+ Stamina  ━━─────  4/12│ ✓ npc_speak  done
+ ATTRIBUTES            │ ! take_crown  rejected
+ Resolve  12  base 10  │ × provider_call  failed
+ CONDITIONS            │ i Demo ready
+ ◇ Unknown condition · │ ╭ Working · Esc to cancel ───────────────────────────╮
+ Hands tremble.        │ │› Look closer▏                                      │
+                       │ │                                                    │
+                       │ ╰────────────────────────────────────────────────────╯
+ Narrator is thinking  ·  rev 7  ·  Esc cancel  ·  PgUp/PgDn scroll  ·  ^C quit

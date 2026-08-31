@@ -219,25 +219,61 @@ fn find_ascii(buffer: &Buffer, needle: &str) -> Option<(u16, u16)> {
 #[test]
 fn product_renderer_is_deterministic_for_wide_and_narrow_layouts() {
     let mut app = sample_app();
-    let wide = text_snapshot(render(&app, 80, 18).backend().buffer());
-    assert!(wide.contains("┌ State"));
-    assert!(wide.contains("┌ Story"));
-    assert!(wide.contains("Aster: Ask Mira about the bell."));
+    let wide_terminal = render(&app, 80, 18);
+    let wide = text_snapshot(wide_terminal.backend().buffer());
+    assert_eq!(
+        wide,
+        include_str!("../../../tests/data/tui/wide-thinking.txt").trim_end_matches('\n')
+    );
+    assert!(wide.contains("LORELOOM  Old Mill · Bell Room"));
+    assert!(wide.contains("STORY"));
+    assert!(wide.contains("› Ask Mira about the bell."));
+    assert!(wide.contains("Mira says it rang before dawn."));
+    assert!(!wide.contains("Narrator:"));
     assert!(wide.contains("Narrator is thinking…"));
-    assert!(wide.contains("[pending] observe_scene"));
+    assert!(wide.contains("observe_scene  running"));
     assert!(wide.contains("Look closer▏"));
-    assert!(wide.contains("rev 7 · Ctrl+C quit"));
+    assert!(wide.contains("Esc cancel"));
+    assert!(
+        find_ascii(wide_terminal.backend().buffer(), "Look closer").is_some_and(|(x, _)| x > 24),
+        "the wide composer stays in the right narrative pane"
+    );
     assert_eq!(wide, text_snapshot(render(&app, 80, 18).backend().buffer()));
 
-    let story = text_snapshot(render(&app, 48, 18).backend().buffer());
-    assert!(story.contains("State | [Story]"));
+    let story_terminal = render(&app, 48, 18);
+    let story = text_snapshot(story_terminal.backend().buffer());
+    assert_eq!(
+        story,
+        include_str!("../../../tests/data/tui/narrow-story-thinking.txt").trim_end_matches('\n')
+    );
+    assert!(story.contains("STATE   STORY   Tab to switch"));
+    let story_tab = find_ascii(story_terminal.backend().buffer(), "STORY").expect("story tab");
+    assert_eq!(
+        story_terminal
+            .backend()
+            .buffer()
+            .cell(story_tab)
+            .expect("story tab cell")
+            .fg,
+        ratatui::style::Color::Cyan
+    );
     assert!(story.contains("Look closer▏"));
     app.narrow_page = NarrowPage::State;
     let state = text_snapshot(render(&app, 48, 18).backend().buffer());
-    assert!(state.contains("[State] | Story"));
-    assert!(state.contains("Name: Aster"));
-    assert!(state.contains("Condition: Unknown condition Hands tremble."));
+    assert_eq!(
+        state,
+        include_str!("../../../tests/data/tui/narrow-state-thinking.txt").trim_end_matches('\n')
+    );
+    assert!(state.contains("Aster"));
+    assert!(state.contains("STATUS"));
+    assert!(state.contains("Unknown condition · Hands tremble."));
     assert!(state.contains("Look closer▏"));
+
+    app.working_phase = None;
+    app.editor = InputEditor::with_text("first\nsecond").expect("multiline input");
+    let multiline = text_snapshot(render(&app, 80, 18).backend().buffer());
+    assert!(multiline.contains("│› first"));
+    assert!(multiline.contains("│  second▏"));
 }
 
 #[test]
@@ -247,14 +283,18 @@ fn product_renderer_preserves_text_labels_and_distinct_tool_colors() {
     let terminal = render(&sample_app(), 80, 18);
     let buffer = terminal.backend().buffer();
     for (label, expected) in [
-        ("[pending]", Color::Yellow),
-        ("[succeeded]", Color::Green),
-        ("[rejected]", Color::Magenta),
-        ("[failed]", Color::Red),
+        ("◌", Color::Yellow),
+        ("✓", Color::DarkGray),
+        ("!", Color::Magenta),
+        ("×", Color::Red),
     ] {
         let position = find_ascii(buffer, label).expect("styled label exists");
         assert_eq!(buffer.cell(position).expect("label cell").fg, expected);
         assert!(text_snapshot(buffer).contains(label));
+    }
+    let text = text_snapshot(buffer);
+    for label in ["running", "done", "rejected", "failed"] {
+        assert!(text.contains(label));
     }
 }
 
