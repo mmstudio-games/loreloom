@@ -24,6 +24,26 @@ pub enum ObjectKind {
     RuleState,
 }
 
+impl ObjectKind {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Scene => "scene",
+            Self::Place => "place",
+            Self::Character => "character",
+            Self::Item => "item",
+            Self::Condition => "condition",
+            Self::SkillGrant => "skill_grant",
+            Self::Relationship => "relationship",
+            Self::KnownFact => "known_fact",
+            Self::Goal => "goal",
+            Self::EventInstance => "event_instance",
+            Self::ParameterSet => "parameter_set",
+            Self::RuleState => "rule_state",
+        }
+    }
+}
+
 macro_rules! record_component {
     ($name:ident, $record:ty) => {
         #[derive(Debug, Clone, PartialEq, Eq, Component)]

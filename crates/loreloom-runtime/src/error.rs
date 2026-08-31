@@ -16,6 +16,8 @@ pub enum RuntimeError {
     ModelProtocol { stage: &'static str },
     #[error("agent bridge is unavailable")]
     BridgeUnavailable,
+    #[error("agent capability is not authorized")]
+    CapabilityDenied,
     #[error("agent orchestration budget exhausted: {0:?}")]
     Budget(BudgetReason),
     #[error("operation was cancelled")]
@@ -49,6 +51,7 @@ impl RuntimeError {
             Self::ContentLockMismatch => "content_lock_mismatch",
             Self::ModelProtocol { .. } | Self::Agent(_) | Self::Json { .. } => "agent_error",
             Self::BridgeUnavailable => "bridge_unavailable",
+            Self::CapabilityDenied => "capability_denied",
             Self::Budget(_) => "budget_exhausted",
             Self::Cancelled => "cancelled",
             Self::Identity(_) => "identity_error",

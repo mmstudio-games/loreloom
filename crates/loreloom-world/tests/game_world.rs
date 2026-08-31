@@ -400,6 +400,7 @@ fn fixture() -> Fixture {
         config: WorldConfig {
             inventory_root_definition: root_definition,
             spawn_system_definition: definition_id("system", "spawn"),
+            rule_limits: Default::default(),
         },
         player,
         scene,

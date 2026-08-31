@@ -1,4 +1,4 @@
-use std::{sync::Arc, time::Instant};
+use std::{collections::BTreeSet, sync::Arc, time::Instant};
 
 use armillae_core::{AssistantContent, CompletionRequest, Message, ToolResult, ToolResultContent};
 use armillae_llm::LlmBridge;
@@ -45,6 +45,7 @@ pub struct AgentToolContext {
     pub actor_id: ActorId,
     pub revision: Revision,
     pub session_id: SessionId,
+    pub capabilities: BTreeSet<String>,
 }
 
 pub struct TurnInvocation<'a> {

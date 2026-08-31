@@ -1,20 +1,22 @@
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     num::NonZeroU32,
 };
 
 use bevy_ecs::{entity::Entity, prelude::Resource, world::World};
 use loreloom_content::{
     CharacterCompileRequest, Definition, DefinitionRegistry, DurationPolicy, EffectDefinition,
-    InitialCharacterLifetime, ItemDefinition, SceneSpawnPlan, SkillKind, SkillTarget,
+    InitialCharacterLifetime, ItemDefinition, ParameterPersistence, ParameterType,
+    PredicateDefinition, SceneSpawnPlan, SkillKind, SkillTarget, StackPolicy, TriggerDefinition,
 };
 use loreloom_core::{
     ActionId, ActorId, CharacterController, CharacterLifetime, CharacterRecord, CharacterSpawnSpec,
-    ConditionRecord, ContentDefinitionId, DomainRecord, EntityOrigin, EventId, ExecutionChangeSet,
-    Fixed, GoalRecord, GoalStatus, IdGenerator, ItemRecord, KnownFactRecord, LifeState, ObjectId,
-    PlaceRecord, Posture, RecordKey, Revision, SceneRecord, ShortText, SkillGrantRecord,
-    SkillSource, StackState, TranscriptItemRecord, WorldCommand, WorldCommandKind, WorldEvent,
-    WorldEventKind, WorldId, WorldStateRecord, WorldTime,
+    ConditionRecord, ConditionSource, ContentDefinitionId, DomainRecord, EntityOrigin, EventId,
+    EventStatus, ExecutionChangeSet, Fixed, GoalRecord, GoalStatus, IdGenerator, IntensityPolicy,
+    ItemRecord, KnownFactRecord, LifeState, ObjectId, ParameterSetRecord, ParameterValue,
+    PlaceRecord, Posture, RecordKey, Revision, RuleStateRecord, SceneRecord, ShortText,
+    SkillGrantRecord, SkillSource, StackState, TranscriptItemRecord, WorldCommand,
+    WorldCommandKind, WorldEvent, WorldEventKind, WorldId, WorldStateRecord, WorldTime,
 };
 
 use crate::{
@@ -26,10 +28,32 @@ use crate::{
     },
 };
 
+mod declarative;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorldConfig {
     pub inventory_root_definition: ContentDefinitionId,
     pub spawn_system_definition: ContentDefinitionId,
+    pub rule_limits: RuleLimits,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RuleLimits {
+    pub max_triggered_rules: u32,
+    pub max_evaluated_predicates: u32,
+    pub max_applied_effects: u32,
+    pub max_cascade_depth: u32,
+}
+
+impl Default for RuleLimits {
+    fn default() -> Self {
+        Self {
+            max_triggered_rules: 128,
+            max_evaluated_predicates: 1_024,
+            max_applied_effects: 512,
+            max_cascade_depth: 8,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -49,6 +73,7 @@ pub struct GameWorld {
     revision: Revision,
     objects: BTreeMap<ObjectId, Entity>,
     transcripts: BTreeMap<loreloom_core::TranscriptItemId, TranscriptItemRecord>,
+    session_parameters: BTreeMap<ContentDefinitionId, ParameterValue>,
     config: WorldConfig,
 }
 
@@ -162,6 +187,40 @@ impl GameWorld {
                 ids,
             )?);
         }
+        let mut parameter_sets =
+            BTreeMap::<ContentDefinitionId, BTreeMap<ContentDefinitionId, ParameterValue>>::new();
+        let mut rule_ids = Vec::new();
+        for (_, registered) in registry.iter() {
+            match &registered.definition {
+                Definition::Parameter(parameter)
+                    if parameter.persistence == ParameterPersistence::Save =>
+                {
+                    parameter_sets
+                        .entry(registered.origin.pack_id.clone())
+                        .or_default()
+                        .insert(parameter.id.clone(), parameter.default.clone());
+                }
+                Definition::Rule(rule) => rule_ids.push(rule.id.clone()),
+                _ => {}
+            }
+        }
+        for (pack_id, values) in parameter_sets {
+            records.push(DomainRecord::ParameterSet(ParameterSetRecord {
+                id: ObjectId::generate_with(ids)?,
+                schema_id: pack_id,
+                values,
+            }));
+        }
+        rule_ids.sort();
+        for definition_id in rule_ids {
+            records.push(DomainRecord::RuleState(RuleStateRecord {
+                id: ObjectId::generate_with(ids)?,
+                definition_id,
+                values: BTreeMap::new(),
+                trigger_count: 0,
+                last_triggered_at: None,
+            }));
+        }
         records.sort_by_key(domain_sort_key);
         Self::from_records(Revision::ZERO, records.iter().cloned(), config, registry)?;
         Ok(WorldBootstrap {
@@ -179,11 +238,23 @@ impl GameWorld {
         config: WorldConfig,
         registry: &DefinitionRegistry,
     ) -> Result<Self, WorldError> {
+        validate_rule_limits(config.rule_limits)?;
         let mut game = Self {
             world: World::new(),
             revision,
             objects: BTreeMap::new(),
             transcripts: BTreeMap::new(),
+            session_parameters: registry
+                .iter()
+                .filter_map(|(_, registered)| match &registered.definition {
+                    Definition::Parameter(parameter)
+                        if parameter.persistence == ParameterPersistence::Session =>
+                    {
+                        Some((parameter.id.clone(), parameter.default.clone()))
+                    }
+                    _ => None,
+                })
+                .collect(),
             config,
         };
         for record in records {
@@ -226,6 +297,45 @@ impl GameWorld {
         self.transcripts.values()
     }
 
+    #[must_use]
+    pub fn session_parameters(&self) -> &BTreeMap<ContentDefinitionId, ParameterValue> {
+        &self.session_parameters
+    }
+
+    pub fn restore_session_parameters(
+        &mut self,
+        values: BTreeMap<ContentDefinitionId, ParameterValue>,
+        registry: &DefinitionRegistry,
+    ) -> Result<(), WorldError> {
+        let expected = registry
+            .iter()
+            .filter_map(|(_, registered)| match &registered.definition {
+                Definition::Parameter(definition)
+                    if definition.persistence == ParameterPersistence::Session =>
+                {
+                    Some(definition.id.clone())
+                }
+                _ => None,
+            })
+            .collect::<BTreeSet<_>>();
+        if values.keys().cloned().collect::<BTreeSet<_>>() != expected {
+            return invariant("session_parameter.definition_coverage");
+        }
+        for (id, value) in &values {
+            let Some(Definition::Parameter(definition)) =
+                registry.get(id).map(|entry| &entry.definition)
+            else {
+                return Err(WorldError::DefinitionNotFound { id: id.clone() });
+            };
+            if definition.persistence != ParameterPersistence::Session {
+                return invariant("session_parameter.persistence");
+            }
+            self.validate_parameter_value(&definition.value_type, value)?;
+        }
+        self.session_parameters = values;
+        Ok(())
+    }
+
     pub fn project_records(&self) -> Result<Vec<DomainRecord>, WorldError> {
         let mut records = vec![DomainRecord::WorldState(self.world_state().clone())];
         for entity in self.objects.values() {
@@ -253,9 +363,36 @@ impl GameWorld {
                 observed: self.revision,
             });
         }
+        let rollback_revision = self.revision;
+        let rollback_records = self.project_records()?;
+        let rollback_session = self.session_parameters.clone();
+        match self.execute_inner(command, registry, ids) {
+            Ok(changes) => Ok(changes),
+            Err(error) => {
+                let mut restored = Self::from_records(
+                    rollback_revision,
+                    rollback_records,
+                    self.config.clone(),
+                    registry,
+                )?;
+                restored.restore_session_parameters(rollback_session, registry)?;
+                *self = restored;
+                Err(error)
+            }
+        }
+    }
+
+    fn execute_inner(
+        &mut self,
+        command: WorldCommand,
+        registry: &DefinitionRegistry,
+        ids: &mut impl IdGenerator,
+    ) -> Result<ExecutionChangeSet, WorldError> {
         let revision = self.revision.next()?;
         let action_id = command.action_id;
         let actor_id = command.actor_id;
+        let expected_revision = command.expected_revision;
+        let mut declarative_budget = declarative::ExecutionBudget::default();
         let (mut upserts, deletes, mut events, summary) = match command.kind {
             WorldCommandKind::Move { destination_id } => {
                 self.move_character(actor_id, destination_id, action_id, revision, ids)?
@@ -293,14 +430,50 @@ impl GameWorld {
             WorldCommandKind::AppendTranscript { items } => {
                 self.append_transcripts(actor_id, items, revision)?
             }
+            WorldCommandKind::ChooseEventOption {
+                event_instance_id,
+                option_id,
+            } => self.choose_event_option(
+                actor_id,
+                event_instance_id,
+                option_id,
+                action_id,
+                revision,
+                registry,
+                ids,
+                &mut declarative_budget,
+            )?,
+            WorldCommandKind::PerformGameplayAction {
+                action_id: definition_id,
+                arguments,
+            } => self.perform_gameplay_action(
+                actor_id,
+                definition_id,
+                arguments,
+                action_id,
+                revision,
+                registry,
+                ids,
+                &mut declarative_budget,
+            )?,
         };
+        self.run_declarative_rules(
+            actor_id,
+            action_id,
+            revision,
+            registry,
+            ids,
+            &mut upserts,
+            &mut events,
+            &mut declarative_budget,
+        )?;
         self.revision = revision;
         self.validate(registry)?;
-        upserts.sort_by_key(domain_sort_key);
+        upserts = coalesce_upserts(upserts)?;
         events.sort_by_key(|event| event.id);
         Ok(ExecutionChangeSet {
             action_id,
-            expected_revision: command.expected_revision,
+            expected_revision,
             revision,
             upserts,
             deletes,
@@ -506,6 +679,9 @@ impl GameWorld {
     }
 
     fn validate_references(&self, registry: &DefinitionRegistry) -> Result<(), WorldError> {
+        let mut parameter_schemas = BTreeSet::new();
+        let mut saved_parameters = BTreeSet::new();
+        let mut rule_state_counts = BTreeMap::<ContentDefinitionId, u32>::new();
         for entity in self.objects.values() {
             if let Some(value) = self.world.get::<SceneComponent>(*entity) {
                 let entry = self.place(value.0.entry_place)?;
@@ -581,11 +757,100 @@ impl GameWorld {
                     .ok_or(WorldError::WrongObjectKind {
                         id: value.0.owner_id.object_id(),
                     })?;
-            } else if let Some(value) = self.world.get::<EventInstanceComponent>(*entity)
-                && let Some(scene_id) = value.0.scene_id
-            {
-                self.scene(scene_id)?;
+            } else if let Some(value) = self.world.get::<EventInstanceComponent>(*entity) {
+                if let Some(scene_id) = value.0.scene_id {
+                    self.scene(scene_id)?;
+                }
+                let definition = registry
+                    .get(&value.0.definition_id)
+                    .and_then(|entry| match &entry.definition {
+                        Definition::Event(definition) => Some(definition),
+                        _ => None,
+                    })
+                    .ok_or_else(|| WorldError::DefinitionNotFound {
+                        id: value.0.definition_id.clone(),
+                    })?;
+                if !definition
+                    .nodes
+                    .iter()
+                    .any(|node| node.id == value.0.current_node)
+                {
+                    return invariant("event_instance.current_node");
+                }
+            } else if let Some(value) = self.world.get::<ParameterSetComponent>(*entity) {
+                if !parameter_schemas.insert(value.0.schema_id.clone()) {
+                    return invariant("parameter_set.schema_unique");
+                }
+                for (parameter_id, parameter_value) in &value.0.values {
+                    let entry = registry.get(parameter_id).ok_or_else(|| {
+                        WorldError::DefinitionNotFound {
+                            id: parameter_id.clone(),
+                        }
+                    })?;
+                    let Definition::Parameter(definition) = &entry.definition else {
+                        return Err(WorldError::DefinitionNotFound {
+                            id: parameter_id.clone(),
+                        });
+                    };
+                    if definition.id != *parameter_id
+                        || definition.persistence != ParameterPersistence::Save
+                        || entry.origin.pack_id != value.0.schema_id
+                        || !saved_parameters.insert(parameter_id.clone())
+                    {
+                        return invariant("parameter_set.value_ownership");
+                    }
+                    self.validate_parameter_value(&definition.value_type, parameter_value)?;
+                }
+            } else if let Some(value) = self.world.get::<RuleStateComponent>(*entity) {
+                require_definition(registry, &value.0.definition_id, "rule")?;
+                let count = rule_state_counts
+                    .entry(value.0.definition_id.clone())
+                    .or_default();
+                *count = count.checked_add(1).ok_or(WorldError::Invariant {
+                    invariant: "rule_state.count",
+                })?;
             }
+        }
+        let mut expected_saved_parameters = BTreeSet::new();
+        let mut expected_session_parameters = BTreeSet::new();
+        for (_, entry) in registry.iter() {
+            match &entry.definition {
+                Definition::Parameter(definition) => match definition.persistence {
+                    ParameterPersistence::Save => {
+                        expected_saved_parameters.insert(definition.id.clone());
+                    }
+                    ParameterPersistence::Session => {
+                        expected_session_parameters.insert(definition.id.clone());
+                    }
+                },
+                Definition::Rule(definition)
+                    if rule_state_counts.get(&definition.id).copied() != Some(1) =>
+                {
+                    return invariant("rule_state.definition_unique");
+                }
+                _ => {}
+            }
+        }
+        if saved_parameters != expected_saved_parameters
+            || self
+                .session_parameters
+                .keys()
+                .cloned()
+                .collect::<BTreeSet<_>>()
+                != expected_session_parameters
+        {
+            return invariant("parameter_set.definition_coverage");
+        }
+        for (id, value) in &self.session_parameters {
+            let Some(Definition::Parameter(definition)) =
+                registry.get(id).map(|entry| &entry.definition)
+            else {
+                return Err(WorldError::DefinitionNotFound { id: id.clone() });
+            };
+            if definition.persistence != ParameterPersistence::Session {
+                return invariant("session_parameter.persistence");
+            }
+            self.validate_parameter_value(&definition.value_type, value)?;
         }
         Ok(())
     }
@@ -1228,6 +1493,26 @@ type ChangeParts = (
     Vec<WorldEvent>,
     ShortText,
 );
+
+fn coalesce_upserts(records: Vec<DomainRecord>) -> Result<Vec<DomainRecord>, WorldError> {
+    let mut latest = BTreeMap::new();
+    for record in records {
+        latest.insert(record.key()?, record);
+    }
+    Ok(latest.into_values().collect())
+}
+
+fn validate_rule_limits(limits: RuleLimits) -> Result<(), WorldError> {
+    let maximum = RuleLimits::default();
+    if limits.max_triggered_rules > maximum.max_triggered_rules
+        || limits.max_evaluated_predicates > maximum.max_evaluated_predicates
+        || limits.max_applied_effects > maximum.max_applied_effects
+        || limits.max_cascade_depth > maximum.max_cascade_depth
+    {
+        return invariant("rule_limits.maximum");
+    }
+    Ok(())
+}
 
 fn materialize_character_records(
     spec: CharacterSpawnSpec,

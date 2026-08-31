@@ -690,6 +690,29 @@ plan。第一阶段 Runtime 只注册 `list_gameplay_actions`/`perform_gameplay_
 Definition ID 不是动态 Tool 名。参数缺失、额外参数、类型/范围错误或任一 Effect 失败均不推进
 Revision。
 
+产品 executor 固定把 Predicate 与 Effect 的隐含主体绑定到可信 Runtime 提供的 acting Actor；
+`ResourceAtLeast`/`HasCondition` 查询该 Actor，`HasTag` 查询该 Actor profile 与当前 Place。第一阶段
+`ResourceDelta`、`ApplyCondition`、`GrantItem` 和 `GrantSkill` 也只作用于该 Actor；Mod 参数不能改写
+target。`SetParameter` 按 Parameter Definition 的 ContentOrigin pack 分组到全局 ParameterSet：`save`
+值进入 RecordOp，`session` 值只存在当前 Runtime session 的 ECS 工作状态且不得进入 checkpoint/
+RecordOp；Runtime 在 candidate 失败恢复时必须保留最后已提交的 session overlay，而新进程从 default
+重新开始。ParameterSet 的 `schema_id` 固定为定义它的 pack ID，values 只能包含同 pack 且同
+persistence 组的 Parameter ID。
+
+`PerformGameplayAction` 参数是 `BTreeMap<ContentDefinitionId, ParameterValue>`，必须与 Action 的
+parameter ID 精确匹配：required 缺失、额外 key、类型/范围或 ObjectRef kind 错误全部拒绝。Runtime
+在构造 Command 前把 Action `capability` 与可信 Agent/Narrator capability set 比较；World 不接受
+模型提供的 capability 声明。`ChooseEventOption` 的 Effect、Option history、next node（没有 next
+node 时完成实例）与所有触发 Rule 属于同一个 candidate Revision。
+
+每个成功 Command 先产生基础领域 Event，再以其规范 event type 触发 `WorldEvent` Rule；Gameplay
+Action、跨 Scene Move 和 Clock boundary 分别追加对应 Trigger。匹配 Rule 按
+`priority -> rule definition ID -> RuleState instance ID` 执行；同一 Rule 的 Predicate 失败只跳过该
+Rule，执行错误或预算耗尽回滚完整 Command candidate。`EmitEvent` 产生带 source Rule ID 的领域
+Event 并按 FIFO、depth+1 继续 cascade；Content 编译期拒绝静态可检测的 EmitEvent cycle，运行时
+预算仍是最终防线。每个实际执行的 Rule 更新唯一 RuleState 的 trigger count/last tick，并产生可
+审计的 Rule Event；Load/Replay 只恢复这些记录，不重新触发。
+
 Definition Registry 在一个活动世界版本内不可被隐式替换。启停 Mod、应用 Patch 或热重载会
 改变规则/Schema，只能通过未来明确的迁移与世界重建边界执行，不能在 Schedule 中间替换。
 
@@ -759,11 +782,19 @@ pub enum WorldCommandKind {
     SpawnCharacter { spec: Box<CharacterSpawnSpec> },
     PromoteCharacter { actor_id: ActorId },
     AppendTranscript { items: Vec<TranscriptItemRecord> },
+    ChooseEventOption {
+        event_instance_id: ObjectId,
+        option_id: ContentDefinitionId,
+    },
+    PerformGameplayAction {
+        action_id: ContentDefinitionId,
+        arguments: BTreeMap<ContentDefinitionId, ParameterValue>,
+    },
 }
 ```
 
-以上是第一阶段已经冻结的最小产品命令集合；Event Option、Gameplay Action、UseItem、Knowledge/Goal
-专用 Command 在对应 executor 实现时按本节共同规则增量加入，不能用任意 Component patch 代替。
+以上是第一阶段已经冻结的最小产品命令集合；UseItem、Knowledge/Goal 专用 Command 在对应 executor
+实现时按本节共同规则增量加入，不能用任意 Component patch 代替。
 `AppendTranscript` 只供可信 Runtime 保存 Player/Narrator/Agent 输出：Runtime 分配 TranscriptItemId、
 Session/Revision 和 speaker binding，模型不能直接构造该 Command。每个 Command 必须：
 

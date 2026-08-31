@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use loreloom_agent::ResourceBudget;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -26,8 +28,9 @@ impl Default for OrchestrationBudget {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct RuntimeConfig {
     pub turn_budget: ResourceBudget,
     pub orchestration_budget: OrchestrationBudget,
+    pub narrator_capabilities: BTreeSet<String>,
 }

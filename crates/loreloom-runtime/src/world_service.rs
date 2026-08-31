@@ -1,4 +1,4 @@
-use std::{path::Path, sync::Arc};
+use std::{collections::BTreeMap, path::Path, sync::Arc};
 
 use armillae_core::{ToolCall, ToolDefinition, ToolResult, ToolResultContent};
 use armillae_tools::{BoxFuture, ToolContext, ToolExecutionError, ToolExecutor};
@@ -8,11 +8,12 @@ use loreloom_content::{
 };
 use loreloom_core::{
     ActionId, ActiveEventView, ActorId, AttributeAdjustment, AttributeOperation, AttributeView,
-    CharacterContext, CharacterController, ConditionView, DomainRecord, EventId, EventOptionView,
-    InventoryView, LongText, ModLock, ObjectId, ParameterSetView, ParameterValueView, ResourceView,
-    Revision, RuntimePhase, SAVE_FORMAT_V1, SaveId, SaveManifest, SceneContext, SceneObservation,
-    SessionId, SkillView, SystemIdGenerator, ToolActivity, TranscriptWindow, UiNotice, UiSnapshot,
-    VisibleActorView, WorldCommand, WorldCommandKind, WorldEvent,
+    CharacterContext, CharacterController, ConditionView, ContentDefinitionId, DomainRecord,
+    EventId, EventOptionView, InventoryView, LongText, ModLock, ObjectId, ParameterSetView,
+    ParameterValue, ParameterValueView, ResourceView, Revision, RuntimePhase, SAVE_FORMAT_V1,
+    SaveId, SaveManifest, SceneContext, SceneObservation, SessionId, SkillView, SystemIdGenerator,
+    ToolActivity, TranscriptWindow, UiNotice, UiSnapshot, VisibleActorView, WorldCommand,
+    WorldCommandKind, WorldEvent,
 };
 use loreloom_store::{ActionResolution, CommitRequest, CommitResult, CommittedAction, SaveStore};
 use loreloom_world::{GameWorld, WorldBootstrap, WorldConfig};
@@ -235,6 +236,68 @@ impl WorldService {
         apply_command(&mut inner, command).await
     }
 
+    async fn list_gameplay_actions(
+        &self,
+        context: &AgentToolContext,
+    ) -> Result<JsonValue, RuntimeError> {
+        let inner = self.inner.lock().await;
+        if inner.world.revision() != context.revision {
+            return Err(RuntimeError::Unavailable);
+        }
+        let mut actions = inner
+            .registry
+            .iter()
+            .filter_map(|(_, entry)| match &entry.definition {
+                Definition::GameplayAction(action)
+                    if context.capabilities.contains(action.capability.as_str()) =>
+                {
+                    Some(json!({
+                        "action_id": action.id,
+                        "display_name": action.display_name,
+                        "capability": action.capability,
+                        "parameters": action.parameters,
+                    }))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        actions.sort_by(|left, right| left["action_id"].as_str().cmp(&right["action_id"].as_str()));
+        Ok(json!({
+            "revision": context.revision,
+            "actions": actions,
+        }))
+    }
+
+    async fn perform_gameplay_action(
+        &self,
+        context: &AgentToolContext,
+        action_id: ContentDefinitionId,
+        arguments: BTreeMap<ContentDefinitionId, ParameterValue>,
+    ) -> Result<CommittedAction, RuntimeError> {
+        let mut inner = self.inner.lock().await;
+        let capability = inner
+            .registry
+            .get(&action_id)
+            .and_then(|entry| match &entry.definition {
+                Definition::GameplayAction(action) => Some(action.capability.as_str()),
+                _ => None,
+            })
+            .ok_or(RuntimeError::InvalidInput)?;
+        if !context.capabilities.contains(capability) {
+            return Err(RuntimeError::CapabilityDenied);
+        }
+        let command = WorldCommand {
+            action_id: ActionId::generate_with(&mut inner.ids)?,
+            actor_id: context.actor_id,
+            expected_revision: context.revision,
+            kind: WorldCommandKind::PerformGameplayAction {
+                action_id,
+                arguments,
+            },
+        };
+        apply_command(&mut inner, command).await
+    }
+
     pub async fn snapshot(
         &self,
         session_id: SessionId,
@@ -252,7 +315,11 @@ impl WorldService {
             session_id,
             player: character_context(&records, &inner.registry, player_id, revision)?,
             scene: scene_context(&records, &inner.events, player_id, revision)?,
-            parameters: parameter_views(&records, &inner.registry)?,
+            parameters: parameter_views(
+                &records,
+                inner.world.session_parameters(),
+                &inner.registry,
+            )?,
             active_events: active_event_views(&records, &inner.registry, player_id)?,
             transcript: transcript_window(&records, CONTEXT_TRANSCRIPT_LIMIT),
             tool_activity,
@@ -321,6 +388,47 @@ impl ToolExecutor for RuntimeToolExecutor {
                     "additionalProperties": false
                 }),
             },
+            ToolDefinition {
+                name: "list_gameplay_actions".to_owned(),
+                description: "List declarative gameplay actions authorized for this agent."
+                    .to_owned(),
+                input_schema: json!({
+                    "type": "object",
+                    "additionalProperties": false
+                }),
+            },
+            ToolDefinition {
+                name: "perform_gameplay_action".to_owned(),
+                description: "Perform one authorized declarative gameplay action.".to_owned(),
+                input_schema: json!({
+                    "type": "object",
+                    "required": ["action_id", "arguments"],
+                    "properties": {
+                        "action_id": { "type": "string" },
+                        "arguments": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "object",
+                                "required": ["type", "value"]
+                            }
+                        }
+                    },
+                    "additionalProperties": false
+                }),
+            },
+            ToolDefinition {
+                name: "choose_event_option".to_owned(),
+                description: "Choose an option on an active event instance.".to_owned(),
+                input_schema: json!({
+                    "type": "object",
+                    "required": ["event_instance_id", "option_id"],
+                    "properties": {
+                        "event_instance_id": { "type": "string" },
+                        "option_id": { "type": "string" }
+                    },
+                    "additionalProperties": false
+                }),
+            },
         ]
     }
 
@@ -358,6 +466,32 @@ impl ToolExecutor for RuntimeToolExecutor {
                         .map(committed_json),
                     _ => Err(RuntimeError::InvalidInput),
                 },
+                "list_gameplay_actions" => self.service.list_gameplay_actions(runtime).await,
+                "perform_gameplay_action" => match parse_gameplay_action(&call.arguments) {
+                    Ok((action_id, arguments)) => self
+                        .service
+                        .perform_gameplay_action(runtime, action_id, arguments)
+                        .await
+                        .map(committed_json),
+                    Err(error) => Err(error),
+                },
+                "choose_event_option" => match (
+                    parse_object_id(&call.arguments, "event_instance_id"),
+                    parse_definition_id(&call.arguments, "option_id"),
+                ) {
+                    (Ok(event_instance_id), Ok(option_id)) => self
+                        .service
+                        .execute(
+                            runtime,
+                            WorldCommandKind::ChooseEventOption {
+                                event_instance_id,
+                                option_id,
+                            },
+                        )
+                        .await
+                        .map(committed_json),
+                    _ => Err(RuntimeError::InvalidInput),
+                },
                 _ => {
                     return Err(ToolExecutionError::UnknownTool {
                         name: call.name.clone(),
@@ -376,6 +510,7 @@ async fn apply_command(
     inner: &mut RuntimeWorld,
     command: WorldCommand,
 ) -> Result<CommittedAction, RuntimeError> {
+    let committed_session = inner.world.session_parameters().clone();
     let changes = {
         let RuntimeWorld {
             world,
@@ -386,11 +521,12 @@ async fn apply_command(
         match world.execute(command.clone(), registry, ids) {
             Ok(changes) => changes,
             Err(error) => {
-                recover(inner).await?;
+                recover(inner, committed_session).await?;
                 return Err(RuntimeError::World(error));
             }
         }
     };
+    let candidate_session = inner.world.session_parameters().clone();
     let events = changes.events.clone();
     let request = CommitRequest::from_execution(command.clone(), changes)?;
     match inner.store.commit(&request).await {
@@ -404,36 +540,46 @@ async fn apply_command(
             Ok(outcome)
         }
         Ok(CommitResult::Conflict { .. }) => {
-            recover(inner).await?;
+            recover(inner, committed_session).await?;
             Err(RuntimeError::Unavailable)
         }
         Ok(CommitResult::ActionIdentityConflict { .. }) => {
-            recover(inner).await?;
+            recover(inner, committed_session).await?;
             Err(RuntimeError::Unavailable)
         }
         Err(error) => {
             let resolution = inner.store.resolve_action(&command).await;
-            recover(inner).await?;
             match resolution {
-                Ok(ActionResolution::Committed(outcome)) => Ok(outcome),
+                Ok(ActionResolution::Committed(outcome)) => {
+                    recover(inner, candidate_session).await?;
+                    Ok(outcome)
+                }
                 Ok(
                     ActionResolution::NotCommitted { .. }
                     | ActionResolution::ActionIdentityConflict { .. },
                 )
-                | Err(_) => Err(RuntimeError::Store(error)),
+                | Err(_) => {
+                    recover(inner, committed_session).await?;
+                    Err(RuntimeError::Store(error))
+                }
             }
         }
     }
 }
 
-async fn recover(inner: &mut RuntimeWorld) -> Result<(), RuntimeError> {
+async fn recover(
+    inner: &mut RuntimeWorld,
+    session_parameters: BTreeMap<ContentDefinitionId, ParameterValue>,
+) -> Result<(), RuntimeError> {
     let loaded = inner.store.load().await?;
-    inner.world = GameWorld::from_records(
+    let mut world = GameWorld::from_records(
         loaded.revision,
         loaded.records,
         inner.config.clone(),
         &inner.registry,
     )?;
+    world.restore_session_parameters(session_parameters, &inner.registry)?;
+    inner.world = world;
     inner.events = loaded.events;
     Ok(())
 }
@@ -767,6 +913,7 @@ const fn operation_order(operation: AttributeOperation) -> u8 {
 
 fn parameter_views(
     records: &[DomainRecord],
+    session_parameters: &BTreeMap<ContentDefinitionId, ParameterValue>,
     registry: &DefinitionRegistry,
 ) -> Result<Vec<ParameterSetView>, RuntimeError> {
     let mut sets = records
@@ -779,6 +926,11 @@ fn parameter_views(
             let mut values = set
                 .values
                 .iter()
+                .chain(session_parameters.iter().filter(|(parameter_id, _)| {
+                    registry
+                        .get(parameter_id)
+                        .is_some_and(|registered| registered.origin.pack_id == set.schema_id)
+                }))
                 .filter_map(|(parameter_id, value)| {
                     let registered = registry.get(parameter_id)?;
                     let Definition::Parameter(parameter) = &registered.definition else {
@@ -957,6 +1109,37 @@ fn parse_object_id(arguments: &JsonValue, field: &str) -> Result<ObjectId, Runti
         .ok_or(RuntimeError::InvalidInput)?
         .parse()
         .map_err(RuntimeError::Identity)
+}
+
+fn parse_definition_id(
+    arguments: &JsonValue,
+    field: &str,
+) -> Result<ContentDefinitionId, RuntimeError> {
+    arguments
+        .get(field)
+        .and_then(JsonValue::as_str)
+        .ok_or(RuntimeError::InvalidInput)?
+        .parse()
+        .map_err(RuntimeError::Identity)
+}
+
+fn parse_gameplay_action(
+    arguments: &JsonValue,
+) -> Result<
+    (
+        ContentDefinitionId,
+        BTreeMap<ContentDefinitionId, ParameterValue>,
+    ),
+    RuntimeError,
+> {
+    let action_id = parse_definition_id(arguments, "action_id")?;
+    let values = arguments
+        .get("arguments")
+        .cloned()
+        .ok_or(RuntimeError::InvalidInput)?;
+    let arguments = serde_json::from_value(values)
+        .map_err(|source| RuntimeError::json("tool_arguments", source))?;
+    Ok((action_id, arguments))
 }
 
 fn committed_json(outcome: CommittedAction) -> JsonValue {

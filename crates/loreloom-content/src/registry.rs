@@ -737,12 +737,15 @@ fn validate_local_values(definition: &Definition) -> Result<(), ContentError> {
         Definition::Event(value) => validate_event(value).map_err(invalid),
         Definition::GameplayAction(value)
             if value.parameters.len() > 64
-                || value.predicates.len() > 64
+                || predicate_nodes(&value.predicates).is_none_or(|count| count > 64)
                 || value.effects.len() > 32 =>
         {
             Err(invalid("gameplay_action.budget"))
         }
-        Definition::Rule(value) if value.predicates.len() > 64 || value.effects.len() > 32 => {
+        Definition::Rule(value)
+            if predicate_nodes(&value.predicates).is_none_or(|count| count > 64)
+                || value.effects.len() > 32 =>
+        {
             Err(invalid("rule.budget"))
         }
         Definition::Scene(value) => {
@@ -816,8 +819,32 @@ fn validate_event(value: &EventDefinition) -> Result<(), &'static str> {
         {
             return Err("event.options");
         }
+        if node.options.iter().any(|option| {
+            predicate_nodes(&option.visible_if).is_none_or(|count| count > 64)
+                || predicate_nodes(&option.enabled_if).is_none_or(|count| count > 64)
+                || option.effects.len() > 32
+        }) {
+            return Err("event.option.budget");
+        }
     }
     Ok(())
+}
+
+fn predicate_nodes(predicates: &[PredicateDefinition]) -> Option<usize> {
+    predicates.iter().try_fold(0_usize, |total, predicate| {
+        let children = match predicate {
+            PredicateDefinition::Not { predicate } => {
+                predicate_nodes(std::slice::from_ref(predicate))?
+            }
+            PredicateDefinition::All { predicates } | PredicateDefinition::Any { predicates } => {
+                predicate_nodes(predicates)?
+            }
+            PredicateDefinition::ResourceAtLeast { .. }
+            | PredicateDefinition::HasCondition { .. }
+            | PredicateDefinition::HasTag { .. } => 0,
+        };
+        total.checked_add(1)?.checked_add(children)
+    })
 }
 
 fn validate_skill(value: &crate::schema::SkillDefinition) -> Result<(), &'static str> {
@@ -1056,7 +1083,88 @@ fn validate_references(
             | Definition::Attribute(_) => {}
         }
     }
+    validate_rule_cycles(definitions)
+}
+
+fn validate_rule_cycles(
+    definitions: &BTreeMap<ContentDefinitionId, RegisteredDefinition>,
+) -> Result<(), ContentError> {
+    let mut listeners = BTreeMap::<ShortText, Vec<ContentDefinitionId>>::new();
+    for (id, entry) in definitions {
+        if let Definition::Rule(rule) = &entry.definition
+            && let TriggerDefinition::WorldEvent { event_type } = &rule.trigger
+        {
+            listeners
+                .entry(event_type.clone())
+                .or_default()
+                .push(id.clone());
+        }
+    }
+    let mut edges = BTreeMap::<ContentDefinitionId, BTreeSet<ContentDefinitionId>>::new();
+    for (id, entry) in definitions {
+        let Definition::Rule(rule) = &entry.definition else {
+            continue;
+        };
+        for effect in &rule.effects {
+            let event_type = effect_event_type(effect)?;
+            if let Some(targets) = event_type.as_ref().and_then(|kind| listeners.get(kind)) {
+                edges
+                    .entry(id.clone())
+                    .or_default()
+                    .extend(targets.iter().cloned());
+            }
+        }
+    }
+    let mut visiting = BTreeSet::new();
+    let mut visited = BTreeSet::new();
+    for id in edges.keys() {
+        if rule_cycle_from(id, &edges, &mut visiting, &mut visited) {
+            return Err(ContentError::InvalidValue {
+                id: id.clone(),
+                field: "rule.emit_cycle",
+            });
+        }
+    }
     Ok(())
+}
+
+fn effect_event_type(effect: &EffectDefinition) -> Result<Option<ShortText>, ContentError> {
+    let value = match effect {
+        EffectDefinition::ResourceDelta { .. } => Some("resource_changed"),
+        EffectDefinition::ApplyCondition { .. } => Some("condition_applied"),
+        EffectDefinition::GrantItem { .. } => Some("item_granted"),
+        EffectDefinition::GrantSkill { .. } => Some("skill_granted"),
+        EffectDefinition::SetParameter { .. } => Some("parameter_changed"),
+        EffectDefinition::EmitEvent { event_type } => return Ok(Some(event_type.clone())),
+    };
+    value
+        .map(ShortText::new)
+        .transpose()
+        .map_err(|_| ContentError::TextBound)
+}
+
+fn rule_cycle_from(
+    id: &ContentDefinitionId,
+    edges: &BTreeMap<ContentDefinitionId, BTreeSet<ContentDefinitionId>>,
+    visiting: &mut BTreeSet<ContentDefinitionId>,
+    visited: &mut BTreeSet<ContentDefinitionId>,
+) -> bool {
+    if visited.contains(id) {
+        return false;
+    }
+    if !visiting.insert(id.clone()) {
+        return true;
+    }
+    if edges.get(id).is_some_and(|targets| {
+        targets
+            .iter()
+            .any(|target| rule_cycle_from(target, edges, visiting, visited))
+    }) {
+        return true;
+    }
+    visiting.remove(id);
+    visited.insert(id.clone());
+    false
 }
 
 fn validate_parameter_references(

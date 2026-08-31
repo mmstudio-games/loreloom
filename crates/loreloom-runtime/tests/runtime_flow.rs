@@ -9,7 +9,7 @@ use std::{
 
 use armillae_core::{
     AssistantContent, CompletionRequest, CompletionResponse, FinishReason, TextContent, ToolCall,
-    ToolCallId,
+    ToolCallId, ToolResultContent,
 };
 use armillae_llm::{
     BoxFuture as BridgeFuture, BridgeCapabilities, BridgeError, CompletionStream, LlmBridge,
@@ -21,10 +21,10 @@ use loreloom_agent::{
 };
 use loreloom_content::{
     AgentProfileDefinition, AttributeDefinition, CONTENT_SCHEMA_V1, ContainerDefinition,
-    ContentDocument, ContentPackContext, Definition, DefinitionRegistry, EventDefinition,
-    EventNodeDefinition, EventOptionDefinition, ItemDefinition, ParameterDefinition,
-    ParameterPersistence, ParameterType, ParameterVisibility, PlaceDefinition, SceneDefinition,
-    parse_content_hash,
+    ContentDocument, ContentPackContext, Definition, DefinitionRegistry, EffectDefinition,
+    EventDefinition, EventNodeDefinition, EventOptionDefinition, GameplayActionDefinition,
+    ItemDefinition, ParameterDefinition, ParameterPersistence, ParameterType, ParameterVisibility,
+    PlaceDefinition, SceneDefinition, parse_content_hash,
 };
 use loreloom_core::{
     ActionId, ActionState, ActorId, AgentBinding, AttributeAdjustment, AttributeOperation,
@@ -90,6 +90,8 @@ fn fixture() -> Fixture {
     let attribute_id = definition_id("attribute", "resolve");
     let public_parameter = definition_id("parameter", "rain_count");
     let hidden_parameter = definition_id("parameter", "secret_count");
+    let session_parameter = definition_id("parameter", "hint_seen");
+    let gameplay_action = definition_id("gameplay_action", "mark_rain");
     let event_definition = definition_id("event", "rain");
     let event_node = definition_id("event_node", "rain_entry");
     let event_option = definition_id("event_option", "listen");
@@ -100,7 +102,7 @@ fn fixture() -> Fixture {
         ContentPackContext {
             mod_id,
             mod_version: Version::new(1, 0, 0),
-            pack_id,
+            pack_id: pack_id.clone(),
             content_version: 1,
             content_hash: parse_content_hash("b".repeat(64)).expect("content hash"),
         },
@@ -132,6 +134,31 @@ fn fixture() -> Fixture {
                     default: ParameterValue::Counter(0),
                     visibility: ParameterVisibility::Public,
                     persistence: ParameterPersistence::Save,
+                }),
+                Definition::Parameter(ParameterDefinition {
+                    id: session_parameter.clone(),
+                    display_name: name("Hint seen"),
+                    value_type: ParameterType::Bool,
+                    default: ParameterValue::Bool(false),
+                    visibility: ParameterVisibility::Public,
+                    persistence: ParameterPersistence::Session,
+                }),
+                Definition::GameplayAction(GameplayActionDefinition {
+                    id: gameplay_action,
+                    display_name: name("Mark the rain"),
+                    capability: text("gameplay.weather"),
+                    parameters: Vec::new(),
+                    predicates: Vec::new(),
+                    effects: vec![
+                        EffectDefinition::SetParameter {
+                            parameter_id: public_parameter.clone(),
+                            value: ParameterValue::Counter(4),
+                        },
+                        EffectDefinition::SetParameter {
+                            parameter_id: session_parameter,
+                            value: ParameterValue::Bool(true),
+                        },
+                    ],
                 }),
                 Definition::Parameter(ParameterDefinition {
                     id: hidden_parameter.clone(),
@@ -273,7 +300,7 @@ fn fixture() -> Fixture {
         ),
         DomainRecord::ParameterSet(ParameterSetRecord {
             id: object_id("2b45"),
-            schema_id: definition_id("parameter_schema", "weather"),
+            schema_id: pack_id,
             values: BTreeMap::from([
                 (public_parameter, ParameterValue::Counter(3)),
                 (hidden_parameter, ParameterValue::Counter(9)),
@@ -317,6 +344,7 @@ fn fixture() -> Fixture {
         world_config: WorldConfig {
             inventory_root_definition: inventory_definition,
             spawn_system_definition: definition_id("system", "spawn"),
+            rule_limits: Default::default(),
         },
         player,
         npc,
@@ -615,12 +643,12 @@ async fn player_narrator_npc_and_surreal_store_form_a_durable_vertical_slice() {
         Fixed::from_integer(12).expect("effective attribute")
     );
     assert_eq!(outcome.snapshot.parameters.len(), 1);
-    assert_eq!(outcome.snapshot.parameters[0].values.len(), 1);
-    assert_eq!(
-        outcome.snapshot.parameters[0].values[0]
-            .display_name
-            .as_str(),
-        "Rain count"
+    assert_eq!(outcome.snapshot.parameters[0].values.len(), 2);
+    assert!(
+        outcome.snapshot.parameters[0]
+            .values
+            .iter()
+            .any(|value| value.display_name.as_str() == "Rain count")
     );
     assert_eq!(outcome.snapshot.active_events.len(), 1);
     assert_eq!(outcome.snapshot.active_events[0].options.len(), 1);
@@ -800,6 +828,7 @@ async fn external_revision_conflict_recovers_the_candidate_world() {
                 actor_id: fixture.player,
                 revision: Revision::ZERO,
                 session_id: parse("ses_01890f6a-2b81-7d4e-8f90-123456789abc"),
+                capabilities: Default::default(),
             }),
             ToolCall {
                 id: ToolCallId::new("conflicting-call").expect("call id"),
@@ -823,4 +852,161 @@ async fn external_revision_conflict_recovers_the_candidate_world() {
         .await
         .expect("recovered snapshot");
     assert_eq!(snapshot.scene.clock, WorldTime::from_ticks(5));
+}
+
+#[tokio::test]
+async fn generic_gameplay_tools_enforce_capabilities_and_preserve_session_overlay_on_recovery() {
+    let directory = TempDir::new().expect("temporary save parent");
+    let fixture = fixture();
+    let store = SaveStore::create(
+        directory.path().join("save"),
+        fixture.manifest.clone(),
+        fixture.records.clone(),
+    )
+    .await
+    .expect("create save");
+    let service = WorldService::open(
+        store,
+        fixture.registry.clone(),
+        &fixture.manifest.mod_lock,
+        fixture.world_config.clone(),
+    )
+    .await
+    .expect("open service");
+    let executor = RuntimeToolExecutor::new(Arc::clone(&service));
+    let session_id = parse("ses_01890f6a-2b91-7d4e-8f90-123456789abc");
+    let authorized = BTreeSet::from(["gameplay.weather".to_owned()]);
+
+    let listed = executor
+        .execute(
+            ToolContext::new().with_extension(AgentToolContext {
+                actor_id: fixture.player,
+                revision: Revision::ZERO,
+                session_id,
+                capabilities: authorized.clone(),
+            }),
+            ToolCall {
+                id: ToolCallId::new("list-actions").expect("call id"),
+                name: "list_gameplay_actions".to_owned(),
+                arguments: json!({}),
+            },
+        )
+        .await
+        .expect("list result");
+    let ToolResultContent::Json { value: listed } = &listed.content[0] else {
+        panic!("JSON tool result")
+    };
+    assert_eq!(listed["actions"].as_array().expect("actions").len(), 1);
+    assert_eq!(
+        listed["actions"][0]["action_id"],
+        json!(definition_id("gameplay_action", "mark_rain"))
+    );
+
+    let performed = executor
+        .execute(
+            ToolContext::new().with_extension(AgentToolContext {
+                actor_id: fixture.player,
+                revision: Revision::ZERO,
+                session_id,
+                capabilities: authorized.clone(),
+            }),
+            ToolCall {
+                id: ToolCallId::new("perform-action").expect("call id"),
+                name: "perform_gameplay_action".to_owned(),
+                arguments: json!({
+                    "action_id": definition_id("gameplay_action", "mark_rain"),
+                    "arguments": {}
+                }),
+            },
+        )
+        .await
+        .expect("perform result");
+    assert!(!performed.is_error);
+    assert_eq!(service.revision().await, Revision::new(1));
+
+    let stale = executor
+        .execute(
+            ToolContext::new().with_extension(AgentToolContext {
+                actor_id: fixture.player,
+                revision: Revision::ZERO,
+                session_id,
+                capabilities: authorized.clone(),
+            }),
+            ToolCall {
+                id: ToolCallId::new("stale-after-session").expect("call id"),
+                name: "advance_time".to_owned(),
+                arguments: json!({ "ticks": 1 }),
+            },
+        )
+        .await
+        .expect("stale result");
+    assert!(stale.is_error);
+    assert_eq!(service.revision().await, Revision::new(1));
+
+    let snapshot = service
+        .snapshot(
+            session_id,
+            loreloom_core::RuntimePhase::Idle,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        )
+        .await
+        .expect("snapshot");
+    let values = &snapshot.parameters[0].values;
+    assert!(values.iter().any(|value| {
+        value.parameter_id == definition_id("parameter", "rain_count")
+            && value.value == ParameterValue::Counter(4)
+    }));
+    assert!(values.iter().any(|value| {
+        value.parameter_id == definition_id("parameter", "hint_seen")
+            && value.value == ParameterValue::Bool(true)
+    }));
+
+    let denied = executor
+        .execute(
+            ToolContext::new().with_extension(AgentToolContext {
+                actor_id: fixture.player,
+                revision: Revision::new(1),
+                session_id,
+                capabilities: BTreeSet::new(),
+            }),
+            ToolCall {
+                id: ToolCallId::new("denied-action").expect("call id"),
+                name: "perform_gameplay_action".to_owned(),
+                arguments: json!({
+                    "action_id": definition_id("gameplay_action", "mark_rain"),
+                    "arguments": {}
+                }),
+            },
+        )
+        .await
+        .expect("denied result");
+    assert!(denied.is_error);
+    let ToolResultContent::Json { value: denied } = &denied.content[0] else {
+        panic!("JSON tool result")
+    };
+    assert_eq!(denied["code"], "capability_denied");
+
+    let chosen = executor
+        .execute(
+            ToolContext::new().with_extension(AgentToolContext {
+                actor_id: fixture.player,
+                revision: Revision::new(1),
+                session_id,
+                capabilities: authorized,
+            }),
+            ToolCall {
+                id: ToolCallId::new("choose-option").expect("call id"),
+                name: "choose_event_option".to_owned(),
+                arguments: json!({
+                    "event_instance_id": object_id("2b46"),
+                    "option_id": definition_id("event_option", "listen")
+                }),
+            },
+        )
+        .await
+        .expect("choose result");
+    assert!(!chosen.is_error);
+    assert_eq!(service.revision().await, Revision::new(2));
 }

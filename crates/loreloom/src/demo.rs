@@ -308,6 +308,7 @@ fn demo_content(mod_paths: &[PathBuf]) -> Result<DemoContent, AppError> {
         world_config: WorldConfig {
             inventory_root_definition: inventory_definition,
             spawn_system_definition: definition_id("system", "spawn")?,
+            rule_limits: Default::default(),
         },
         scene_definition_id: scene_definition,
         npc_definition_id: npc_definition,
@@ -400,6 +401,7 @@ mod tests {
             inventory_root_definition: definition_id("item", "missing")
                 .expect("missing definition ID"),
             spawn_system_definition: content.world_config.spawn_system_definition,
+            rule_limits: Default::default(),
         };
         let io = tokio::runtime::Builder::new_multi_thread()
             .enable_all()

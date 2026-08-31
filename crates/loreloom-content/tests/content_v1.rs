@@ -6,9 +6,10 @@ use loreloom_content::{
     DefinitionRegistry, DraftCompileRequest, EffectDefinition, GameplayActionDefinition,
     GenerationPolicy, InitialCharacterController, InitialCharacterLifetime, InitialItem,
     InitialResource, ItemDefinition, NpcDraft, ParameterDefinition, ParameterPersistence,
-    ParameterType, ParameterVisibility, PlaceDefinition, ResourceCost, ResourceDefinition,
-    ResourceMaximumPolicy, RuleDefinition, SceneCharacterDefinition, SceneDefinition,
-    SkillDefinition, SkillKind, SkillTarget, TriggerDefinition, parse_content_hash,
+    ParameterType, ParameterVisibility, PlaceDefinition, PredicateDefinition, ResourceCost,
+    ResourceDefinition, ResourceMaximumPolicy, RuleDefinition, SceneCharacterDefinition,
+    SceneDefinition, SkillDefinition, SkillKind, SkillTarget, TriggerDefinition,
+    parse_content_hash,
 };
 use loreloom_core::{
     AttributeOperation, AutonomyMode, BaseAttributes, CharacterController, CharacterLifetime,
@@ -408,4 +409,65 @@ fn declarative_rules_reference_registered_generic_parameters_and_actions() {
     }));
     let registry = DefinitionRegistry::build(context(), [document]).expect("build rule registry");
     assert!(registry.get(&action_id).is_some());
+}
+
+#[test]
+fn declarative_registry_rejects_nested_predicate_budget_and_static_emit_cycles() {
+    let mut predicate = PredicateDefinition::HasTag {
+        tag_id: id("tag", "deep"),
+    };
+    for _ in 0..64 {
+        predicate = PredicateDefinition::Not {
+            predicate: Box::new(predicate),
+        };
+    }
+    let mut over_budget = fixture_document();
+    over_budget
+        .definitions
+        .push(Definition::GameplayAction(GameplayActionDefinition {
+            id: id("gameplay_action", "too_deep"),
+            display_name: name("Too deep"),
+            capability: text("gameplay.deep"),
+            parameters: Vec::new(),
+            predicates: vec![predicate],
+            effects: Vec::new(),
+        }));
+    assert!(matches!(
+        DefinitionRegistry::build(context(), [over_budget]),
+        Err(ContentError::InvalidValue {
+            field: "gameplay_action.budget",
+            ..
+        })
+    ));
+
+    let mut cycle = fixture_document();
+    cycle.definitions.push(Definition::Rule(RuleDefinition {
+        id: id("rule", "cycle_a"),
+        priority: 0,
+        trigger: TriggerDefinition::WorldEvent {
+            event_type: text("cycle_a"),
+        },
+        predicates: Vec::new(),
+        effects: vec![EffectDefinition::EmitEvent {
+            event_type: text("cycle_b"),
+        }],
+    }));
+    cycle.definitions.push(Definition::Rule(RuleDefinition {
+        id: id("rule", "cycle_b"),
+        priority: 0,
+        trigger: TriggerDefinition::WorldEvent {
+            event_type: text("cycle_b"),
+        },
+        predicates: Vec::new(),
+        effects: vec![EffectDefinition::EmitEvent {
+            event_type: text("cycle_a"),
+        }],
+    }));
+    assert!(matches!(
+        DefinitionRegistry::build(context(), [cycle]),
+        Err(ContentError::InvalidValue {
+            field: "rule.emit_cycle",
+            ..
+        })
+    ));
 }

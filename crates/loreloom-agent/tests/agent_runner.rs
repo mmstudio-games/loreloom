@@ -128,6 +128,7 @@ fn invocation<'a>(
             actor_id: parse::<ActorId>("obj_01890f6a-2b3c-7d4e-8f90-123456789abc"),
             revision: Revision::new(1),
             session_id: parse::<SessionId>("ses_01890f6a-2b3d-7d4e-8f90-123456789abc"),
+            capabilities: Default::default(),
         },
         budget,
         cancellation,

@@ -1,11 +1,11 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
 use crate::{
     ActionId, ActorId, CharacterSpawnSpec, ContentDefinitionId, DomainError, DomainRecord, EventId,
-    Fixed, ObjectId, RecordKey, RecordMutation, RecordProvenance, Revision, ShortText,
-    TranscriptItemRecord, VersionedRecordOp,
+    Fixed, ObjectId, ParameterValue, RecordKey, RecordMutation, RecordProvenance, Revision,
+    ShortText, TranscriptItemRecord, VersionedRecordOp,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -50,6 +50,14 @@ pub enum WorldCommandKind {
     },
     AppendTranscript {
         items: Vec<TranscriptItemRecord>,
+    },
+    ChooseEventOption {
+        event_instance_id: ObjectId,
+        option_id: ContentDefinitionId,
+    },
+    PerformGameplayAction {
+        action_id: ContentDefinitionId,
+        arguments: BTreeMap<ContentDefinitionId, ParameterValue>,
     },
 }
 
@@ -116,6 +124,40 @@ pub enum WorldEventKind {
         character_id: ActorId,
         resource_id: ContentDefinitionId,
         delta: Fixed,
+    },
+    ConditionApplied {
+        character_id: ActorId,
+        condition_id: ContentDefinitionId,
+        instance_id: ObjectId,
+    },
+    ItemGranted {
+        character_id: ActorId,
+        item_id: ObjectId,
+        definition_id: ContentDefinitionId,
+        quantity: u32,
+    },
+    SkillGranted {
+        character_id: ActorId,
+        grant_id: ObjectId,
+        skill_id: ContentDefinitionId,
+    },
+    ParameterChanged {
+        parameter_id: ContentDefinitionId,
+    },
+    GameplayActionPerformed {
+        action_id: ContentDefinitionId,
+    },
+    EventOptionChosen {
+        event_instance_id: ObjectId,
+        option_id: ContentDefinitionId,
+    },
+    RuleTriggered {
+        rule_id: ContentDefinitionId,
+        trigger: ShortText,
+    },
+    DeclarativeEventEmitted {
+        event_type: ShortText,
+        source_definition_id: ContentDefinitionId,
     },
 }
 
