@@ -85,7 +85,13 @@ Driver 不暴露手动 KV checkpoint；本 Spike 证明事务 commit 后经 hand
 但固定等待不能证明产品级确定性关闭。物理备份/切换仍需要可等待的 shutdown API；领域
 Snapshot/compaction 作为后续 Store transaction。当前 Store Spike test executable 为约 161 MiB，
 包含完整测试 harness、SurrealDB 与 SQLite；对应低调试信息 `target/debug` 缓存约 1.5 GiB。这些是
-开发构建代理值，不是最终 release binary 门槛，产品纵向切片建立后必须重新测量 release 体积。
+开发构建代理值，不是最终 release binary 门槛。
+
+产品纵向切片完成后于 2026-08-31 使用 `cargo build --release -p loreloom --locked` 重新测量：
+macOS arm64 release 二进制为 81.2 MiB。该产物随后以临时 SurrealKV 存档连续执行两次
+`--headless` Mock Turn，分别完成到 Revision 3 与 Revision 6，证明发布产物可以创建、重开并继续
+同一存档。该尺寸包含嵌入式 SurrealDB/SurrealKV 与外部 Provider Adapter，作为第一阶段发布基线；
+后续依赖或 feature 变化必须重新测量。
 
 ## 依赖、许可证与缺口
 

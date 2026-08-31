@@ -950,6 +950,47 @@ impl LlmBridge for NarratorBridge {
     }
 }
 
+struct RecoveringNarratorBridge {
+    calls: AtomicUsize,
+}
+
+impl LlmBridge for RecoveringNarratorBridge {
+    fn capabilities(&self) -> BridgeCapabilities {
+        BridgeCapabilities::all()
+    }
+
+    fn project(&self, _request: &CompletionRequest) -> Result<ProjectionReport, BridgeError> {
+        Ok(ProjectionReport::exact("runtime-recovering-narrator"))
+    }
+
+    fn complete<'a>(
+        &'a self,
+        _request: CompletionRequest,
+    ) -> BridgeFuture<'a, Result<CompletionResponse, BridgeError>> {
+        Box::pin(async move {
+            if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                return Err(BridgeError::InvalidRequest {
+                    message: "provider rejected credential must-not-escape".to_owned(),
+                });
+            }
+            Ok(text_response(
+                "The rain eases, and the story continues without changing the world.",
+            ))
+        })
+    }
+
+    fn stream<'a>(
+        &'a self,
+        _request: CompletionRequest,
+    ) -> BridgeFuture<'a, Result<CompletionStream, BridgeError>> {
+        Box::pin(async {
+            Err(BridgeError::InvalidRequest {
+                message: "streaming is not used".to_owned(),
+            })
+        })
+    }
+}
+
 struct GeneratedNarratorBridge {
     scene_id: ObjectId,
     place_id: ObjectId,
@@ -1581,6 +1622,61 @@ async fn world_service_rejects_a_candidate_mod_lock_before_world_materialization
         WorldService::open(store, fixture.registry, &candidate, fixture.world_config).await,
         Err(RuntimeError::ContentLockMismatch)
     ));
+}
+
+#[tokio::test]
+async fn provider_failure_is_redacted_and_the_same_runtime_accepts_the_next_turn() {
+    let directory = TempDir::new().expect("temporary save parent");
+    let fixture = fixture();
+    let store = SaveStore::create(
+        directory.path().join("save"),
+        fixture.manifest.clone(),
+        fixture.records.clone(),
+    )
+    .await
+    .expect("create save");
+    let service = WorldService::open(
+        store,
+        fixture.registry,
+        &fixture.manifest.mod_lock,
+        fixture.world_config,
+    )
+    .await
+    .expect("open world service");
+    let narrator = Arc::new(RecoveringNarratorBridge {
+        calls: AtomicUsize::new(0),
+    });
+    let mut runtime = GameRuntime::new(
+        Arc::clone(&service),
+        narrator,
+        parse("ses_01890f6a-2b8a-7d4e-8f90-123456789abc"),
+        RuntimeConfig::default(),
+    );
+
+    let error = runtime
+        .handle_player_input("Listen for the rain.")
+        .await
+        .expect_err("the injected provider failure must end the first turn");
+    assert!(matches!(error, RuntimeError::BridgeUnavailable));
+    assert!(!error.to_string().contains("must-not-escape"));
+    assert!(!format!("{error:?}").contains("must-not-escape"));
+
+    let recoverable = runtime
+        .initial_snapshot()
+        .await
+        .expect("the committed world remains readable");
+    assert_eq!(recoverable.revision, Revision::new(1));
+    assert_eq!(recoverable.transcript.items.len(), 1);
+    assert!(service.events().await.is_empty());
+
+    let completed = runtime
+        .handle_player_input("Continue after the interruption.")
+        .await
+        .expect("the same runtime accepts a later turn");
+    assert_eq!(completed.snapshot.revision, Revision::new(3));
+    assert_eq!(completed.snapshot.transcript.items.len(), 3);
+    assert!(completed.snapshot.can_submit);
+    assert!(service.events().await.is_empty());
 }
 
 #[tokio::test]

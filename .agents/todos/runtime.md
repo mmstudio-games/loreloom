@@ -56,6 +56,9 @@ OPEN 项、后续 RFC 或 P0 Spike；空 crate 不代表相关协议已经实现
 - [ ] **UPSTREAM-GATED**：SurrealDB SDK 暴露可等待、幂等的 embedded shutdown 后接入，移除物理
   关闭/备份对 sleep/retry 的依赖；上游已确认当前 SDK 无法等待 local router/datastore 退出；
 - [ ] **UPSTREAM-GATED**：实现关闭后物理备份、恢复与存档切换的产品 API；
+- [ ] **RELEASE-GATED**：在实际分发前确认 Loreloom 采用与 `toasty-driver-surreal`
+  `AGPL-3.0-only` 兼容的分发许可，或为该依赖取得兼容的重新许可；该选择不改变当前 Runtime、
+  Store Schema 或存档格式；
 - [x] 实现 Runtime Client/Event loop、确定性 TUI 产品层与可运行的内置 demo 装配，完成最小可玩
   Runtime、World、Agent、Store、TUI 纵向切片；
 - [x] 实现正式目录 Mod package discovery、依赖/Patch/hash lock、统一内置/外部 Registry 加载与
@@ -80,4 +83,6 @@ OPEN 项、后续 RFC 或 P0 Spike；空 crate 不代表相关协议已经实现
   并在裁剪时投影 `truncated` metadata；
 - [x] 用 Runtime phase/status event 驱动 TUI thinking 展示，并移除 Provider 文本 streaming 产品协议；
 - [x] 完成面向叙事阅读的 TUI 视觉重构；
-- [ ] 满足 Active Spec 第 17 节全部验收条件。
+- [x] 完成 Active Spec 第 17 节实施审计：除显式 `UPSTREAM-GATED` 的第 47 条和上述分发许可选择外，
+  其余验收均有自动化或可复现证据；最终 locked 门禁为 139 tests passed，release headless 产物可在
+  同一 SurrealKV 存档从 Revision 3 重开并继续到 Revision 6，macOS arm64 release 基线为 81.2 MiB。

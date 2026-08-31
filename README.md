@@ -25,7 +25,9 @@ two-pane TUI. Its accepted architecture and active runtime baseline are recorded
 - [Runtime implementation checklist](.agents/todos/runtime.md)
 
 RFC 0001 is Accepted and the runtime specification is Active. Deterministic Store shutdown and the
-physical backup/restore/save-switch APIs remain gated on the configured database driver.
+physical backup/restore/save-switch APIs remain gated on the configured database driver. Public
+distribution also remains gated on choosing an AGPL-compatible Loreloom license or obtaining a
+compatible license for the configured SurrealDB driver.
 
 ## Run
 
