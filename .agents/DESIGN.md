@@ -227,8 +227,9 @@ Loreloom Runtime ───────────────► Persistence
     的请求。查询无匹配目标时表示当前内容不可达，不隐式生成新 Scene。
 52. 根世界通过 `[prompts]` 分别拥有有序的 Narrator 与 NPC 基础 Prompt，启用的 Mod 可用相同结构
     按依赖拓扑和声明顺序追加两类全局 Prompt；引擎只在其前保留不可覆盖的 Tool/ECS/安全协议，
-    Mod Prompt 不能扩大 Tool Capability。初始 Save Format v1 直接保存 WorldLock 与只含已启用扩展的
-    ModLock，不为开发期存档增加兼容分支。Rainbound Inn 必须从
+    Mod Prompt 不能扩大 Tool Capability。回复语言完全由 World/Mod Prompt 表达，Manifest、Agent
+    协议和 Runtime 不拥有、检测或追加独立语言策略。初始 Save Format v1 直接保存 WorldLock 与只含
+    已启用扩展的 ModLock，不为开发期存档增加兼容分支。Rainbound Inn 必须从
     Rust 硬编码迁移到根目录内容文件；生产二进制不使用硬编码 Demo Bridge 生成剧情。
 53. 首个公开版本发布前，Save Format、领域 payload 和内容 Schema 的破坏性修改直接压平进各自的
     初始 v1；开发期产物直接拒绝并重建，不分配 v2、不注册兼容迁移，也不保留 legacy load 分支。

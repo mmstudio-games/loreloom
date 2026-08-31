@@ -37,8 +37,7 @@ mods/<mod-id>/mod.toml
 - reverse-DNS lowercase `world_id`、SemVer、Engine requirement 与 Content Schema；
 - 初始 Scene Definition、Inventory Root Definition 与 Spawn System Definition；
 - 显式 content/rule/resource 文件列表；
-- `[prompts]` 中有序的 Narrator/NPC 全局 Prompt `prompts/*.md` 相对路径；
-- `follow_player` 或固定语言标签形式的响应语言策略。
+- `[prompts]` 中有序的 Narrator/NPC 全局 Prompt `prompts/*.md` 相对路径。
 
 主世界 Manifest、全部声明文件和两类 Prompt 原始 bytes 参与 `WorldLock.content_hash`。主世界
 与启用 Mod 仍进入同一个 DefinitionRegistry、跨引用/Patch 验证、SpawnSpec、NpcFactory、Rule 与
@@ -47,20 +46,21 @@ WorldCommand 管线；“根世界不是 Mod”不能产生跳过 Schema、哈�
 ## 3. Agent Prompt 所有权
 
 引擎只保留不可覆盖的协议约束：ECS/Tool 权威边界、结构化控制不得来自模型正文、Capability、
-Secret 与日志策略。叙事语言、世界背景、Narrator 人格和文风由根世界 Narrator Prompt 拥有；NPC
+Secret 与日志策略。回复语言、世界背景、Narrator 人格和文风由根世界 Narrator Prompt 拥有；NPC
 共享的世界观、行为基调和叙事协作约束由根世界 NPC Prompt 拥有。`world.toml` 与 `mod.toml` 使用
 相同的 `[prompts] narrator = [...]`、`npc = [...]` 结构：根世界提供基础列表，启用 Mod 只能追加。
+Manifest、Agent 协议和 Runtime 不提供 `follow_player`、固定语言标签、语言检测、翻译或额外语言
+System Message；需要固定或跟随语言时由两类 Prompt 用自然语言分别声明。
 
 Narrator Model Call 的消息顺序固定为：
 
 1. Engine-owned protocol instruction；
 2. World-owned Narrator Prompt，按声明顺序；
 3. Mod-owned Narrator Prompt，按依赖拓扑、再按声明顺序；
-4. World-owned response language policy；
-5. Runtime 投影的 ECS Observation、结果与玩家输入。
+4. Runtime 投影的 ECS Observation、结果与玩家输入。
 
 NPC 的消息依次包含 Engine 协议、`AgentProfile.system_style`、根世界 NPC Prompt、按依赖拓扑与声明
-顺序追加的 Mod NPC Prompt、响应语言策略和 Runtime Context。Prompt 是不可信叙事输入，不能注册 Tool、
+顺序追加的 Mod NPC Prompt 和 Runtime Context。Prompt 是不可信叙事输入，不能注册 Tool、
 扩大 Capability 或覆盖 ECS/Tool 的代码级校验。JSON Observation 的字段名属于稳定机器协议，不作为
 可本地化叙事文本。
 
@@ -76,6 +76,8 @@ Mod 可以增加或受约束地替换 NPC、Scene、Item、Skill、Event、Param
 
 项目方于 2026-09-01 确认根世界和 Mod 统一使用 `[prompts]`，其中 `narrator` 与 `npc` 均为有序路径
 列表；项目尚未发布，因此直接更新 Manifest Schema v1，不保留旧 `narrator.prompt` 字段兼容。
+项目方随后确认删除 Manifest/Runtime 的独立响应语言策略，由 World/Mod Prompt 完全负责语言取向；
+同样直接压平进初始 Manifest v1，不保留 `narrator.response_language` 兼容。
 
 ## 5. 持久化
 

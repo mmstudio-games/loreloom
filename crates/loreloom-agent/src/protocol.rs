@@ -36,33 +36,10 @@ pub struct AgentDefinition {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ResponseLanguagePolicy {
-    FollowPlayer,
-    Fixed(ShortText),
-}
-
-impl ResponseLanguagePolicy {
-    #[must_use]
-    pub fn instruction(&self) -> String {
-        match self {
-            Self::FollowPlayer => {
-                "Use the same primary natural language as the latest player input.".to_owned()
-            }
-            Self::Fixed(language) => format!(
-                "Use the world-configured response language `{}` for all natural-language output.",
-                language.as_str()
-            ),
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NarratorDefinition {
     pub narrator_prompts: Vec<LongText>,
     pub npc_prompts: Vec<LongText>,
-    pub response_language: ResponseLanguagePolicy,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -265,7 +242,6 @@ impl NpcAgent {
         &self,
         definitions: impl IntoIterator<Item = ToolDefinition>,
         global_prompts: &[LongText],
-        response_language: &ResponseLanguagePolicy,
     ) -> Result<CompletionRequest, AgentError> {
         let allowed = &self.definition.allowed_tools;
         let tools = definitions
@@ -295,10 +271,6 @@ impl NpcAgent {
                 .iter()
                 .map(|prompt| Message::new(Role::System, vec![ContentPart::text(prompt.as_str())])),
         );
-        messages.push(Message::new(
-            Role::System,
-            vec![ContentPart::text(response_language.instruction())],
-        ));
         messages.push(Message::user(context));
         Ok(CompletionRequest {
             messages,

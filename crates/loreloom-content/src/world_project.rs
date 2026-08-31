@@ -4,9 +4,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use loreloom_core::{
-    ContentDefinitionId, LockedMod, LongText, ModId, ModLock, ShortText, WorldLock,
-};
+use loreloom_core::{ContentDefinitionId, LockedMod, LongText, ModId, ModLock, WorldLock};
 use semver::{Version, VersionReq};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -39,30 +37,11 @@ pub struct WorldManifest {
     #[serde(default)]
     pub resources: Vec<String>,
     pub prompts: PromptManifest,
-    pub narrator: WorldNarratorManifest,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct WorldNarratorManifest {
-    pub response_language: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum WorldResponseLanguage {
-    FollowPlayer,
-    Fixed(ShortText),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct WorldNarrator {
-    pub response_language: WorldResponseLanguage,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorldProjectSource {
     manifest: WorldManifest,
-    narrator: WorldNarrator,
     package: VirtualPackage,
 }
 
@@ -120,9 +99,6 @@ impl WorldProjectSource {
                 std::str::from_utf8(prompt_bytes).map_err(|_| WorldProjectError::InvalidPrompt)?;
             LongText::non_empty(prompt).map_err(|_| WorldProjectError::InvalidPrompt)?;
         }
-        let narrator = WorldNarrator {
-            response_language: parse_response_language(&manifest.narrator.response_language)?,
-        };
         let mut capabilities = vec![ModCapability::Content];
         if !manifest.rules.is_empty() {
             capabilities.push(ModCapability::Rules);
@@ -143,21 +119,12 @@ impl WorldProjectSource {
             },
             payloads,
         )?;
-        Ok(Self {
-            manifest,
-            narrator,
-            package,
-        })
+        Ok(Self { manifest, package })
     }
 
     #[must_use]
     pub fn manifest(&self) -> &WorldManifest {
         &self.manifest
-    }
-
-    #[must_use]
-    pub fn narrator(&self) -> &WorldNarrator {
-        &self.narrator
     }
 
     #[must_use]
@@ -271,29 +238,6 @@ fn validate_manifest(manifest: &WorldManifest) -> Result<(), WorldProjectError> 
         }
     }
     Ok(())
-}
-
-fn parse_response_language(value: &str) -> Result<WorldResponseLanguage, WorldProjectError> {
-    if value == "follow_player" {
-        return Ok(WorldResponseLanguage::FollowPlayer);
-    }
-    let valid = (2..=35).contains(&value.len())
-        && value.is_ascii()
-        && value
-            .as_bytes()
-            .first()
-            .is_some_and(u8::is_ascii_alphabetic)
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-');
-    if !valid {
-        return invalid_manifest("narrator.response_language");
-    }
-    ShortText::new(value)
-        .map(WorldResponseLanguage::Fixed)
-        .map_err(|_| WorldProjectError::InvalidManifest {
-            field: "narrator.response_language",
-        })
 }
 
 fn split_world_lock(
@@ -420,9 +364,6 @@ content = ["content/world.json"]
 rules = []
 resources = []
 
-[narrator]
-response_language = "follow_player"
-
 [prompts]
 narrator = ["prompts/narrator.md"]
 npc = ["prompts/npc.md"]
@@ -467,11 +408,7 @@ npc = ["prompts/npc.md"]
     fn declared_prompt_is_loaded_and_participates_in_world_lock() {
         let first = TempDir::new().expect("first world root");
         write_world(first.path(), "用中文叙述。\n");
-        let (source, first_lock, first_mods, prompts) = compile_world(first.path());
-        assert_eq!(
-            source.narrator().response_language,
-            WorldResponseLanguage::FollowPlayer
-        );
+        let (_, first_lock, first_mods, prompts) = compile_world(first.path());
         assert_eq!(
             prompts
                 .narrator()

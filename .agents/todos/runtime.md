@@ -84,6 +84,8 @@ OPEN 项、后续 RFC 或 P0 Spike；空 crate 不代表相关协议已经实现
 - [x] 实现根级 `world.toml`、外部 Content/Prompt、WorldLock 与只含已启用扩展的 ModLock；
 - [x] 统一根世界与 Mod 的 `[prompts]` Narrator/NPC 全局上下文声明，按根世界、依赖拓扑和列表顺序
   注入 Agent，并覆盖哈希、分流与未声明资源不注入测试；
+- [x] 删除 Manifest/Agent/Runtime 的独立响应语言配置与 System Message，把固定或跟随语言完全交给
+  World/Mod Narrator/NPC Prompt；
 - [x] 把目录 Mod 根级 `.gitignore` 作为不参与 payload/hash 的本地作者元数据跳过，保持其它未知文件
   与隐藏路径的严格拒绝策略；
 - [x] 把 Rainbound Inn 从 `demo.rs` 迁移到根目录世界文件，并移除生产 Demo Bridge/英文剧情硬编码；

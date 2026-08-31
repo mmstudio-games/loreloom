@@ -10,9 +10,6 @@ content = ["content/world.json"]
 rules = []
 resources = []
 
-[narrator]
-response_language = "follow_player"
-
 [prompts]
 narrator = ["prompts/narrator.md"]
 npc = ["prompts/npc.md"]

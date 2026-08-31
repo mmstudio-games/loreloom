@@ -19,6 +19,5 @@ pub use registry::{
 };
 pub use schema::*;
 pub use world_project::{
-    WORLD_MANIFEST_SCHEMA_V1, WorldManifest, WorldNarrator, WorldNarratorManifest,
-    WorldProjectError, WorldProjectSource, WorldResponseLanguage,
+    WORLD_MANIFEST_SCHEMA_V1, WorldManifest, WorldProjectError, WorldProjectSource,
 };

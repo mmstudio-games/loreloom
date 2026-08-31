@@ -1583,10 +1583,15 @@ mods/<mod-id>/...
 
 `world.toml` Manifest Schema v1 声明 `world_id`、SemVer、Engine requirement、Content Schema、
 初始 Scene、Inventory Root、Spawn System、显式 content/rule/resource 文件列表、`[prompts]` 中有序的
-Narrator/NPC Prompt 路径，以及 `follow_player`/固定语言策略。根世界 Narrator Prompt 列表非空，NPC
-列表可为空。只读取 Manifest 显式声明的世界文件；`mods/`、`.loreloom/`、Cargo
+Narrator/NPC Prompt 路径。根世界 Narrator Prompt 列表非空，NPC 列表可为空。只读取 Manifest 显式
+声明的世界文件；`mods/`、`.loreloom/`、Cargo
 源码和其它根目录文件不进入世界 payload。Manifest 原始 bytes、声明 payload 和 Prompt 全部进入
 WorldLock 内容哈希。
+
+回复语言是 World/Mod Prompt 拥有的叙事内容，不是 Manifest 或 Runtime 协议。Manifest v1 不声明
+`response_language`；Agent 定义、Narrator/NPC Request Builder 与 Runtime 不保存或追加独立语言策略，
+也不执行语言检测、翻译或模型重试。需要固定语言或跟随玩家语言时，World 必须在 Narrator/NPC Prompt
+中分别用自然语言说明，Mod 可以按普通 Prompt 追加规则扩展该取向。
 
 Mod Package 是主世界扩展的分发和完整性边界，逻辑上包含：
 

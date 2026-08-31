@@ -20,8 +20,8 @@ use loreloom_agent::{
     AgentDefinition, AgentRunner, AgentToolContext, CancellationToken, ModelFailureCategory,
     ModelFailureStage, ModelInvocationKind, NarrativeImportance, NarratorDefinition,
     NarratorNpcDecision, NarratorPlan, NpcControllerKind, NpcGenerationRequest, NpcLifetime,
-    NpcNarrativeAction, NpcTarget, NpcTurnRequest, NpcTurnStatus, ResourceBudget,
-    ResponseLanguagePolicy, TurnInvocation, TurnStatus,
+    NpcNarrativeAction, NpcTarget, NpcTurnRequest, NpcTurnStatus, ResourceBudget, TurnInvocation,
+    TurnStatus,
 };
 use loreloom_content::{
     AgentProfileDefinition, AttributeDefinition, CONTENT_SCHEMA_V1, CharacterDefinition,
@@ -1636,7 +1636,6 @@ fn narrator_definition() -> NarratorDefinition {
     NarratorDefinition {
         narrator_prompts: vec![LongText::new("Narrate the test world.").expect("narrator prompt")],
         npc_prompts: vec![LongText::new("Respect the shared test lore.").expect("NPC prompt")],
-        response_language: ResponseLanguagePolicy::FollowPlayer,
     }
 }
 
@@ -2280,7 +2279,7 @@ async fn player_narrator_npc_and_surreal_store_form_a_durable_vertical_slice() {
     );
     let npc_requests = npc.requests().expect("npc requests");
     assert_eq!(npc_requests.len(), 2);
-    assert_eq!(npc_requests[0].messages.len(), 5);
+    assert_eq!(npc_requests[0].messages.len(), 4);
     let message_text = |index: usize| match &npc_requests[0].messages[index].content[..] {
         [armillae_core::ContentPart::Text(text)] => text.text.as_str(),
         content => panic!("expected one text part, got {content:?}"),
@@ -2288,8 +2287,7 @@ async fn player_narrator_npc_and_surreal_store_form_a_durable_vertical_slice() {
     assert!(message_text(0).contains("tool rules"));
     assert_eq!(message_text(1), "Be concise.");
     assert_eq!(message_text(2), "Respect the shared test lore.");
-    assert!(message_text(3).contains("latest player input"));
-    assert!(message_text(4).contains("\"kind\":\"npc_turn\""));
+    assert!(message_text(3).contains("\"kind\":\"npc_turn\""));
 
     let loaded = observer.load().await.expect("load durable result");
     assert_eq!(loaded.revision, Revision::new(3));

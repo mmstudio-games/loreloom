@@ -1,10 +1,10 @@
 use std::{collections::BTreeSet, path::Path, path::PathBuf};
 
-use loreloom_agent::{NarratorDefinition, ResponseLanguagePolicy};
+use loreloom_agent::NarratorDefinition;
 use loreloom_content::{
     CONTENT_SCHEMA_V1, ContentDocument, Definition, LORELOOM_ENGINE_VERSION,
     MOD_MANIFEST_SCHEMA_V1, ModCapability, ModManifestDraft, PackageCompiler, PackagePayload,
-    PackageSource, TagDefinition, VirtualPackage, WorldProjectSource, WorldResponseLanguage,
+    PackageSource, TagDefinition, VirtualPackage, WorldProjectSource,
 };
 use loreloom_core::{
     ContentDefinitionId, DIAGNOSED_CONDITION_PREDICATE_ID, DisplayName, ModId, SaveId, SessionId,
@@ -58,12 +58,6 @@ pub async fn build_world_with(
     let narrator_definition = NarratorDefinition {
         narrator_prompts,
         npc_prompts,
-        response_language: match &world_source.narrator().response_language {
-            WorldResponseLanguage::FollowPlayer => ResponseLanguagePolicy::FollowPlayer,
-            WorldResponseLanguage::Fixed(language) => {
-                ResponseLanguagePolicy::Fixed(language.clone())
-            }
-        },
     };
 
     if let Some(parent) = save_path.parent()

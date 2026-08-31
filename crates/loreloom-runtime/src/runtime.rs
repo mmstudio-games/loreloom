@@ -469,7 +469,6 @@ impl GameRuntime {
                 let npc_request = agent.request(
                     self.runner.definitions(),
                     &self.narrator_definition.npc_prompts,
-                    &self.narrator_definition.response_language,
                 )?;
                 on_phase(RuntimePhase::NpcThinking);
                 let turn = self
@@ -1095,10 +1094,6 @@ fn narrator_request(
             .iter()
             .map(|prompt| Message::new(Role::System, vec![ContentPart::text(prompt.as_str())])),
     );
-    messages.push(Message::new(
-        Role::System,
-        vec![ContentPart::text(narrator.response_language.instruction())],
-    ));
     messages.push(Message::user(payload));
     Ok(CompletionRequest {
         messages,
@@ -1191,7 +1186,7 @@ fn elapsed_ms(started: Instant) -> u64 {
 #[cfg(test)]
 mod tests {
     use armillae_core::ContentPart;
-    use loreloom_agent::{NarratorDefinition, ResponseLanguagePolicy};
+    use loreloom_agent::NarratorDefinition;
 
     use super::*;
 
@@ -1203,16 +1198,13 @@ mod tests {
     }
 
     #[test]
-    fn narrator_context_orders_engine_world_language_and_observation() {
+    fn narrator_context_orders_engine_world_and_observation() {
         let definition = NarratorDefinition {
             narrator_prompts: vec![
                 LongText::new("用克制的中文叙述这个世界。").expect("world narrator prompt"),
                 LongText::new("雨声应当持续存在。").expect("Mod narrator prompt"),
             ],
             npc_prompts: vec![LongText::new("只根据已知事实行动。").expect("NPC prompt")],
-            response_language: ResponseLanguagePolicy::Fixed(
-                ShortText::new("zh-CN").expect("language tag"),
-            ),
         };
         let request = narrator_request(
             "narrator_turn",
@@ -1222,11 +1214,10 @@ mod tests {
         )
         .expect("narrator request");
 
-        assert_eq!(request.messages.len(), 5);
+        assert_eq!(request.messages.len(), 4);
         assert!(text(&request.messages[0]).contains("native tools"));
         assert_eq!(text(&request.messages[1]), "用克制的中文叙述这个世界。");
         assert_eq!(text(&request.messages[2]), "雨声应当持续存在。");
-        assert!(text(&request.messages[3]).contains("zh-CN"));
-        assert!(text(&request.messages[4]).contains("\"observation\""));
+        assert!(text(&request.messages[3]).contains("\"observation\""));
     }
 }
