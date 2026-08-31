@@ -1,4 +1,4 @@
-use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent, MouseEventKind};
 use loreloom_core::{RuntimePhase, UiSnapshot};
 use thiserror::Error;
 
@@ -50,7 +50,10 @@ pub struct TuiApp {
     pub snapshot: UiSnapshot,
     pub editor: InputEditor,
     pub narrow_page: NarrowPage,
+    /// Visual rows above the latest visible transcript position.
     pub transcript_scroll: u16,
+    pub transcript_scroll_max: u16,
+    pub transcript_page_rows: u16,
     pub working_phase: Option<RuntimePhase>,
     pub spinner_frame: u8,
 }
@@ -63,6 +66,8 @@ impl TuiApp {
             editor: InputEditor::default(),
             narrow_page: NarrowPage::Story,
             transcript_scroll: 0,
+            transcript_scroll_max: 0,
+            transcript_page_rows: 1,
             working_phase: None,
             spinner_frame: 0,
         }
@@ -121,11 +126,34 @@ impl TuiApp {
     }
 
     pub fn scroll_up(&mut self) {
-        self.transcript_scroll = self.transcript_scroll.saturating_add(1);
+        self.scroll_up_lines(self.transcript_page_rows.saturating_sub(1).max(1));
     }
 
     pub fn scroll_down(&mut self) {
-        self.transcript_scroll = self.transcript_scroll.saturating_sub(1);
+        self.scroll_down_lines(self.transcript_page_rows.saturating_sub(1).max(1));
+    }
+
+    pub fn scroll_up_lines(&mut self, rows: u16) {
+        self.transcript_scroll = self
+            .transcript_scroll
+            .saturating_add(rows)
+            .min(self.transcript_scroll_max);
+    }
+
+    pub fn scroll_down_lines(&mut self, rows: u16) {
+        self.transcript_scroll = self.transcript_scroll.saturating_sub(rows);
+    }
+
+    pub(crate) fn update_transcript_layout(&mut self, maximum: u16, page_rows: u16) {
+        self.transcript_scroll_max = maximum;
+        self.transcript_page_rows = page_rows.max(1);
+        self.transcript_scroll = self.transcript_scroll.min(maximum);
+    }
+
+    #[must_use]
+    pub(crate) fn transcript_top_offset(&self) -> u16 {
+        self.transcript_scroll_max
+            .saturating_sub(self.transcript_scroll)
     }
 }
 
@@ -208,6 +236,15 @@ pub fn handle_key(app: &mut TuiApp, key: KeyEvent) -> Option<UiIntent> {
             None
         }
         _ => None,
+    }
+}
+
+pub fn handle_mouse(app: &mut TuiApp, mouse: MouseEvent) {
+    const WHEEL_ROWS: u16 = 3;
+    match mouse.kind {
+        MouseEventKind::ScrollUp => app.scroll_up_lines(WHEEL_ROWS),
+        MouseEventKind::ScrollDown => app.scroll_down_lines(WHEEL_ROWS),
+        _ => {}
     }
 }
 

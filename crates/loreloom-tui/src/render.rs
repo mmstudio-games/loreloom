@@ -19,13 +19,13 @@ const COMPOSER_HEIGHT: u16 = 4;
 const ACCENT: Color = Color::Cyan;
 const MUTED: Color = Color::DarkGray;
 
-pub fn render_ui(frame: &mut Frame<'_>, app: &TuiApp) {
+pub fn render_ui(frame: &mut Frame<'_>, app: &mut TuiApp) {
     render_ui_with_state_width(frame, app, 30);
 }
 
 pub(crate) fn render_ui_with_state_width(
     frame: &mut Frame<'_>,
-    app: &TuiApp,
+    app: &mut TuiApp,
     state_width_percent: u16,
 ) {
     let area = frame.area();
@@ -112,7 +112,7 @@ fn render_header(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
     }
 }
 
-fn render_wide(frame: &mut Frame<'_>, app: &TuiApp, area: Rect, state_width_percent: u16) {
+fn render_wide(frame: &mut Frame<'_>, app: &mut TuiApp, area: Rect, state_width_percent: u16) {
     let state_width = area.width.saturating_mul(state_width_percent) / 100;
     let sidebar = Rect::new(area.x, area.y, state_width, area.height);
     let right = Rect::new(
@@ -142,7 +142,7 @@ fn render_wide(frame: &mut Frame<'_>, app: &TuiApp, area: Rect, state_width_perc
     render_input(frame, app, composer);
 }
 
-fn render_narrow(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
+fn render_narrow(frame: &mut Frame<'_>, app: &mut TuiApp, area: Rect) {
     let composer_height = area.height.min(COMPOSER_HEIGHT);
     let content_height = area.height.saturating_sub(composer_height);
     let tab_height = u16::from(content_height > 0);
@@ -379,27 +379,10 @@ fn render_state(frame: &mut Frame<'_>, snapshot: &UiSnapshot, area: Rect, separa
     );
 }
 
-fn render_story(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
-    if area.height == 0 {
+fn render_story(frame: &mut Frame<'_>, app: &mut TuiApp, area: Rect) {
+    if area.height == 0 || area.width == 0 {
         return;
     }
-    frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled(
-                "STORY",
-                Style::default().fg(MUTED).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                if app.snapshot.transcript.before_cursor.is_some() {
-                    "   ↑ older entries available"
-                } else {
-                    ""
-                },
-                Style::default().fg(MUTED),
-            ),
-        ])),
-        Rect::new(area.x, area.y, area.width, 1),
-    );
     let body = Rect::new(
         area.x,
         area.y.saturating_add(1),
@@ -476,12 +459,35 @@ fn render_story(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
             Span::styled(notice.message.to_string(), Style::default().fg(color)),
         ]));
     }
+    let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
+    let visual_rows = paragraph.line_count(body.width);
+    let maximum = visual_rows.saturating_sub(usize::from(body.height));
+    let maximum = u16::try_from(maximum).unwrap_or(u16::MAX);
+    app.update_transcript_layout(maximum, body.height);
+    let scroll_hint = if app.transcript_scroll_max == 0 {
+        if app.snapshot.transcript.before_cursor.is_some() {
+            "   ↑ earlier history outside window"
+        } else {
+            ""
+        }
+    } else if app.transcript_scroll == 0 {
+        "   ↑ older"
+    } else if app.transcript_scroll == app.transcript_scroll_max {
+        "   ↓ latest"
+    } else {
+        "   ↑ older · ↓ latest"
+    };
     frame.render_widget(
-        Paragraph::new(lines)
-            .wrap(Wrap { trim: false })
-            .scroll((app.transcript_scroll, 0)),
-        body,
+        Paragraph::new(Line::from(vec![
+            Span::styled(
+                "STORY",
+                Style::default().fg(MUTED).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(scroll_hint, Style::default().fg(MUTED)),
+        ])),
+        Rect::new(area.x, area.y, area.width, 1),
     );
+    frame.render_widget(paragraph.scroll((app.transcript_top_offset(), 0)), body);
 }
 
 fn render_input(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
@@ -533,7 +539,7 @@ fn render_footer(frame: &mut Frame<'_>, app: &TuiApp, area: Rect, narrow: bool) 
         return;
     }
     let help = if narrow {
-        "  ·  Tab view  ·  ^C quit"
+        " · Tab · PgUp/PgDn · ^C"
     } else if app.can_cancel() {
         "  ·  Esc cancel  ·  PgUp/PgDn scroll  ·  ^C quit"
     } else {

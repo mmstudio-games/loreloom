@@ -7,7 +7,7 @@ use thiserror::Error;
 
 use crate::{
     CrosstermTerminalOps, RuntimeUiEvent, TerminalSession, TuiApp, UiClientError, UiIntent,
-    handle_key, handle_paste, render::render_ui_with_state_width,
+    handle_key, handle_mouse, handle_paste, render::render_ui_with_state_width,
 };
 
 const MAX_RUNTIME_EVENTS_PER_FRAME: usize = 1_024;
@@ -109,7 +109,8 @@ fn run_loop(
             Event::Paste(text) => {
                 let _ = handle_paste(app, &text);
             }
-            Event::Resize(_, _) | Event::Mouse(_) | Event::FocusGained | Event::FocusLost => {}
+            Event::Mouse(mouse) => handle_mouse(app, mouse),
+            Event::Resize(_, _) | Event::FocusGained | Event::FocusLost => {}
         }
     }
 }

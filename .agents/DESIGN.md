@@ -206,6 +206,9 @@ Loreloom Runtime ───────────────► Persistence
 48. Runtime 对 TUI 只发布粗粒度 `RuntimePhase`，不转发 Provider stream 或内部隐藏推理；phase
     固定覆盖 PersistingInput、NarratorThinking、ResolvingOrchestration、NpcThinking、UpdatingWorld
     与终态。Phase event 不改变 committed Snapshot，只驱动本地 thinking 文案、spinner 和输入门禁。
+49. Transcript 默认锚定最新内容；本地滚动状态表达“距最新内容的视觉行数”，按当前宽度折行后的
+    内容高度和 viewport 约束。`PageUp`/鼠标滚轮向上查看旧内容，`PageDown`/鼠标滚轮向下返回最新；
+    位于底部时新 Snapshot 自动跟随，滚动和 resize 都不触发 Runtime 请求或修改世界。
 
 项目方已于 2026-08-29 明确确认第 18–23 项的 Mod 子系统方向。该确认把 Content Mod、Rule Mod、
 统一导入路径、类型化参数、结构化 Event Option、通用 Gameplay Tool、ModLock 和 Extension Mod

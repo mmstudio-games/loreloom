@@ -15,4 +15,4 @@
  │› Look closer▏                              │
  │                                            │
  ╰────────────────────────────────────────────╯
-   working  ·  rev 7  ·  Tab view  ·  ^C quit
+    working  ·  rev 7 · Tab · PgUp/PgDn · ^C

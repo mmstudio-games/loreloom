@@ -204,8 +204,9 @@ Backend、Runtime 与 TUI 装配，以及进程退出顺序。
 - Toasty/SurrealDB Store 候选同样只能使用 registry release，或公开 Git URL 与明确 tag/revision；
   未进入公开来源的本地提交不构成 Loreloom 可采用的依赖版本。
 - `bevy_ecs` 版本必须与选定 `armillae-simulate-bevy` 发布线精确兼容。
-- TUI 固定使用 registry `ratatui 0.30.2`（关闭 default features，仅启用 `crossterm`）、
-  `crossterm 0.29.0` 与 grapheme-aware 输入实现；P0 Spike 已验证输入、恢复和窄屏边界。
+- TUI 固定使用 registry `ratatui 0.30.2`（关闭 default features，启用 `crossterm` 与
+  `unstable-rendered-line-info` 以按 Ratatui 实际折行计算滚动边界）、`crossterm 0.29.0` 与
+  grapheme-aware 输入实现；P0 Spike 已验证输入、恢复和窄屏边界。
 - 第一阶段只加载 Content/Rule Mod 数据，不加载 Rust/C 原生动态库；WASM Extension Host 必须
   由后续 RFC 和独立 capability/sandbox Spike 授权。
 - 生产代码对可恢复路径不得使用 `unwrap()`。
@@ -1988,6 +1989,12 @@ checkpoint 是一个普通显式事务中的版本化 Snapshot/compaction record
 - 使用克制的边框、间距和颜色层级，不直接展示 Rust Debug 枚举或为每一行添加协议标签；
 - resize 后输入内容、grapheme cursor、滚动位置、已提交输入历史和 thinking 状态不得丢失。
 
+Transcript 默认锚定当前窗口的最新内容。`transcript_scroll` 表达距最新内容的视觉行数，而不是从
+顶部开始的绝对偏移；最大值必须按当前宽度折行后的内容行数与可见 viewport 计算并约束。
+`PageUp`/鼠标滚轮向上查看旧内容，`PageDown`/鼠标滚轮向下返回最新；Page key 按一页减一行移动，
+滚轮按少量视觉行移动。位于底部时新 Snapshot 自动跟随最新内容；用户已向上滚动时 Snapshot 更新
+保留本地滚动距离，resize 只重新计算合法范围。这些交互不触发 Runtime 请求或世界修改。
+
 宽度 `< 80` columns 时使用 State/Story 两个可切换页面，输入区在任一页面始终固定可达。布局
 切换只是同一 UiSnapshot 与本地交互状态的纯投影，不能触发 Runtime 请求或修改数据。
 
@@ -2120,8 +2127,9 @@ TUI crate 不依赖 Runtime/World/Store/Provider。`UiClientError` 只暴露稳�
 `runtime_snapshot_failed` 或 `runtime_disconnected`。这里的 shutdown 只定义 UI command/event adapter
 生命周期，不解除第 11 节对 Store 确定性关闭、物理备份、恢复和存档切换的 driver 门禁。
 
-`TuiApp` 拥有 `UiSnapshot`、grapheme editor、输入历史、窄屏页面、transcript scroll、当前 working
-phase 与本地 spinner frame。Snapshot 更新不得覆盖 editor/scroll 等本地交互字段；终态 Snapshot
+`TuiApp` 拥有 `UiSnapshot`、grapheme editor、输入历史、窄屏页面、距最新内容的 transcript scroll、
+当前折行 viewport 指标、当前 working phase 与本地 spinner frame。Snapshot 更新不得覆盖
+editor/scroll 等本地交互字段；终态 Snapshot
 清除 working phase，resize 只重新 render。Editor 最大 UTF-8 bytes
 固定为 `LongText` 的 65,536 bytes，单次插入 all-or-reject。`TuiConfig.state_width_percent` 默认 30，
 只允许 25–35；event poll 默认 50 ms。

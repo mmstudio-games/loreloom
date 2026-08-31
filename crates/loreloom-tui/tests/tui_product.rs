@@ -5,7 +5,7 @@ use std::{
     rc::Rc,
 };
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
 use loreloom_core::{
     ActionState, ActorId, AttributeView, CharacterContext, CharacterProfile, ConditionRecord,
     ConditionSource, ConditionView, DisplayName, EntityOrigin, Fixed, LifeState, LongText,
@@ -15,7 +15,7 @@ use loreloom_core::{
 };
 use loreloom_tui::{
     EditorError, InputEditor, MAX_INPUT_BYTES, NarrowPage, RuntimeUiEvent, TerminalOps,
-    TerminalSession, TuiApp, UiIntent, handle_key, render_ui,
+    TerminalSession, TuiApp, UiIntent, handle_key, handle_mouse, render_ui,
 };
 use ratatui::{Terminal, backend::TestBackend, buffer::Buffer};
 
@@ -170,12 +170,26 @@ fn sample_app() -> TuiApp {
 }
 
 fn render(app: &TuiApp, width: u16, height: u16) -> Terminal<TestBackend> {
+    let mut app = app.clone();
+    render_mut(&mut app, width, height)
+}
+
+fn render_mut(app: &mut TuiApp, width: u16, height: u16) -> Terminal<TestBackend> {
     let backend = TestBackend::new(width, height);
     let mut terminal = Terminal::new(backend).expect("test terminal");
     terminal
         .draw(|frame| render_ui(frame, app))
         .expect("render");
     terminal
+}
+
+fn wheel(kind: MouseEventKind) -> MouseEvent {
+    MouseEvent {
+        kind,
+        column: 0,
+        row: 0,
+        modifiers: KeyModifiers::NONE,
+    }
 }
 
 fn text_snapshot(buffer: &Buffer) -> String {
@@ -274,6 +288,77 @@ fn product_renderer_is_deterministic_for_wide_and_narrow_layouts() {
     let multiline = text_snapshot(render(&app, 80, 18).backend().buffer());
     assert!(multiline.contains("│› first"));
     assert!(multiline.contains("│  second▏"));
+}
+
+#[test]
+fn transcript_follows_latest_and_scrolls_by_page_or_mouse_with_wrapped_bounds() {
+    let mut app = sample_app();
+    app.working_phase = None;
+    app.snapshot.tool_activity.clear();
+    app.snapshot.notices.clear();
+    let template = app.snapshot.transcript.items[1].clone();
+    app.snapshot.transcript.items = (0..20)
+        .map(|index| {
+            let mut item = template.clone();
+            item.text =
+                LongText::new(format!("Narration {index}")).expect("bounded transcript fixture");
+            item
+        })
+        .collect();
+
+    let latest = text_snapshot(render_mut(&mut app, 80, 18).backend().buffer());
+    assert!(latest.contains("Narration 19"));
+    assert!(!latest.contains("Narration 0"));
+    assert_eq!(app.transcript_scroll, 0);
+    assert!(app.transcript_scroll_max > app.transcript_page_rows);
+
+    handle_key(&mut app, KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE));
+    assert_eq!(
+        app.transcript_scroll,
+        app.transcript_page_rows.saturating_sub(1)
+    );
+    let older = text_snapshot(render_mut(&mut app, 80, 18).backend().buffer());
+    assert!(older.contains("Narration 10"));
+    assert!(!older.contains("Narration 19"));
+
+    handle_key(
+        &mut app,
+        KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE),
+    );
+    assert_eq!(app.transcript_scroll, 0);
+    handle_mouse(&mut app, wheel(MouseEventKind::ScrollUp));
+    assert_eq!(app.transcript_scroll, 3);
+    handle_mouse(&mut app, wheel(MouseEventKind::ScrollDown));
+    assert_eq!(app.transcript_scroll, 0);
+
+    for _ in 0..20 {
+        handle_key(&mut app, KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE));
+    }
+    assert_eq!(app.transcript_scroll, app.transcript_scroll_max);
+    handle_mouse(&mut app, wheel(MouseEventKind::ScrollDown));
+    assert_eq!(
+        app.transcript_scroll,
+        app.transcript_scroll_max.saturating_sub(3)
+    );
+
+    app.scroll_down_lines(u16::MAX);
+    let mut next = app.snapshot.clone();
+    let mut appended = template;
+    appended.text = LongText::new("Newest committed narration").expect("latest transcript");
+    next.transcript.items.push(appended);
+    app.apply_runtime_event(RuntimeUiEvent::Snapshot(Box::new(next)));
+    assert_eq!(app.transcript_scroll, 0);
+    let updated = text_snapshot(render_mut(&mut app, 80, 18).backend().buffer());
+    assert!(updated.contains("Newest committed narration"));
+
+    handle_mouse(&mut app, wheel(MouseEventKind::ScrollUp));
+    assert_eq!(app.transcript_scroll, 3);
+    let preserved = app.snapshot.clone();
+    app.apply_runtime_event(RuntimeUiEvent::Snapshot(Box::new(preserved)));
+    assert_eq!(
+        app.transcript_scroll, 3,
+        "a committed snapshot must not reset a user's local reading position"
+    );
 }
 
 #[test]
