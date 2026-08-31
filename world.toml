@@ -11,5 +11,8 @@ rules = []
 resources = []
 
 [narrator]
-prompt = "prompts/narrator.md"
 response_language = "follow_player"
+
+[prompts]
+narrator = ["prompts/narrator.md"]
+npc = ["prompts/npc.md"]

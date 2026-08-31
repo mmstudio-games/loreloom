@@ -37,27 +37,32 @@ mods/<mod-id>/mod.toml
 - reverse-DNS lowercase `world_id`、SemVer、Engine requirement 与 Content Schema；
 - 初始 Scene Definition、Inventory Root Definition 与 Spawn System Definition；
 - 显式 content/rule/resource 文件列表；
-- Narrator Prompt 的 `prompts/*.md` 相对路径；
+- `[prompts]` 中有序的 Narrator/NPC 全局 Prompt `prompts/*.md` 相对路径；
 - `follow_player` 或固定语言标签形式的响应语言策略。
 
-主世界 Manifest、全部声明文件和 Narrator Prompt 原始 bytes 参与 `WorldLock.content_hash`。主世界
+主世界 Manifest、全部声明文件和两类 Prompt 原始 bytes 参与 `WorldLock.content_hash`。主世界
 与启用 Mod 仍进入同一个 DefinitionRegistry、跨引用/Patch 验证、SpawnSpec、NpcFactory、Rule 与
 WorldCommand 管线；“根世界不是 Mod”不能产生跳过 Schema、哈希、安全或 Factory 的旁路。
 
 ## 3. Agent Prompt 所有权
 
 引擎只保留不可覆盖的协议约束：ECS/Tool 权威边界、结构化控制不得来自模型正文、Capability、
-Secret 与日志策略。叙事语言、世界背景、Narrator 人格和文风由根世界 Narrator Prompt 拥有。
+Secret 与日志策略。叙事语言、世界背景、Narrator 人格和文风由根世界 Narrator Prompt 拥有；NPC
+共享的世界观、行为基调和叙事协作约束由根世界 NPC Prompt 拥有。`world.toml` 与 `mod.toml` 使用
+相同的 `[prompts] narrator = [...]`、`npc = [...]` 结构：根世界提供基础列表，启用 Mod 只能追加。
 
 Narrator Model Call 的消息顺序固定为：
 
 1. Engine-owned protocol instruction；
-2. World-owned Narrator Prompt；
-3. World-owned response language policy；
-4. Runtime 投影的 ECS Observation、结果与玩家输入。
+2. World-owned Narrator Prompt，按声明顺序；
+3. Mod-owned Narrator Prompt，按依赖拓扑、再按声明顺序；
+4. World-owned response language policy；
+5. Runtime 投影的 ECS Observation、结果与玩家输入。
 
-NPC 的 `AgentProfile.system_style` 继续由根世界或 Mod 内容拥有，并继承当前世界的响应语言策略。
-JSON Observation 的字段名属于稳定机器协议，不作为可本地化叙事文本。
+NPC 的消息依次包含 Engine 协议、`AgentProfile.system_style`、根世界 NPC Prompt、按依赖拓扑与声明
+顺序追加的 Mod NPC Prompt、响应语言策略和 Runtime Context。Prompt 是不可信叙事输入，不能注册 Tool、
+扩大 Capability 或覆盖 ECS/Tool 的代码级校验。JSON Observation 的字段名属于稳定机器协议，不作为
+可本地化叙事文本。
 
 ## 4. Mod 语义
 
@@ -68,6 +73,9 @@ JSON Observation 的字段名属于稳定机器协议，不作为可本地化叙
 Mod 可以增加或受约束地替换 NPC、Scene、Item、Skill、Event、Parameter、声明式 Rule、Prompt 与
 展示资源；它不能替换引擎协议 Prompt、扩大 Tool Capability、访问 Secret、网络、Shell 或注入本机
 代码。Extension Mod 仍由后续独立 RFC 决定。
+
+项目方于 2026-09-01 确认根世界和 Mod 统一使用 `[prompts]`，其中 `narrator` 与 `npc` 均为有序路径
+列表；项目尚未发布，因此直接更新 Manifest Schema v1，不保留旧 `narrator.prompt` 字段兼容。
 
 ## 5. 持久化
 

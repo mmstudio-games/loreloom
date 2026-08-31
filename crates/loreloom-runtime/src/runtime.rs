@@ -468,6 +468,7 @@ impl GameRuntime {
                 )?;
                 let npc_request = agent.request(
                     self.runner.definitions(),
+                    &self.narrator_definition.npc_prompts,
                     &self.narrator_definition.response_language,
                 )?;
                 on_phase(RuntimePhase::NpcThinking);
@@ -1082,24 +1083,25 @@ fn narrator_request(
 ) -> Result<CompletionRequest, RuntimeError> {
     let payload = serde_json::to_string(&json!({ "kind": kind, "payload": payload }))
         .map_err(|error| RuntimeError::json("narrator_context", error))?;
+    let mut messages = vec![Message::new(
+        Role::System,
+        vec![ContentPart::text(
+            "Player input goes only to the narrator. Use native tools for every structured decision or world change. request_npc_turn queues NPCs in tool-call order. When scene transition tools are offered, call list_scene_transitions first and copy one returned target exactly; never invent a scene ID, retry an unchanged rejection, or narrate arrival before a committed transition result. If no scene target matches, explain that the destination is unavailable in current world content. When submit_npc_draft is offered, submit exactly one NPC through that tool rather than returning draft data in text. Return only natural-language prose in the response body; never return JSON or a structured control envelope. NPC claims are not committed facts; only committed events are world facts.",
+        )],
+    )];
+    messages.extend(
+        narrator
+            .narrator_prompts
+            .iter()
+            .map(|prompt| Message::new(Role::System, vec![ContentPart::text(prompt.as_str())])),
+    );
+    messages.push(Message::new(
+        Role::System,
+        vec![ContentPart::text(narrator.response_language.instruction())],
+    ));
+    messages.push(Message::user(payload));
     Ok(CompletionRequest {
-        messages: vec![
-            Message::new(
-                Role::System,
-                vec![ContentPart::text(
-                    "Player input goes only to the narrator. Use native tools for every structured decision or world change. request_npc_turn queues NPCs in tool-call order. When scene transition tools are offered, call list_scene_transitions first and copy one returned target exactly; never invent a scene ID, retry an unchanged rejection, or narrate arrival before a committed transition result. If no scene target matches, explain that the destination is unavailable in current world content. When submit_npc_draft is offered, submit exactly one NPC through that tool rather than returning draft data in text. Return only natural-language prose in the response body; never return JSON or a structured control envelope. NPC claims are not committed facts; only committed events are world facts.",
-                )],
-            ),
-            Message::new(
-                Role::System,
-                vec![ContentPart::text(narrator.system_prompt.as_str())],
-            ),
-            Message::new(
-                Role::System,
-                vec![ContentPart::text(narrator.response_language.instruction())],
-            ),
-            Message::user(payload),
-        ],
+        messages,
         tools,
         ..CompletionRequest::default()
     })
@@ -1203,8 +1205,11 @@ mod tests {
     #[test]
     fn narrator_context_orders_engine_world_language_and_observation() {
         let definition = NarratorDefinition {
-            system_prompt: LongText::new("用克制的中文叙述这个世界。")
-                .expect("world narrator prompt"),
+            narrator_prompts: vec![
+                LongText::new("用克制的中文叙述这个世界。").expect("world narrator prompt"),
+                LongText::new("雨声应当持续存在。").expect("Mod narrator prompt"),
+            ],
+            npc_prompts: vec![LongText::new("只根据已知事实行动。").expect("NPC prompt")],
             response_language: ResponseLanguagePolicy::Fixed(
                 ShortText::new("zh-CN").expect("language tag"),
             ),
@@ -1217,10 +1222,11 @@ mod tests {
         )
         .expect("narrator request");
 
-        assert_eq!(request.messages.len(), 4);
+        assert_eq!(request.messages.len(), 5);
         assert!(text(&request.messages[0]).contains("native tools"));
         assert_eq!(text(&request.messages[1]), "用克制的中文叙述这个世界。");
-        assert!(text(&request.messages[2]).contains("zh-CN"));
-        assert!(text(&request.messages[3]).contains("\"observation\""));
+        assert_eq!(text(&request.messages[2]), "雨声应当持续存在。");
+        assert!(text(&request.messages[3]).contains("zh-CN"));
+        assert!(text(&request.messages[4]).contains("\"observation\""));
     }
 }

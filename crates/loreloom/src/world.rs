@@ -41,6 +41,7 @@ pub async fn build_world_with(
         mod_paths.iter().cloned().map(PackageSource::Directory),
         &engine_namespaces,
     )?;
+    let prompts = compiled.prompts().clone();
     let (registry, world_lock, mod_lock, _) = compiled.into_parts();
     #[cfg(test)]
     let test_world_lock = world_lock.clone();
@@ -53,8 +54,10 @@ pub async fn build_world_with(
         spawn_system_definition: manifest.spawn_system_definition.clone(),
         rule_limits: configured.rules,
     };
+    let (narrator_prompts, npc_prompts) = prompts.into_parts();
     let narrator_definition = NarratorDefinition {
-        system_prompt: world_source.narrator().prompt.clone(),
+        narrator_prompts,
+        npc_prompts,
         response_language: match &world_source.narrator().response_language {
             WorldResponseLanguage::FollowPlayer => ResponseLanguagePolicy::FollowPlayer,
             WorldResponseLanguage::Fixed(language) => {
@@ -133,6 +136,7 @@ fn core_package() -> Result<VirtualPackage, AppError> {
             dependencies: Vec::new(),
             capabilities: vec![ModCapability::Content],
             patches: Vec::new(),
+            prompts: loreloom_content::PromptManifest::default(),
         },
         vec![PackagePayload::new(
             "content/core.json",

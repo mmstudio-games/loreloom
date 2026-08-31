@@ -82,6 +82,8 @@ OPEN 项、后续 RFC 或 P0 Spike；空 crate 不代表相关协议已经实现
 - [x] 为 Narrator 提供当前 Revision 的 canonical Scene 切换目标查询，拒绝猜测或过期目标，并让
   重复的同目标请求幂等收敛；
 - [x] 实现根级 `world.toml`、外部 Content/Prompt、WorldLock 与只含已启用扩展的 ModLock；
+- [x] 统一根世界与 Mod 的 `[prompts]` Narrator/NPC 全局上下文声明，按根世界、依赖拓扑和列表顺序
+  注入 Agent，并覆盖哈希、分流与未声明资源不注入测试；
 - [x] 把 Rainbound Inn 从 `demo.rs` 迁移到根目录世界文件，并移除生产 Demo Bridge/英文剧情硬编码；
 - [x] 把 Spec 8.2 的 Character/Scene/Transcript 数量与字节上限接入 Narrator/NpcAgent 产品上下文，
   并在裁剪时投影 `truncated` metadata；
@@ -93,5 +95,5 @@ OPEN 项、后续 RFC 或 P0 Spike；空 crate 不代表相关协议已经实现
 - [x] 保留 Armillae 模型失败的脱敏 category、阶段、安全 Provider 元数据与 `err_` correlation ID，
   贯通启动、AgentRunner、NpcTurnResult、Runtime、TUI notice 和 headless 错误；
 - [x] 完成 Active Spec 第 17 节实施审计：除显式 `UPSTREAM-GATED` 的第 47 条和上述分发许可选择外，
-  其余验收均有自动化或可复现证据；当前门禁为 146 tests passed，目录根世界的创建、锁分离、
+  其余验收均有自动化或可复现证据；当前门禁为 148 tests passed，目录根世界的创建、锁分离、
   Prompt 注入与存档内容锁重开拒绝均有确定性测试。macOS arm64 release 基线仍为 81.2 MiB。

@@ -3,7 +3,7 @@ use std::{fs, path::Path};
 use loreloom_content::{
     CONTENT_SCHEMA_V1, ContentDocument, ContentError, Definition, MOD_MANIFEST_SCHEMA_V1,
     ModCapability, ModDependency, ModManifestDraft, PackageCompiler, PackageError, PackageLimits,
-    PackagePayload, PackageSource, PatchDeclaration, TagDefinition, VirtualPackage,
+    PackagePayload, PackageSource, PatchDeclaration, PromptManifest, TagDefinition, VirtualPackage,
 };
 use loreloom_core::{ContentDefinitionId, DisplayName, ModId, ModSourceKind};
 use semver::{Version, VersionReq};
@@ -40,6 +40,7 @@ fn draft(id: &str, capabilities: Vec<ModCapability>) -> ModManifestDraft {
         dependencies: Vec::new(),
         capabilities,
         patches: Vec::new(),
+        prompts: PromptManifest::default(),
     }
 }
 
@@ -55,8 +56,10 @@ fn document_payload(path: &str, definitions: Vec<Definition>) -> PackagePayload 
 }
 
 fn base_package() -> VirtualPackage {
+    let mut manifest = draft("games.loreloom.base", vec![ModCapability::Content]);
+    manifest.prompts.narrator = vec!["prompts/narrator.md".to_owned()];
     VirtualPackage::builtin(
-        draft("games.loreloom.base", vec![ModCapability::Content]),
+        manifest,
         vec![
             document_payload(
                 "content/base.json",
@@ -168,6 +171,16 @@ fn builtin_and_directory_packages_share_dependency_patch_registry_and_lock_pipel
             .get(&mod_id("games.loreloom.base"), "prompts/narrator.md"),
         Some("Narrate steady rain.".as_bytes())
     );
+    assert_eq!(
+        compiled
+            .prompts()
+            .narrator()
+            .iter()
+            .map(|prompt| prompt.as_str())
+            .collect::<Vec<_>>(),
+        ["Narrate steady rain."]
+    );
+    assert!(compiled.prompts().npc().is_empty());
 
     compiler
         .compile_locked(
@@ -364,6 +377,67 @@ fn definition_groups_capabilities_and_tightened_resource_limits_are_enforced() {
             limit: "single_file_bytes"
         })
     ));
+}
+
+#[test]
+fn prompt_declarations_require_unique_present_non_empty_prompt_files() {
+    let invalid = |prompts: PromptManifest, payloads: Vec<PackagePayload>| {
+        let mut manifest = draft(
+            "games.loreloom.invalid-prompt",
+            vec![ModCapability::Content],
+        );
+        manifest.prompts = prompts;
+        PackageCompiler::default().compile([PackageSource::Builtin(
+            VirtualPackage::builtin(manifest, payloads).expect("seal invalid fixture"),
+        )])
+    };
+
+    assert!(matches!(
+        invalid(
+            PromptManifest {
+                narrator: vec!["prompts/shared.md".to_owned()],
+                npc: vec!["prompts/shared.md".to_owned()],
+            },
+            vec![PackagePayload::new("prompts/shared.md", "Shared.")],
+        ),
+        Err(PackageError::InvalidManifest { field: "prompts" })
+    ));
+    assert!(matches!(
+        invalid(
+            PromptManifest {
+                narrator: vec!["prompts/missing.md".to_owned()],
+                npc: Vec::new(),
+            },
+            Vec::new(),
+        ),
+        Err(PackageError::InvalidManifest { field: "prompts" })
+    ));
+    assert!(matches!(
+        invalid(
+            PromptManifest {
+                narrator: vec!["prompts/empty.md".to_owned()],
+                npc: Vec::new(),
+            },
+            vec![PackagePayload::new("prompts/empty.md", "")],
+        ),
+        Err(PackageError::InvalidData)
+    ));
+
+    let prompt_hash = |text: &str| {
+        let mut manifest = draft("games.loreloom.prompt-hash", vec![ModCapability::Content]);
+        manifest.prompts.narrator = vec!["prompts/narrator.md".to_owned()];
+        let compiled = PackageCompiler::default()
+            .compile([PackageSource::Builtin(
+                VirtualPackage::builtin(
+                    manifest,
+                    vec![PackagePayload::new("prompts/narrator.md", text.as_bytes())],
+                )
+                .expect("seal prompt hash fixture"),
+            )])
+            .expect("compile prompt hash fixture");
+        compiled.mod_lock().mods[0].content_hash.clone()
+    };
+    assert_ne!(prompt_hash("First prompt."), prompt_hash("Second prompt."));
 }
 
 #[cfg(unix)]

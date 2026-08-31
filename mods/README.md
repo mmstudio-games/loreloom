@@ -18,6 +18,19 @@ assets/**
 
 `mod.toml` schema v1 declares the Mod and Pack IDs, SemVer/engine compatibility, content schema,
 dependencies, `content`/`rules` capabilities, explicit patches, and the canonical payload SHA-256.
+To append global context to the Narrator or every NPC Agent, declare prompt files explicitly:
+
+```toml
+[prompts]
+narrator = ["prompts/narrator.md"]
+npc = ["prompts/npc.md"]
+```
+
+Both lists are optional. Their order is preserved, and enabled Mods are appended after the root
+world in dependency-topology order. Prompt files that exist in the package but are not declared in
+these lists remain ordinary resources and are not injected into an Agent request. Prompt text does
+not register Tools or grant capabilities.
+
 Only explicitly enabled package roots are loaded; directory presence alone does not enable a Mod.
 Archives, symlinks, path traversal, native libraries,
 scripts, network access, shell access, and package-provided Tool handlers are not supported.

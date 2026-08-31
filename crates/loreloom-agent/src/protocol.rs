@@ -60,7 +60,8 @@ impl ResponseLanguagePolicy {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NarratorDefinition {
-    pub system_prompt: LongText,
+    pub narrator_prompts: Vec<LongText>,
+    pub npc_prompts: Vec<LongText>,
     pub response_language: ResponseLanguagePolicy,
 }
 
@@ -263,6 +264,7 @@ impl NpcAgent {
     pub fn request(
         &self,
         definitions: impl IntoIterator<Item = ToolDefinition>,
+        global_prompts: &[LongText],
         response_language: &ResponseLanguagePolicy,
     ) -> Result<CompletionRequest, AgentError> {
         let allowed = &self.definition.allowed_tools;
@@ -276,24 +278,30 @@ impl NpcAgent {
             "context": self.context
         }))
         .map_err(AgentError::ContextEncoding)?;
+        let mut messages = vec![
+            Message::new(
+                Role::System,
+                vec![ContentPart::text(
+                    "Follow product safety and tool rules. Use tools for state changes. Respond to the narrator in natural language; do not return JSON or a structured envelope. Your claims are not world facts unless a tool commits them.",
+                )],
+            ),
+            Message::new(
+                Role::System,
+                vec![ContentPart::text(self.definition.system_style.as_str())],
+            ),
+        ];
+        messages.extend(
+            global_prompts
+                .iter()
+                .map(|prompt| Message::new(Role::System, vec![ContentPart::text(prompt.as_str())])),
+        );
+        messages.push(Message::new(
+            Role::System,
+            vec![ContentPart::text(response_language.instruction())],
+        ));
+        messages.push(Message::user(context));
         Ok(CompletionRequest {
-            messages: vec![
-                Message::new(
-                    Role::System,
-                    vec![ContentPart::text(
-                        "Follow product safety and tool rules. Use tools for state changes. Respond to the narrator in natural language; do not return JSON or a structured envelope. Your claims are not world facts unless a tool commits them.",
-                    )],
-                ),
-                Message::new(
-                    Role::System,
-                    vec![ContentPart::text(self.definition.system_style.as_str())],
-                ),
-                Message::new(
-                    Role::System,
-                    vec![ContentPart::text(response_language.instruction())],
-                ),
-                Message::user(context),
-            ],
+            messages,
             tools,
             ..CompletionRequest::default()
         })

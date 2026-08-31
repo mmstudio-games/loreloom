@@ -1634,7 +1634,8 @@ fn definition(profile_id: ContentDefinitionId) -> AgentDefinition {
 
 fn narrator_definition() -> NarratorDefinition {
     NarratorDefinition {
-        system_prompt: LongText::new("Narrate the test world.").expect("narrator prompt"),
+        narrator_prompts: vec![LongText::new("Narrate the test world.").expect("narrator prompt")],
+        npc_prompts: vec![LongText::new("Respect the shared test lore.").expect("NPC prompt")],
         response_language: ResponseLanguagePolicy::FollowPlayer,
     }
 }
@@ -2277,7 +2278,18 @@ async fn player_narrator_npc_and_surreal_store_form_a_durable_vertical_slice() {
         outcome.snapshot.supporting_events,
         outcome.npc_results[0].world_events
     );
-    assert_eq!(npc.requests().expect("npc requests").len(), 2);
+    let npc_requests = npc.requests().expect("npc requests");
+    assert_eq!(npc_requests.len(), 2);
+    assert_eq!(npc_requests[0].messages.len(), 5);
+    let message_text = |index: usize| match &npc_requests[0].messages[index].content[..] {
+        [armillae_core::ContentPart::Text(text)] => text.text.as_str(),
+        content => panic!("expected one text part, got {content:?}"),
+    };
+    assert!(message_text(0).contains("tool rules"));
+    assert_eq!(message_text(1), "Be concise.");
+    assert_eq!(message_text(2), "Respect the shared test lore.");
+    assert!(message_text(3).contains("latest player input"));
+    assert!(message_text(4).contains("\"kind\":\"npc_turn\""));
 
     let loaded = observer.load().await.expect("load durable result");
     assert_eq!(loaded.revision, Revision::new(3));

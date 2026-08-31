@@ -1582,8 +1582,9 @@ mods/<mod-id>/...
 ```
 
 `world.toml` Manifest Schema v1 声明 `world_id`、SemVer、Engine requirement、Content Schema、
-初始 Scene、Inventory Root、Spawn System、显式 content/rule/resource 文件列表，以及 Narrator Prompt 路径和
-`follow_player`/固定语言策略。只读取 Manifest 显式声明的世界文件；`mods/`、`.loreloom/`、Cargo
+初始 Scene、Inventory Root、Spawn System、显式 content/rule/resource 文件列表、`[prompts]` 中有序的
+Narrator/NPC Prompt 路径，以及 `follow_player`/固定语言策略。根世界 Narrator Prompt 列表非空，NPC
+列表可为空。只读取 Manifest 显式声明的世界文件；`mods/`、`.loreloom/`、Cargo
 源码和其它根目录文件不进入世界 payload。Manifest 原始 bytes、声明 payload 和 Prompt 全部进入
 WorldLock 内容哈希。
 
@@ -1613,7 +1614,8 @@ prompts/*.md         # optional agent prompt resources
 `mod.toml` 是 UTF-8 TOML，Manifest Schema v1 至少声明 reverse-DNS lowercase Mod ID、SemVer
 version、属于该 Mod 且 kind 为 `pack` 的 Pack ID、Engine SemVer requirement、Content Schema
 version、required/optional dependencies、`content | rules` capability、64-byte lowercase hex payload
-SHA-256 与显式 Patch。JSON 文件为 versioned tagged Schema，拒绝未知控制字段。第一阶段没有
+SHA-256、显式 Patch，以及可选的 `[prompts] narrator = [...]`、`npc = [...]` 有序路径列表。JSON
+文件为 versioned tagged Schema，拒绝未知控制字段。第一阶段没有
 package signature/authenticity 承诺；包来源信任由用户配置表达，SHA-256 只提供内容完整性和存档
 精确锁定。第一阶段 Loreloom Engine compatibility version 固定为 `0.1.0`，独立于各 Rust crate 的
 Semifold patch release；只有协议兼容边界变化时才显式提升。
@@ -1632,6 +1634,11 @@ TOML 序列化的 Manifest，以及按相对 path byte-order 排序的全部 pay
 byte length 的 little-endian `u64` 与 manifest bytes，再为每个 payload 写 path byte length 的
 little-endian `u64`、path bytes、内容 byte length 的 little-endian `u64` 与原始内容 bytes。
 Manifest TOML 空白不影响 hash，JSON/asset 原始 bytes 或路径变化会改变 hash。
+
+声明为全局 Prompt 的路径必须唯一、位于 `prompts/*.md`、存在、为非空 UTF-8 且满足 `LongText`
+上限。未在 `[prompts]` 声明的 Prompt 文件只作为普通包资源，不注入 Agent。最终 Narrator Prompt
+顺序为根世界声明顺序，再按 Mod dependency topology 与各 Mod 声明顺序追加；NPC 使用相同合并顺序，
+但位于角色 `AgentProfile.system_style` 之后。Prompt 不能改变 Runtime 实际注册的 Tool 或 Capability。
 
 包路径统一使用 `/` 的相对路径。加载器在解析内容前拒绝 absolute、反斜杠、NUL、空/`.`/`..`
 segment、symlink 和重复规范路径。Host 默认上限为 256 个 payload 文件、单文件 1 MiB、总 payload

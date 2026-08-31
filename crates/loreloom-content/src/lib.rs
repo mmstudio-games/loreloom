@@ -6,10 +6,10 @@ mod schema;
 mod world_project;
 
 pub use package::{
-    CompiledModSet, CompiledWorldSet, LORELOOM_ENGINE_VERSION, MOD_MANIFEST_SCHEMA_V1,
-    ModCapability, ModDependency, ModManifest, ModManifestDraft, PackageCompiler, PackageError,
-    PackageLimits, PackagePayload, PackageResources, PackageSource, PatchDeclaration,
-    VirtualPackage,
+    CompiledAgentPrompts, CompiledModSet, CompiledWorldSet, LORELOOM_ENGINE_VERSION,
+    MOD_MANIFEST_SCHEMA_V1, ModCapability, ModDependency, ModManifest, ModManifestDraft,
+    PackageCompiler, PackageError, PackageLimits, PackagePayload, PackageResources, PackageSource,
+    PatchDeclaration, PromptManifest, VirtualPackage,
 };
 
 pub use registry::{

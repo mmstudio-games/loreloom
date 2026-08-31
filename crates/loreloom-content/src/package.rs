@@ -5,8 +5,8 @@ use std::{
 };
 
 use loreloom_core::{
-    ContentDefinitionId, ContentHash, LockedDependency, LockedMod, ModId, ModLock, ModSourceKind,
-    WorldLock,
+    ContentDefinitionId, ContentHash, LockedDependency, LockedMod, LongText, ModId, ModLock,
+    ModSourceKind, WorldLock,
 };
 use semver::{Version, VersionReq};
 use serde::{Deserialize, Serialize};
@@ -47,6 +47,15 @@ pub struct PatchDeclaration {
     pub target_definition: ContentDefinitionId,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PromptManifest {
+    #[serde(default)]
+    pub narrator: Vec<String>,
+    #[serde(default)]
+    pub npc: Vec<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ModManifest {
@@ -61,6 +70,8 @@ pub struct ModManifest {
     pub capabilities: Vec<ModCapability>,
     #[serde(default)]
     pub patches: Vec<PatchDeclaration>,
+    #[serde(default)]
+    pub prompts: PromptManifest,
     pub content_hash: ContentHash,
 }
 
@@ -75,6 +86,7 @@ pub struct ModManifestDraft {
     pub dependencies: Vec<ModDependency>,
     pub capabilities: Vec<ModCapability>,
     pub patches: Vec<PatchDeclaration>,
+    pub prompts: PromptManifest,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -145,6 +157,7 @@ impl ModManifestDraft {
             dependencies: self.dependencies,
             capabilities: self.capabilities,
             patches: self.patches,
+            prompts: self.prompts,
             content_hash,
         }
     }
@@ -268,6 +281,31 @@ pub struct CompiledModSet {
     registry: DefinitionRegistry,
     mod_lock: ModLock,
     resources: PackageResources,
+    prompts: CompiledAgentPrompts,
+    prompt_sets: BTreeMap<ModId, CompiledAgentPrompts>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CompiledAgentPrompts {
+    narrator: Vec<LongText>,
+    npc: Vec<LongText>,
+}
+
+impl CompiledAgentPrompts {
+    #[must_use]
+    pub fn narrator(&self) -> &[LongText] {
+        &self.narrator
+    }
+
+    #[must_use]
+    pub fn npc(&self) -> &[LongText] {
+        &self.npc
+    }
+
+    #[must_use]
+    pub fn into_parts(self) -> (Vec<LongText>, Vec<LongText>) {
+        (self.narrator, self.npc)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -276,6 +314,7 @@ pub struct CompiledWorldSet {
     world_lock: WorldLock,
     mod_lock: ModLock,
     resources: PackageResources,
+    prompts: CompiledAgentPrompts,
 }
 
 impl CompiledWorldSet {
@@ -297,6 +336,11 @@ impl CompiledWorldSet {
     #[must_use]
     pub fn resources(&self) -> &PackageResources {
         &self.resources
+    }
+
+    #[must_use]
+    pub fn prompts(&self) -> &CompiledAgentPrompts {
+        &self.prompts
     }
 
     #[must_use]
@@ -324,6 +368,11 @@ impl CompiledModSet {
     #[must_use]
     pub fn resources(&self) -> &PackageResources {
         &self.resources
+    }
+
+    #[must_use]
+    pub fn prompts(&self) -> &CompiledAgentPrompts {
+        &self.prompts
     }
 
     #[must_use]
@@ -384,13 +433,19 @@ impl PackageCompiler {
             registry,
             mod_lock: full_lock,
             resources,
+            prompts: _,
+            prompt_sets,
         } = self.compile_inner(sources, None)?;
         let (world_lock, mod_lock) = world.split_lock(full_lock, engine_namespaces)?;
+        let prompt_order = std::iter::once(&world.manifest().world_id)
+            .chain(mod_lock.mods.iter().map(|locked| &locked.mod_id));
+        let prompts = flatten_prompt_sets(prompt_order, &prompt_sets);
         Ok(CompiledWorldSet {
             registry,
             world_lock,
             mod_lock,
             resources,
+            prompts,
         })
     }
 
@@ -435,10 +490,14 @@ impl PackageCompiler {
             return Err(PackageError::LockMismatch);
         }
         let resources = collect_resources(&order, &parsed);
+        let prompt_sets = collect_prompt_sets(&order, &parsed)?;
+        let prompts = flatten_prompt_sets(&order, &prompt_sets);
         Ok(CompiledModSet {
             registry,
             mod_lock,
             resources,
+            prompts,
+            prompt_sets,
         })
     }
 }
@@ -568,6 +627,18 @@ fn validate_manifest(
             return Err(PackageError::InvalidPatch);
         }
     }
+    let mut prompt_paths = BTreeSet::new();
+    for path in manifest
+        .prompts
+        .narrator
+        .iter()
+        .chain(&manifest.prompts.npc)
+    {
+        validate_relative_path(path, limits.max_path_depth)?;
+        if classify_path(path) != Some(PayloadKind::Prompt) || !prompt_paths.insert(path.as_str()) {
+            return invalid_manifest("prompts");
+        }
+    }
     Ok(())
 }
 
@@ -641,6 +712,15 @@ fn validate_payload_groups(
         .any(|patch| !files.contains_key(&patch.file))
     {
         return Err(PackageError::InvalidPatch);
+    }
+    if manifest
+        .prompts
+        .narrator
+        .iter()
+        .chain(&manifest.prompts.npc)
+        .any(|path| !files.contains_key(path))
+    {
+        return invalid_manifest("prompts");
     }
     Ok(())
 }
@@ -909,6 +989,53 @@ fn collect_resources(
     PackageResources { entries }
 }
 
+fn collect_prompt_sets(
+    order: &[ModId],
+    packages: &BTreeMap<ModId, ParsedPackage>,
+) -> Result<BTreeMap<ModId, CompiledAgentPrompts>, PackageError> {
+    let mut sets = BTreeMap::new();
+    for mod_id in order {
+        let package = packages.get(mod_id).ok_or(PackageError::InvalidManifest {
+            field: "dependency_graph",
+        })?;
+        let compile = |paths: &[String]| -> Result<Vec<LongText>, PackageError> {
+            paths
+                .iter()
+                .map(|path| {
+                    let bytes = package
+                        .files
+                        .get(path)
+                        .ok_or(PackageError::InvalidManifest { field: "prompts" })?;
+                    let text = std::str::from_utf8(bytes).map_err(|_| PackageError::InvalidData)?;
+                    LongText::non_empty(text).map_err(|_| PackageError::InvalidData)
+                })
+                .collect()
+        };
+        sets.insert(
+            mod_id.clone(),
+            CompiledAgentPrompts {
+                narrator: compile(&package.manifest.prompts.narrator)?,
+                npc: compile(&package.manifest.prompts.npc)?,
+            },
+        );
+    }
+    Ok(sets)
+}
+
+fn flatten_prompt_sets<'a>(
+    order: impl IntoIterator<Item = &'a ModId>,
+    sets: &BTreeMap<ModId, CompiledAgentPrompts>,
+) -> CompiledAgentPrompts {
+    let mut prompts = CompiledAgentPrompts::default();
+    for mod_id in order {
+        if let Some(set) = sets.get(mod_id) {
+            prompts.narrator.extend(set.narrator.iter().cloned());
+            prompts.npc.extend(set.npc.iter().cloned());
+        }
+    }
+    prompts
+}
+
 fn canonical_payload_hash(
     manifest: &ModManifest,
     files: &BTreeMap<String, Vec<u8>>,
@@ -941,6 +1068,7 @@ struct CanonicalManifest<'a> {
     dependencies: Vec<&'a ModDependency>,
     capabilities: Vec<ModCapability>,
     patches: Vec<&'a PatchDeclaration>,
+    prompts: &'a PromptManifest,
     content_hash: &'static str,
 }
 
@@ -961,6 +1089,7 @@ fn canonical_manifest_bytes(manifest: &ModManifest) -> Result<Vec<u8>, PackageEr
         dependencies,
         capabilities,
         patches,
+        prompts: &manifest.prompts,
         content_hash: "",
     })
     .map(String::into_bytes)

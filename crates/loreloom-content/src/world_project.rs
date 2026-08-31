@@ -13,7 +13,7 @@ use thiserror::Error;
 
 use crate::{
     CONTENT_SCHEMA_V1, LORELOOM_ENGINE_VERSION, MOD_MANIFEST_SCHEMA_V1, ModCapability,
-    ModManifestDraft, PackageError, PackagePayload, VirtualPackage,
+    ModManifestDraft, PackageError, PackagePayload, PromptManifest, VirtualPackage,
 };
 
 pub const WORLD_MANIFEST_SCHEMA_V1: u32 = 1;
@@ -38,13 +38,13 @@ pub struct WorldManifest {
     pub rules: Vec<String>,
     #[serde(default)]
     pub resources: Vec<String>,
+    pub prompts: PromptManifest,
     pub narrator: WorldNarratorManifest,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorldNarratorManifest {
-    pub prompt: String,
     pub response_language: String,
 }
 
@@ -56,7 +56,6 @@ pub enum WorldResponseLanguage {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorldNarrator {
-    pub prompt: LongText,
     pub response_language: WorldResponseLanguage,
 }
 
@@ -81,7 +80,8 @@ impl WorldProjectSource {
         let mut payload_paths = manifest.content.clone();
         payload_paths.extend(manifest.rules.iter().cloned());
         payload_paths.extend(manifest.resources.iter().cloned());
-        payload_paths.push(manifest.narrator.prompt.clone());
+        payload_paths.extend(manifest.prompts.narrator.iter().cloned());
+        payload_paths.extend(manifest.prompts.npc.iter().cloned());
         let mut unique = BTreeSet::new();
         if payload_paths.len() > WORLD_FILE_MAXIMUM
             || payload_paths
@@ -105,17 +105,22 @@ impl WorldProjectSource {
             "assets/loreloom-world.toml",
             manifest_bytes,
         ));
-        let prompt_bytes = payloads
+        for path in manifest
+            .prompts
+            .narrator
             .iter()
-            .find(|payload| payload.path == manifest.narrator.prompt)
-            .map(|payload| payload.bytes.as_slice())
-            .ok_or(WorldProjectError::InvalidManifest {
-                field: "narrator.prompt",
-            })?;
-        let prompt =
-            std::str::from_utf8(prompt_bytes).map_err(|_| WorldProjectError::InvalidPrompt)?;
+            .chain(&manifest.prompts.npc)
+        {
+            let prompt_bytes = payloads
+                .iter()
+                .find(|payload| &payload.path == path)
+                .map(|payload| payload.bytes.as_slice())
+                .ok_or(WorldProjectError::InvalidManifest { field: "prompts" })?;
+            let prompt =
+                std::str::from_utf8(prompt_bytes).map_err(|_| WorldProjectError::InvalidPrompt)?;
+            LongText::non_empty(prompt).map_err(|_| WorldProjectError::InvalidPrompt)?;
+        }
         let narrator = WorldNarrator {
-            prompt: LongText::new(prompt).map_err(|_| WorldProjectError::InvalidPrompt)?,
             response_language: parse_response_language(&manifest.narrator.response_language)?,
         };
         let mut capabilities = vec![ModCapability::Content];
@@ -134,6 +139,7 @@ impl WorldProjectSource {
                 dependencies: Vec::new(),
                 capabilities,
                 patches: Vec::new(),
+                prompts: manifest.prompts.clone(),
             },
             payloads,
         )?;
@@ -182,7 +188,7 @@ pub enum WorldProjectError {
     UnsafePath,
     #[error("world payload exceeds the product resource limits")]
     ResourceLimit,
-    #[error("world narrator prompt is empty, invalid UTF-8, or too large")]
+    #[error("world agent prompt is empty, invalid UTF-8, or too large")]
     InvalidPrompt,
     #[error("compiled world lock is invalid")]
     InvalidLock,
@@ -251,10 +257,18 @@ fn validate_manifest(manifest: &WorldManifest) -> Result<(), WorldProjectError> 
             return invalid_manifest("resources");
         }
     }
-    if !manifest.narrator.prompt.starts_with("prompts/")
-        || !manifest.narrator.prompt.ends_with(".md")
+    if manifest.prompts.narrator.is_empty() {
+        return invalid_manifest("prompts.narrator");
+    }
+    for path in manifest
+        .prompts
+        .narrator
+        .iter()
+        .chain(&manifest.prompts.npc)
     {
-        return invalid_manifest("narrator.prompt");
+        if !path.starts_with("prompts/") || !path.ends_with(".md") {
+            return invalid_manifest("prompts");
+        }
     }
     Ok(())
 }
@@ -407,8 +421,11 @@ rules = []
 resources = []
 
 [narrator]
-prompt = "prompts/narrator.md"
 response_language = "follow_player"
+
+[prompts]
+narrator = ["prompts/narrator.md"]
+npc = ["prompts/npc.md"]
 "#,
         )
         .expect("world manifest");
@@ -418,11 +435,20 @@ response_language = "follow_player"
         )
         .expect("world content");
         fs::write(root.join("prompts/narrator.md"), prompt).expect("world prompt");
+        fs::write(root.join("prompts/npc.md"), "Act from what you know.")
+            .expect("world NPC prompt");
         fs::write(root.join("mods/unlisted/ignored.txt"), "not enabled")
             .expect("unlisted Mod file");
     }
 
-    fn compile_world(root: &Path) -> (WorldProjectSource, WorldLock, ModLock) {
+    fn compile_world(
+        root: &Path,
+    ) -> (
+        WorldProjectSource,
+        WorldLock,
+        ModLock,
+        crate::CompiledAgentPrompts,
+    ) {
         let source = WorldProjectSource::load(root).expect("load world source");
         let compiled = PackageCompiler::default()
             .compile_world(
@@ -432,25 +458,41 @@ response_language = "follow_player"
                 &BTreeSet::new(),
             )
             .expect("compile world package");
+        let prompts = compiled.prompts().clone();
         let (_, world_lock, mod_lock, _) = compiled.into_parts();
-        (source, world_lock, mod_lock)
+        (source, world_lock, mod_lock, prompts)
     }
 
     #[test]
     fn declared_prompt_is_loaded_and_participates_in_world_lock() {
         let first = TempDir::new().expect("first world root");
         write_world(first.path(), "用中文叙述。\n");
-        let (source, first_lock, first_mods) = compile_world(first.path());
-        assert_eq!(source.narrator().prompt.as_str(), "用中文叙述。\n");
+        let (source, first_lock, first_mods, prompts) = compile_world(first.path());
         assert_eq!(
             source.narrator().response_language,
             WorldResponseLanguage::FollowPlayer
+        );
+        assert_eq!(
+            prompts
+                .narrator()
+                .iter()
+                .map(LongText::as_str)
+                .collect::<Vec<_>>(),
+            ["用中文叙述。\n"]
+        );
+        assert_eq!(
+            prompts
+                .npc()
+                .iter()
+                .map(LongText::as_str)
+                .collect::<Vec<_>>(),
+            ["Act from what you know."]
         );
         assert!(first_mods.mods.is_empty());
 
         let second = TempDir::new().expect("second world root");
         write_world(second.path(), "用中文叙述，并保持克制。\n");
-        let (_, second_lock, _) = compile_world(second.path());
+        let (_, second_lock, _, _) = compile_world(second.path());
         assert_ne!(first_lock.content_hash, second_lock.content_hash);
 
         fs::write(
@@ -458,8 +500,133 @@ response_language = "follow_player"
             "changed but still not enabled",
         )
         .expect("change unlisted Mod");
-        let (_, unchanged_lock, _) = compile_world(first.path());
+        let (_, unchanged_lock, _, _) = compile_world(first.path());
         assert_eq!(first_lock, unchanged_lock);
+    }
+
+    fn prompt_mod(
+        id: &str,
+        dependency: Option<&str>,
+        narrator: &[&str],
+        npc: &[&str],
+        undeclared: Option<&str>,
+    ) -> VirtualPackage {
+        let mod_id = ModId::parse(id).expect("Mod ID");
+        let narrator_paths = narrator
+            .iter()
+            .enumerate()
+            .map(|(index, _)| format!("prompts/narrator-{index}.md"))
+            .collect::<Vec<_>>();
+        let npc_paths = npc
+            .iter()
+            .enumerate()
+            .map(|(index, _)| format!("prompts/npc-{index}.md"))
+            .collect::<Vec<_>>();
+        let mut payloads = narrator_paths
+            .iter()
+            .zip(narrator)
+            .chain(npc_paths.iter().zip(npc))
+            .map(|(path, text)| PackagePayload::new(path, text.as_bytes()))
+            .collect::<Vec<_>>();
+        if let Some(text) = undeclared {
+            payloads.push(PackagePayload::new("prompts/unused.md", text.as_bytes()));
+        }
+        VirtualPackage::builtin(
+            ModManifestDraft {
+                schema_version: MOD_MANIFEST_SCHEMA_V1,
+                pack_id: ContentDefinitionId::new(&mod_id, "pack", "main").expect("Pack ID"),
+                mod_id,
+                version: Version::new(1, 0, 0),
+                engine: VersionReq::parse("=0.1.0").expect("Engine requirement"),
+                content_schema: CONTENT_SCHEMA_V1,
+                dependencies: dependency
+                    .map(|dependency| crate::ModDependency {
+                        mod_id: ModId::parse(dependency).expect("dependency Mod ID"),
+                        requirement: VersionReq::parse("=1.0.0").expect("dependency requirement"),
+                        optional: false,
+                    })
+                    .into_iter()
+                    .collect(),
+                capabilities: vec![ModCapability::Content],
+                patches: Vec::new(),
+                prompts: PromptManifest {
+                    narrator: narrator_paths,
+                    npc: npc_paths,
+                },
+            },
+            payloads,
+        )
+        .expect("sealed prompt Mod")
+    }
+
+    #[test]
+    fn mod_prompts_append_in_dependency_and_manifest_order_without_injecting_resources() {
+        let root = TempDir::new().expect("world root");
+        write_world(root.path(), "World narrator.");
+        let source = WorldProjectSource::load(root.path()).expect("load world source");
+        let base = prompt_mod(
+            "games.loreloom.context-base",
+            None,
+            &["Base narrator one.", "Base narrator two."],
+            &["Base NPC."],
+            Some("This resource must not be injected."),
+        );
+        let addon = prompt_mod(
+            "games.loreloom.context-addon",
+            Some("games.loreloom.context-base"),
+            &["Addon narrator."],
+            &["Addon NPC one.", "Addon NPC two."],
+            None,
+        );
+        let compiled = PackageCompiler::default()
+            .compile_world(
+                &source,
+                std::iter::empty::<PackageSource>(),
+                [PackageSource::Builtin(addon), PackageSource::Builtin(base)],
+                &BTreeSet::new(),
+            )
+            .expect("compile prompt Mods");
+
+        assert_eq!(
+            compiled
+                .prompts()
+                .narrator()
+                .iter()
+                .map(LongText::as_str)
+                .collect::<Vec<_>>(),
+            [
+                "World narrator.",
+                "Base narrator one.",
+                "Base narrator two.",
+                "Addon narrator."
+            ]
+        );
+        assert_eq!(
+            compiled
+                .prompts()
+                .npc()
+                .iter()
+                .map(LongText::as_str)
+                .collect::<Vec<_>>(),
+            [
+                "Act from what you know.",
+                "Base NPC.",
+                "Addon NPC one.",
+                "Addon NPC two."
+            ]
+        );
+        assert_eq!(
+            compiled
+                .mod_lock()
+                .mods
+                .iter()
+                .map(|locked| locked.mod_id.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "games.loreloom.context-base",
+                "games.loreloom.context-addon"
+            ]
+        );
     }
 
     #[test]
