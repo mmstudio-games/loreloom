@@ -98,6 +98,7 @@ fn run_loop(
                         app.editor.restore_failed_submission(input);
                         return Err(error.into());
                     }
+                    app.show_submitted_input(input);
                     app.apply_runtime_event(RuntimeUiEvent::PhaseChanged(
                         RuntimePhase::PersistingInput,
                     ));

@@ -148,9 +148,11 @@ Loreloom Runtime ───────────────► Persistence
 29. Narrator 不受固定 NPC 数量常量约束，可以在后续 Narrator Turn 继续调用
     `request_npc_turn`；Runtime 通过可配置的整轮与单 Turn Model Call、ToolCall、Token、输出和墙钟
     预算阻止无限循环，模型或 Mod 不能扩大配置上限；
-30. 等待 Provider 时 TUI 显示由 Runtime 阶段驱动的临时 thinking 状态，并保持取消和退出响应；
-    不向玩家转发 Provider 的未完成正文。第一阶段逻辑 World Clock 不随真实墙钟时间隐式推进，
-    世界只通过明确 WorldCommand/System 变化。
+30. 玩家输入被 Runtime command queue 接受后，TUI 立即在 thinking 状态之前显示一条本地 pending
+    玩家行；该行不修改 committed Transcript，并由后续权威 Snapshot 对账或清除。等待 Provider 时
+    TUI 显示由 Runtime 阶段驱动的临时 thinking 状态，并保持取消和退出响应；不向玩家转发 Provider
+    的未完成正文。第一阶段逻辑 World Clock 不随真实墙钟时间隐式推进，世界只通过明确
+    WorldCommand/System 变化。
 31. 第一阶段使用 Cargo virtual workspace，包含 `loreloom-core`、`loreloom-content`、
     `loreloom-world`、`loreloom-agent`、`loreloom-store`、`loreloom-runtime`、`loreloom-tui` 七个
     library crate 和 `loreloom` binary crate；

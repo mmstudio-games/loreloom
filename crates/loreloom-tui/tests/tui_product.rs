@@ -291,6 +291,44 @@ fn product_renderer_is_deterministic_for_wide_and_narrow_layouts() {
 }
 
 #[test]
+fn accepted_input_is_rendered_before_thinking_and_reconciled_by_snapshot() {
+    let mut app = TuiApp::new(snapshot());
+    app.snapshot.tool_activity.clear();
+    app.snapshot.notices.clear();
+    let committed_items = app.snapshot.transcript.items.len();
+
+    app.show_submitted_input("hello".to_owned());
+    app.apply_runtime_event(RuntimeUiEvent::PhaseChanged(RuntimePhase::NarratorThinking));
+
+    assert_eq!(app.snapshot.transcript.items.len(), committed_items);
+    let pending = text_snapshot(render(&app, 80, 18).backend().buffer());
+    let input_position = pending.find("› hello").expect("pending player input");
+    let thinking_position = pending.find("Narrator is thinking…").expect("thinking row");
+    assert!(input_position < thinking_position);
+
+    let mut next = app.snapshot.clone();
+    next.revision = Revision::new(8);
+    next.phase = RuntimePhase::NarratorThinking;
+    let mut committed = next.transcript.items[0].clone();
+    committed.id = parse("trn_01890f6a-2b44-7d4e-8f90-123456789abc");
+    committed.revision = Some(Revision::new(8));
+    committed.text = LongText::new("hello").expect("committed player input");
+    next.transcript.items.push(committed);
+    app.apply_runtime_event(RuntimeUiEvent::Snapshot(Box::new(next)));
+
+    let reconciled = text_snapshot(render(&app, 80, 18).backend().buffer());
+    assert_eq!(reconciled.matches("› hello").count(), 1);
+
+    let mut failed_app = TuiApp::new(snapshot());
+    failed_app.show_submitted_input("not committed".to_owned());
+    let mut failed = failed_app.snapshot.clone();
+    failed.phase = RuntimePhase::Failed;
+    failed_app.apply_runtime_event(RuntimeUiEvent::Snapshot(Box::new(failed)));
+    let failed = text_snapshot(render(&failed_app, 80, 18).backend().buffer());
+    assert!(!failed.contains("not committed"));
+}
+
+#[test]
 fn transcript_follows_latest_and_scrolls_by_page_or_mouse_with_wrapped_bounds() {
     let mut app = sample_app();
     app.working_phase = None;

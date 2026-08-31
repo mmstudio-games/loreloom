@@ -1,5 +1,5 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent, MouseEventKind};
-use loreloom_core::{RuntimePhase, UiSnapshot};
+use loreloom_core::{Revision, RuntimePhase, TranscriptSpeaker, UiSnapshot};
 use thiserror::Error;
 
 use crate::{EditorError, InputEditor};
@@ -56,6 +56,13 @@ pub struct TuiApp {
     pub transcript_page_rows: u16,
     pub working_phase: Option<RuntimePhase>,
     pub spinner_frame: u8,
+    pending_submission: Option<PendingSubmission>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PendingSubmission {
+    text: String,
+    after_revision: Revision,
 }
 
 impl TuiApp {
@@ -70,20 +77,34 @@ impl TuiApp {
             transcript_page_rows: 1,
             working_phase: None,
             spinner_frame: 0,
+            pending_submission: None,
         }
     }
 
     pub fn apply_runtime_event(&mut self, event: RuntimeUiEvent) {
         match event {
             RuntimeUiEvent::Snapshot(snapshot) => {
-                if matches!(
+                let terminal = matches!(
                     snapshot.phase,
                     RuntimePhase::Idle
                         | RuntimePhase::Completed
                         | RuntimePhase::Cancelled
                         | RuntimePhase::Failed
-                ) {
+                );
+                let pending_committed = self.pending_submission.as_ref().is_some_and(|pending| {
+                    snapshot.transcript.items.iter().any(|item| {
+                        matches!(&item.speaker, TranscriptSpeaker::Player { .. })
+                            && item.text.as_str() == pending.text.as_str()
+                            && item
+                                .revision
+                                .is_some_and(|revision| revision > pending.after_revision)
+                    })
+                });
+                if terminal {
                     self.working_phase = None;
+                }
+                if terminal || pending_committed {
+                    self.pending_submission = None;
                 }
                 self.snapshot = *snapshot;
             }
@@ -102,6 +123,21 @@ impl TuiApp {
                 }
             }
         }
+    }
+
+    pub fn show_submitted_input(&mut self, input: String) {
+        self.pending_submission = Some(PendingSubmission {
+            text: input,
+            after_revision: self.snapshot.revision,
+        });
+        self.transcript_scroll = 0;
+    }
+
+    #[must_use]
+    pub(crate) fn pending_submission_text(&self) -> Option<&str> {
+        self.pending_submission
+            .as_ref()
+            .map(|pending| pending.text.as_str())
     }
 
     pub fn tick_spinner(&mut self) {

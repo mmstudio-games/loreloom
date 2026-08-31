@@ -2083,6 +2083,12 @@ Event Option 在 current Revision 求值 `visible_if`，不可见项不进入列
 - `Enter` 提交，`Alt+Enter` 或 `Ctrl+J` 插入换行；运行中 `Esc` 产生 Cancel intent，空闲时
   `Esc` 不产生世界行为；`Ctrl+C` 产生 Quit intent；
 - TUI 把输入作为数据发送给 Runtime，不自行构造 WorldCommand；
+- `RuntimeClient::submit` 成功把输入加入 command queue 后，TUI 必须立即在 Transcript 末尾投影
+  一条 `› ` 前缀的本地 pending 玩家行，再显示 thinking row，并回到最新内容；同步提交失败时不得
+  显示 pending 行且必须恢复 editor；
+- pending 玩家行不是 committed `TranscriptItemRecord`，不能进入 Snapshot、存档或 Agent Context。
+  后续 Snapshot 包含匹配的 committed 玩家输入时由该记录替换；Completed、Cancelled 或 Failed
+  终态 Snapshot 未包含该输入时也必须清除 pending 行，避免重复或残留；
 - 等待 Provider 或 Runtime 编排时显示一个 ephemeral thinking row；文本由本地 Runtime phase 映射
   产生，例如 Narrator is thinking、NPC is responding、Updating world，不来自模型正文；
 - thinking row 可以使用本地 spinner 动画；完成、取消或失败后由最终 Snapshot 替换或清除；
@@ -2130,15 +2136,16 @@ TUI crate 不依赖 Runtime/World/Store/Provider。`UiClientError` 只暴露稳�
 生命周期，不解除第 11 节对 Store 确定性关闭、物理备份、恢复和存档切换的 driver 门禁。
 
 `TuiApp` 拥有 `UiSnapshot`、grapheme editor、输入历史、窄屏页面、距最新内容的 transcript scroll、
-当前折行 viewport 指标、当前 working phase 与本地 spinner frame。Snapshot 更新不得覆盖
-editor/scroll 等本地交互字段；终态 Snapshot
-清除 working phase，resize 只重新 render。Editor 最大 UTF-8 bytes
+当前折行 viewport 指标、至多一条已入队但尚未由 Snapshot 确认的 pending 玩家输入、当前 working
+phase 与本地 spinner frame。Snapshot 更新不得覆盖 editor/scroll 等本地交互字段；终态 Snapshot
+清除 working phase 并与 pending 输入对账，resize 只重新 render。Editor 最大 UTF-8 bytes
 固定为 `LongText` 的 65,536 bytes，单次插入 all-or-reject。`TuiConfig.state_width_percent` 默认 30，
 只允许 25–35；event poll 默认 50 ms。
 
 产品 `run` loop 每轮先无阻塞 drain Runtime event、再 render，并使用有限 poll 等待 Crossterm event；
 因此等待 Provider 时仍可处理 cancel、quit、resize 和 spinner。`RuntimeUiEvent::Snapshot` 是唯一能
-改变 committed transcript/世界状态的 UI 输入；phase event 只改变 ephemeral thinking row。
+改变 committed transcript/世界状态的 UI 输入；本地 pending 玩家行与 phase event 都只是 ephemeral
+投影，不获得 committed 语义。
 
 ## 13. 配置、Secret 与日志
 

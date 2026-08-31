@@ -433,6 +433,23 @@ fn render_story(frame: &mut Frame<'_>, app: &mut TuiApp, area: Rect) {
             )));
         }
     }
+    if let Some(input) = app.pending_submission_text() {
+        if !lines.is_empty() {
+            lines.push(Line::from(""));
+        }
+        let mut text_lines = input.lines();
+        let first = text_lines.next().unwrap_or_default();
+        lines.push(Line::from(vec![
+            Span::styled(
+                "› ",
+                Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(first.to_owned()),
+        ]));
+        for continuation in text_lines {
+            lines.push(Line::from(format!("  {continuation}")));
+        }
+    }
     if let Some(phase) = app.working_phase {
         if !lines.is_empty() {
             lines.push(Line::from(""));
