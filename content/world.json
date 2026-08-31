@@ -1,0 +1,142 @@
+{
+  "schema_version": 1,
+  "definitions": [
+    {
+      "type": "agent_profile",
+      "id": "games.loreloom.rainbound-inn:agent_profile/mira",
+      "display_name": "米拉",
+      "system_style": "你是旅店主人米拉。说话沉着、敏锐而简洁，只依据自己知道的事情回应叙事者。",
+      "model_alias": "loreloom-npc",
+      "tool_capabilities": ["advance_time"],
+      "autonomy": "directed"
+    },
+    {
+      "type": "attribute",
+      "id": "games.loreloom.rainbound-inn:attribute/resolve",
+      "display_name": "意志",
+      "minimum": 0,
+      "maximum": 20000000,
+      "allowed_operations": ["flat"]
+    },
+    {
+      "type": "resource",
+      "id": "games.loreloom.rainbound-inn:resource/stamina",
+      "display_name": "体力",
+      "minimum": 0,
+      "maximum": 100000000,
+      "maximum_policy": "clamp_current"
+    },
+    {
+      "type": "item",
+      "id": "games.loreloom.rainbound-inn:item/inventory",
+      "display_name": "行囊",
+      "description": "随身物品存放在这里。",
+      "tags": [],
+      "stack_limit": 1,
+      "unit_weight_grams": 0,
+      "container": {
+        "max_weight_grams": 10000000000,
+        "max_children": 32
+      },
+      "equipment_slots": [],
+      "modifiers": []
+    },
+    {
+      "type": "place",
+      "id": "games.loreloom.rainbound-inn:place/hearth-room",
+      "display_name": "炉火厅",
+      "description": "低矮温暖的炉火映着木墙，窗外的雨声没有停歇。",
+      "tags": [],
+      "edges": []
+    },
+    {
+      "type": "character",
+      "id": "games.loreloom.rainbound-inn:character/traveler",
+      "display_name": "旅人",
+      "profile": {
+        "summary": "一名刚从雨中走进旅店的旅人。",
+        "values": [],
+        "speaking_style": "由玩家决定。",
+        "narrative_tags": []
+      },
+      "base_attributes": {
+        "games.loreloom.rainbound-inn:attribute/resolve": 10000000
+      },
+      "resources": [
+        {
+          "resource_id": "games.loreloom.rainbound-inn:resource/stamina",
+          "current": 8000000,
+          "base_maximum": 12000000
+        }
+      ],
+      "conditions": [],
+      "inventory": [],
+      "skills": [],
+      "knowledge": [],
+      "goals": [],
+      "spawn_constraints": {
+        "minimum_attributes": {
+          "games.loreloom.rainbound-inn:attribute/resolve": 0
+        },
+        "maximum_attributes": {
+          "games.loreloom.rainbound-inn:attribute/resolve": 20000000
+        },
+        "maximum_attribute_points": 20000000,
+        "maximum_items": 8,
+        "maximum_skills": 4,
+        "allowed_definitions": []
+      }
+    },
+    {
+      "type": "character",
+      "id": "games.loreloom.rainbound-inn:character/mira",
+      "display_name": "米拉",
+      "profile": {
+        "summary": "雨夜旅店里沉着而敏锐的主人。",
+        "values": [],
+        "speaking_style": "言语克制，先观察再回答。",
+        "narrative_tags": []
+      },
+      "agent_profile": "games.loreloom.rainbound-inn:agent_profile/mira",
+      "base_attributes": {},
+      "resources": [],
+      "conditions": [],
+      "inventory": [],
+      "skills": [],
+      "knowledge": [],
+      "goals": [],
+      "spawn_constraints": {
+        "minimum_attributes": {},
+        "maximum_attributes": {},
+        "maximum_attribute_points": 0,
+        "maximum_items": 8,
+        "maximum_skills": 4,
+        "allowed_definitions": []
+      }
+    },
+    {
+      "type": "scene",
+      "id": "games.loreloom.rainbound-inn:scene/rainy-inn",
+      "display_name": "雨夜旅店",
+      "framing": "一间旅店在连绵雨声中安静地守着炉火。",
+      "entry_place": "games.loreloom.rainbound-inn:place/hearth-room",
+      "places": ["games.loreloom.rainbound-inn:place/hearth-room"],
+      "characters": [
+        {
+          "local_key": "player",
+          "character_id": "games.loreloom.rainbound-inn:character/traveler",
+          "place_id": "games.loreloom.rainbound-inn:place/hearth-room",
+          "controller": "player",
+          "lifetime": "persistent"
+        },
+        {
+          "local_key": "mira",
+          "character_id": "games.loreloom.rainbound-inn:character/mira",
+          "place_id": "games.loreloom.rainbound-inn:place/hearth-room",
+          "controller": "agent",
+          "lifetime": "persistent"
+        }
+      ]
+    }
+  ]
+}

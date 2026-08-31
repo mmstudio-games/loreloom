@@ -64,6 +64,7 @@ fn base_package() -> VirtualPackage {
             ),
             PackagePayload::new("assets/weather/rain.txt", b"steady rain".to_vec()),
             PackagePayload::new("locales/en.json", br#"{"rain":"Rain"}"#.to_vec()),
+            PackagePayload::new("prompts/narrator.md", "Narrate steady rain.".as_bytes()),
         ],
     )
     .expect("sealed base package")
@@ -160,6 +161,12 @@ fn builtin_and_directory_packages_share_dependency_patch_registry_and_lock_pipel
             .resources()
             .get(&mod_id("games.loreloom.base"), "assets/weather/rain.txt"),
         Some(b"steady rain".as_slice())
+    );
+    assert_eq!(
+        compiled
+            .resources()
+            .get(&mod_id("games.loreloom.base"), "prompts/narrator.md"),
+        Some("Narrate steady rain.".as_bytes())
     );
 
     compiler

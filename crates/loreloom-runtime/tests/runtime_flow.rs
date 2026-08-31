@@ -18,9 +18,10 @@ use armillae_llm::{
 use armillae_tools::{ToolContext, ToolExecutor};
 use loreloom_agent::{
     AgentDefinition, AgentRunner, AgentToolContext, CancellationToken, ModelFailureCategory,
-    ModelFailureStage, ModelInvocationKind, NarrativeImportance, NarratorNpcDecision, NarratorPlan,
-    NpcControllerKind, NpcGenerationRequest, NpcLifetime, NpcNarrativeAction, NpcTarget,
-    NpcTurnRequest, NpcTurnStatus, ResourceBudget, TurnInvocation, TurnStatus,
+    ModelFailureStage, ModelInvocationKind, NarrativeImportance, NarratorDefinition,
+    NarratorNpcDecision, NarratorPlan, NpcControllerKind, NpcGenerationRequest, NpcLifetime,
+    NpcNarrativeAction, NpcTarget, NpcTurnRequest, NpcTurnStatus, ResourceBudget,
+    ResponseLanguagePolicy, TurnInvocation, TurnStatus,
 };
 use loreloom_content::{
     AgentProfileDefinition, AttributeDefinition, CONTENT_SCHEMA_V1, CharacterDefinition,
@@ -44,7 +45,7 @@ use loreloom_core::{
     ParameterValue, PlaceRecord, Posture, ResourcePool, Revision, SAVE_FORMAT_V1, SaveId,
     SaveManifest, SceneRecord, SessionId, ShortText, SkillGrantRecord, SkillSource,
     SpawnConstraints, StackState, SystemIdGenerator, TranscriptSpeaker, WorldCommand,
-    WorldCommandKind, WorldEventKind, WorldId, WorldStateRecord, WorldTime,
+    WorldCommandKind, WorldEventKind, WorldId, WorldLock, WorldStateRecord, WorldTime,
 };
 use loreloom_runtime::{
     ContextProjectionPolicy, GameRuntime, RuntimeConfig, RuntimeError, RuntimeToolExecutor,
@@ -531,6 +532,13 @@ fn fixture() -> Fixture {
             format_version: SAVE_FORMAT_V1,
             save_id: parse::<SaveId>("sav_01890f6a-2b43-7d4e-8f90-123456789abc"),
             world_id: parse::<WorldId>("wld_01890f6a-2b42-7d4e-8f90-123456789abc"),
+            world_lock: WorldLock {
+                world_id: parse("games.loreloom.test"),
+                version: parse("1.0.0"),
+                content_hash: parse_content_hash("d".repeat(64)).expect("world content hash"),
+                manifest_schema: 1,
+                content_schema: CONTENT_SCHEMA_V1,
+            },
             mod_lock: ModLock::default(),
         },
         world_config: WorldConfig {
@@ -783,6 +791,7 @@ async fn condition_name_projection_requires_a_confirmed_diagnosis_fact() {
                     last_confirmed_at: WorldTime::ZERO,
                 }));
         }
+        let candidate_world_lock = fixture.manifest.world_lock.clone();
         let candidate_mod_lock = fixture.manifest.mod_lock.clone();
         let store = SaveStore::create(
             directory.path().join("save"),
@@ -794,6 +803,7 @@ async fn condition_name_projection_requires_a_confirmed_diagnosis_fact() {
         let service = WorldService::open(
             store,
             fixture.registry,
+            &candidate_world_lock,
             &candidate_mod_lock,
             fixture.world_config,
         )
@@ -1622,6 +1632,13 @@ fn definition(profile_id: ContentDefinitionId) -> AgentDefinition {
     }
 }
 
+fn narrator_definition() -> NarratorDefinition {
+    NarratorDefinition {
+        system_prompt: LongText::new("Narrate the test world.").expect("narrator prompt"),
+        response_language: ResponseLanguagePolicy::FollowPlayer,
+    }
+}
+
 fn npc_bridge() -> Arc<MockBridge> {
     let call = ToolCall {
         id: ToolCallId::new("npc-advance").expect("call id"),
@@ -1656,6 +1673,7 @@ fn generation_policy(
 async fn world_service_rejects_a_candidate_mod_lock_before_world_materialization() {
     let directory = TempDir::new().expect("temporary save parent");
     let fixture = fixture();
+    let candidate_world = fixture.manifest.world_lock.clone();
     let store = SaveStore::create(
         directory.path().join("save"),
         fixture.manifest,
@@ -1677,7 +1695,43 @@ async fn world_service_rejects_a_candidate_mod_lock_before_world_materialization
     };
 
     assert!(matches!(
-        WorldService::open(store, fixture.registry, &candidate, fixture.world_config).await,
+        WorldService::open(
+            store,
+            fixture.registry,
+            &candidate_world,
+            &candidate,
+            fixture.world_config
+        )
+        .await,
+        Err(RuntimeError::ContentLockMismatch)
+    ));
+}
+
+#[tokio::test]
+async fn world_service_rejects_a_candidate_world_lock_before_world_materialization() {
+    let directory = TempDir::new().expect("temporary save parent");
+    let fixture = fixture();
+    let mut candidate_world = fixture.manifest.world_lock.clone();
+    candidate_world.content_hash =
+        parse_content_hash("e".repeat(64)).expect("different world content hash");
+    let candidate_mods = fixture.manifest.mod_lock.clone();
+    let store = SaveStore::create(
+        directory.path().join("save"),
+        fixture.manifest,
+        fixture.records,
+    )
+    .await
+    .expect("create save");
+
+    assert!(matches!(
+        WorldService::open(
+            store,
+            fixture.registry,
+            &candidate_world,
+            &candidate_mods,
+            fixture.world_config
+        )
+        .await,
         Err(RuntimeError::ContentLockMismatch)
     ));
 }
@@ -1696,6 +1750,7 @@ async fn provider_failure_is_redacted_and_the_same_runtime_accepts_the_next_turn
     let service = WorldService::open(
         store,
         fixture.registry,
+        &fixture.manifest.world_lock,
         &fixture.manifest.mod_lock,
         fixture.world_config,
     )
@@ -1707,6 +1762,7 @@ async fn provider_failure_is_redacted_and_the_same_runtime_accepts_the_next_turn
     let mut runtime = GameRuntime::new(
         Arc::clone(&service),
         narrator,
+        narrator_definition(),
         parse("ses_01890f6a-2b8a-7d4e-8f90-123456789abc"),
         RuntimeConfig::default(),
     );
@@ -1766,6 +1822,7 @@ async fn narrator_discovers_scene_targets_and_invented_targets_are_actionably_re
     let service = WorldService::open(
         store,
         fixture.registry,
+        &fixture.manifest.world_lock,
         &fixture.manifest.mod_lock,
         fixture.world_config,
     )
@@ -1872,6 +1929,7 @@ async fn narrator_scene_transition_materializes_replans_and_revisits_without_reg
     let service = WorldService::open(
         store,
         fixture.registry,
+        &fixture.manifest.world_lock,
         &fixture.manifest.mod_lock,
         fixture.world_config,
     )
@@ -1916,6 +1974,7 @@ async fn narrator_scene_transition_materializes_replans_and_revisits_without_reg
     let mut runtime = GameRuntime::new(
         Arc::clone(&service),
         narrator,
+        narrator_definition(),
         parse("ses_01890f6a-2b88-7d4e-8f90-123456789abc"),
         RuntimeConfig::default(),
     );
@@ -2035,6 +2094,7 @@ async fn scene_transition_is_mutually_exclusive_with_scene_bound_npc_orchestrati
     let service = WorldService::open(
         store,
         fixture.registry,
+        &fixture.manifest.world_lock,
         &fixture.manifest.mod_lock,
         fixture.world_config,
     )
@@ -2138,6 +2198,7 @@ async fn player_narrator_npc_and_surreal_store_form_a_durable_vertical_slice() {
     let service = WorldService::open(
         store,
         fixture.registry.clone(),
+        &fixture.manifest.world_lock,
         &fixture.manifest.mod_lock,
         fixture.world_config.clone(),
     )
@@ -2152,6 +2213,7 @@ async fn player_narrator_npc_and_surreal_store_form_a_durable_vertical_slice() {
     let mut runtime = GameRuntime::new(
         Arc::clone(&service),
         narrator,
+        narrator_definition(),
         parse::<SessionId>("ses_01890f6a-2b61-7d4e-8f90-123456789abc"),
         RuntimeConfig::default(),
     );
@@ -2245,6 +2307,7 @@ async fn npc_provider_failure_reaches_narrator_result_and_player_notice() {
     let service = WorldService::open(
         store,
         fixture.registry.clone(),
+        &fixture.manifest.world_lock,
         &fixture.manifest.mod_lock,
         fixture.world_config.clone(),
     )
@@ -2257,6 +2320,7 @@ async fn npc_provider_failure_reaches_narrator_result_and_player_notice() {
     let mut runtime = GameRuntime::new(
         service,
         Arc::new(NarratorBridge::new(plan, SupportMode::Empty)),
+        narrator_definition(),
         parse("ses_01890f6a-2b65-7d4e-8f90-123456789abc"),
         RuntimeConfig::default(),
     );
@@ -2306,6 +2370,7 @@ async fn generated_npc_is_committed_before_narrator_replans_and_dispatches_it() 
     let service = WorldService::open(
         store,
         fixture.registry.clone(),
+        &fixture.manifest.world_lock,
         &fixture.manifest.mod_lock,
         fixture.world_config.clone(),
     )
@@ -2338,6 +2403,7 @@ async fn generated_npc_is_committed_before_narrator_replans_and_dispatches_it() 
     let mut runtime = GameRuntime::new(
         Arc::clone(&service),
         narrator.clone(),
+        narrator_definition(),
         parse("ses_01890f6a-2ba1-7d4e-8f90-123456789abc"),
         config,
     );
@@ -2412,6 +2478,7 @@ async fn repeated_materialization_request_does_not_generate_a_second_character()
     let service = WorldService::open(
         store,
         fixture.registry,
+        &fixture.manifest.world_lock,
         &fixture.manifest.mod_lock,
         fixture.world_config,
     )
@@ -2435,6 +2502,7 @@ async fn repeated_materialization_request_does_not_generate_a_second_character()
     let mut runtime = GameRuntime::new(
         service,
         narrator.clone(),
+        narrator_definition(),
         parse("ses_01890f6a-2ba7-7d4e-8f90-123456789abc"),
         config,
     );
@@ -2479,6 +2547,7 @@ async fn preset_npc_uses_the_same_spawn_event_and_post_commit_replanning_barrier
     let service = WorldService::open(
         store,
         fixture.registry.clone(),
+        &fixture.manifest.world_lock,
         &fixture.manifest.mod_lock,
         fixture.world_config.clone(),
     )
@@ -2496,6 +2565,7 @@ async fn preset_npc_uses_the_same_spawn_event_and_post_commit_replanning_barrier
     let mut runtime = GameRuntime::new(
         Arc::clone(&service),
         narrator.clone(),
+        narrator_definition(),
         parse("ses_01890f6a-2ba3-7d4e-8f90-123456789abc"),
         RuntimeConfig::default(),
     );
@@ -2560,6 +2630,7 @@ async fn generation_limits_and_provider_failures_return_to_narrator_without_part
         let service = WorldService::open(
             store,
             fixture.registry.clone(),
+            &fixture.manifest.world_lock,
             &fixture.manifest.mod_lock,
             fixture.world_config.clone(),
         )
@@ -2582,6 +2653,7 @@ async fn generation_limits_and_provider_failures_return_to_narrator_without_part
         let mut runtime = GameRuntime::new(
             service,
             narrator.clone(),
+            narrator_definition(),
             parse(&format!(
                 "ses_01890f6a-2ba{}-7d4e-8f90-123456789abc",
                 index + 4
@@ -2639,6 +2711,7 @@ async fn cancellation_during_npc_generation_does_not_publish_a_character() {
     let service = WorldService::open(
         store,
         fixture.registry,
+        &fixture.manifest.world_lock,
         &fixture.manifest.mod_lock,
         fixture.world_config,
     )
@@ -2673,6 +2746,7 @@ async fn cancellation_during_npc_generation_does_not_publish_a_character() {
     let mut runtime = GameRuntime::new(
         service,
         narrator,
+        narrator_definition(),
         parse("ses_01890f6a-2ba6-7d4e-8f90-123456789abc"),
         config,
     );
@@ -2719,6 +2793,7 @@ async fn npc_generation_consumes_the_shared_started_agent_turn_budget() {
     let service = WorldService::open(
         store,
         fixture.registry,
+        &fixture.manifest.world_lock,
         &fixture.manifest.mod_lock,
         fixture.world_config,
     )
@@ -2740,6 +2815,7 @@ async fn npc_generation_consumes_the_shared_started_agent_turn_budget() {
     let mut runtime = GameRuntime::new(
         service,
         narrator.clone(),
+        narrator_definition(),
         parse("ses_01890f6a-2ba8-7d4e-8f90-123456789abc"),
         config,
     );
@@ -2770,6 +2846,7 @@ async fn npc_generation_consumes_the_shared_started_agent_turn_budget() {
 async fn stale_npc_requests_are_correlated_without_calling_the_provider() {
     let directory = TempDir::new().expect("temporary save parent");
     let fixture = fixture();
+    let candidate_world_lock = fixture.manifest.world_lock.clone();
     let candidate_mod_lock = fixture.manifest.mod_lock.clone();
     let store = SaveStore::create(
         directory.path().join("save"),
@@ -2781,6 +2858,7 @@ async fn stale_npc_requests_are_correlated_without_calling_the_provider() {
     let service = WorldService::open(
         store,
         fixture.registry,
+        &candidate_world_lock,
         &candidate_mod_lock,
         fixture.world_config,
     )
@@ -2794,6 +2872,7 @@ async fn stale_npc_requests_are_correlated_without_calling_the_provider() {
     let mut runtime = GameRuntime::new(
         service,
         Arc::new(NarratorBridge::new(plan, SupportMode::Empty)),
+        narrator_definition(),
         parse("ses_01890f6a-2b62-7d4e-8f90-123456789abc"),
         RuntimeConfig::default(),
     );
@@ -2814,6 +2893,7 @@ async fn stale_npc_requests_are_correlated_without_calling_the_provider() {
 async fn narrator_text_cannot_supply_world_event_provenance() {
     let directory = TempDir::new().expect("temporary save parent");
     let fixture = fixture();
+    let candidate_world_lock = fixture.manifest.world_lock.clone();
     let candidate_mod_lock = fixture.manifest.mod_lock.clone();
     let store = SaveStore::create(
         directory.path().join("save"),
@@ -2826,6 +2906,7 @@ async fn narrator_text_cannot_supply_world_event_provenance() {
     let service = WorldService::open(
         store,
         fixture.registry,
+        &candidate_world_lock,
         &candidate_mod_lock,
         fixture.world_config,
     )
@@ -2838,6 +2919,7 @@ async fn narrator_text_cannot_supply_world_event_provenance() {
     let mut runtime = GameRuntime::new(
         service,
         Arc::new(NarratorBridge::new(plan, SupportMode::Fabricated)),
+        narrator_definition(),
         parse("ses_01890f6a-2b63-7d4e-8f90-123456789abc"),
         RuntimeConfig::default(),
     );
@@ -2862,6 +2944,7 @@ async fn narrator_text_cannot_supply_world_event_provenance() {
 async fn narrator_response_body_is_never_parsed_as_a_control_envelope() {
     let directory = TempDir::new().expect("temporary save parent");
     let fixture = fixture();
+    let candidate_world_lock = fixture.manifest.world_lock.clone();
     let candidate_mod_lock = fixture.manifest.mod_lock.clone();
     let store = SaveStore::create(
         directory.path().join("save"),
@@ -2873,6 +2956,7 @@ async fn narrator_response_body_is_never_parsed_as_a_control_envelope() {
     let service = WorldService::open(
         store,
         fixture.registry,
+        &candidate_world_lock,
         &candidate_mod_lock,
         fixture.world_config,
     )
@@ -2883,6 +2967,7 @@ async fn narrator_response_body_is_never_parsed_as_a_control_envelope() {
     let mut runtime = GameRuntime::new(
         service,
         narrator,
+        narrator_definition(),
         parse("ses_01890f6a-2bc0-7d4e-8f90-123456789abc"),
         RuntimeConfig::default(),
     );
@@ -2929,6 +3014,7 @@ async fn narrator_and_npc_contexts_apply_host_projection_limits_before_provider_
             updated_at: WorldTime::ZERO,
         }),
     ]);
+    let candidate_world_lock = fixture.manifest.world_lock.clone();
     let candidate_mod_lock = fixture.manifest.mod_lock.clone();
     let store = SaveStore::create(
         directory.path().join("save"),
@@ -2940,6 +3026,7 @@ async fn narrator_and_npc_contexts_apply_host_projection_limits_before_provider_
     let service = WorldService::open(
         store,
         fixture.registry,
+        &candidate_world_lock,
         &candidate_mod_lock,
         fixture.world_config,
     )
@@ -2956,6 +3043,7 @@ async fn narrator_and_npc_contexts_apply_host_projection_limits_before_provider_
     let mut runtime = GameRuntime::new(
         service,
         narrator.clone(),
+        narrator_definition(),
         parse("ses_01890f6a-2bbe-7d4e-8f90-123456789abc"),
         RuntimeConfig {
             context_projection: ContextProjectionPolicy {
@@ -3079,6 +3167,7 @@ async fn inventory_tools_page_by_stable_id_enforce_actor_ownership_and_update_sn
     let service = WorldService::open(
         store,
         fixture.registry,
+        &fixture.manifest.world_lock,
         &fixture.manifest.mod_lock,
         fixture.world_config,
     )
@@ -3300,6 +3389,7 @@ async fn mock_agent_continuation_splits_stack_then_uses_skill_at_advanced_revisi
     let service = WorldService::open(
         store,
         fixture.registry,
+        &fixture.manifest.world_lock,
         &fixture.manifest.mod_lock,
         fixture.world_config,
     )
@@ -3419,6 +3509,7 @@ async fn mock_agent_continuation_splits_stack_then_uses_skill_at_advanced_revisi
 async fn external_revision_conflict_recovers_the_candidate_world() {
     let directory = TempDir::new().expect("temporary save parent");
     let fixture = fixture();
+    let candidate_world_lock = fixture.manifest.world_lock.clone();
     let candidate_mod_lock = fixture.manifest.mod_lock.clone();
     let store = SaveStore::create(
         directory.path().join("save"),
@@ -3431,6 +3522,7 @@ async fn external_revision_conflict_recovers_the_candidate_world() {
     let service = WorldService::open(
         store,
         fixture.registry.clone(),
+        &candidate_world_lock,
         &candidate_mod_lock,
         fixture.world_config.clone(),
     )
@@ -3506,6 +3598,7 @@ async fn generic_gameplay_tools_enforce_capabilities_and_preserve_session_overla
     let service = WorldService::open(
         store,
         fixture.registry.clone(),
+        &fixture.manifest.world_lock,
         &fixture.manifest.mod_lock,
         fixture.world_config.clone(),
     )

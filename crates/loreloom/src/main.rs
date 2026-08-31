@@ -1,17 +1,16 @@
-mod bridge;
 mod cli;
 mod client;
 mod config;
-mod demo;
 mod error;
+mod world;
 
 use std::process::ExitCode;
 
 use cli::{Cli, HELP};
 use client::RuntimeAdapter;
 use config::{ProductConfig, ResolvedProductConfig};
-use demo::{DemoSetup, build_demo_with};
 use error::AppError;
+use world::{WorldSetup, build_world_with};
 
 fn main() -> ExitCode {
     match run_application() {
@@ -44,18 +43,24 @@ fn run_application_with(
         .config_path
         .as_deref()
         .map(ProductConfig::load)
-        .transpose()?;
-    let resolved = configured
-        .map(|config| tokio.block_on(config.resolve()))
-        .transpose()?;
-    let (providers, tui_config) = match resolved {
-        Some(ResolvedProductConfig { providers, tui }) => (Some(providers), tui),
-        None => (None, loreloom_tui::TuiConfig::default()),
-    };
-    let DemoSetup {
+        .transpose()?
+        .ok_or(AppError::Arguments(
+            "--config is required because production play needs a model Provider",
+        ))?;
+    let ResolvedProductConfig {
+        providers,
+        tui: tui_config,
+    } = tokio.block_on(configured.resolve())?;
+    let WorldSetup {
         mut runtime,
         initial_snapshot,
-    } = tokio.block_on(build_demo_with(&cli.save_path, &cli.mod_paths, providers))?;
+        ..
+    } = tokio.block_on(build_world_with(
+        &cli.world_path,
+        &cli.save_path,
+        &cli.mod_paths,
+        providers,
+    ))?;
     if let Some(input) = cli.headless_input {
         let outcome = tokio.block_on(runtime.handle_player_input(input))?;
         println!("{}", outcome.narration);

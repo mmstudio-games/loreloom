@@ -23,7 +23,7 @@ use loreloom_core::{
     SaveId, SaveManifest, SceneContext, SceneObservation, SceneRecord, SceneTransitionTarget,
     SessionId, ShortText, SkillTargetRef, SkillView, SystemIdGenerator, ToolActivity,
     TranscriptWindow, UiNotice, UiSnapshot, VisibleActorView, WorldCommand, WorldCommandKind,
-    WorldEvent, WorldEventKind,
+    WorldEvent, WorldEventKind, WorldLock,
 };
 use loreloom_store::{ActionResolution, CommitRequest, CommitResult, CommittedAction, SaveStore};
 use loreloom_world::{GameWorld, WorldBootstrap, WorldConfig};
@@ -92,9 +92,11 @@ impl std::fmt::Debug for WorldService {
 }
 
 impl WorldService {
+    #[allow(clippy::too_many_arguments)]
     pub async fn create(
         path: impl AsRef<Path>,
         save_id: SaveId,
+        world_lock: WorldLock,
         mod_lock: ModLock,
         registry: DefinitionRegistry,
         plan: &SceneSpawnPlan,
@@ -109,31 +111,31 @@ impl WorldService {
                 format_version: SAVE_FORMAT_V1,
                 save_id,
                 world_id: bootstrap.world_id,
+                world_lock: world_lock.clone(),
                 mod_lock: mod_lock.clone(),
             },
             bootstrap.records.clone(),
         )
         .await?;
-        let service = Self::open(store, registry, &mod_lock, config).await?;
+        let service = Self::open(store, registry, &world_lock, &mod_lock, config).await?;
         Ok((service, bootstrap))
     }
 
     pub async fn open(
         mut store: SaveStore,
         registry: DefinitionRegistry,
+        candidate_world_lock: &WorldLock,
         candidate_mod_lock: &ModLock,
         config: WorldConfig,
     ) -> Result<Arc<Self>, RuntimeError> {
-        if &store.manifest().mod_lock != candidate_mod_lock {
+        if &store.manifest().world_lock != candidate_world_lock
+            || &store.manifest().mod_lock != candidate_mod_lock
+        {
             return Err(RuntimeError::ContentLockMismatch);
         }
         let loaded = store.load().await?;
-        let migration_required = loaded.requires_migration();
         let world =
             GameWorld::from_records(loaded.revision, loaded.records, config.clone(), &registry)?;
-        if migration_required {
-            store.checkpoint(&world.project_records()?).await?;
-        }
         Ok(Arc::new(Self {
             inner: Mutex::new(RuntimeWorld {
                 world,

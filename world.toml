@@ -1,0 +1,15 @@
+schema_version = 1
+world_id = "games.loreloom.rainbound-inn"
+version = "0.1.0"
+engine = "=0.1.0"
+content_schema = 1
+initial_scene = "games.loreloom.rainbound-inn:scene/rainy-inn"
+inventory_root_definition = "games.loreloom.rainbound-inn:item/inventory"
+spawn_system_definition = "games.loreloom.rainbound-inn:system/spawn"
+content = ["content/world.json"]
+rules = []
+resources = []
+
+[narrator]
+prompt = "prompts/narrator.md"
+response_language = "follow_player"

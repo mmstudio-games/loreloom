@@ -14,8 +14,10 @@ pub enum AppError {
     Content(#[from] loreloom_content::ContentError),
     #[error(transparent)]
     Package(#[from] loreloom_content::PackageError),
-    #[error("built-in demo content could not be encoded")]
-    DemoCodec(#[source] serde_json::Error),
+    #[error(transparent)]
+    WorldProject(#[from] loreloom_content::WorldProjectError),
+    #[error("engine content could not be encoded")]
+    ContentCodec(#[source] serde_json::Error),
     #[error("application configuration could not be parsed")]
     ConfigCodec,
     #[error("application configuration is invalid: {0}")]

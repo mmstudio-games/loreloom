@@ -3,11 +3,13 @@
 mod package;
 mod registry;
 mod schema;
+mod world_project;
 
 pub use package::{
-    CompiledModSet, LORELOOM_ENGINE_VERSION, MOD_MANIFEST_SCHEMA_V1, ModCapability, ModDependency,
-    ModManifest, ModManifestDraft, PackageCompiler, PackageError, PackageLimits, PackagePayload,
-    PackageResources, PackageSource, PatchDeclaration, VirtualPackage,
+    CompiledModSet, CompiledWorldSet, LORELOOM_ENGINE_VERSION, MOD_MANIFEST_SCHEMA_V1,
+    ModCapability, ModDependency, ModManifest, ModManifestDraft, PackageCompiler, PackageError,
+    PackageLimits, PackagePayload, PackageResources, PackageSource, PatchDeclaration,
+    VirtualPackage,
 };
 
 pub use registry::{
@@ -16,3 +18,7 @@ pub use registry::{
     ScenePlaceSpawnPlan, SceneSpawnPlan, parse_content_hash,
 };
 pub use schema::*;
+pub use world_project::{
+    WORLD_MANIFEST_SCHEMA_V1, WorldManifest, WorldNarrator, WorldNarratorManifest,
+    WorldProjectError, WorldProjectSource, WorldResponseLanguage,
+};

@@ -14,6 +14,8 @@ pub enum PersistenceError {
     UnsupportedSaveFormat,
     #[error("mod lock is invalid: {field}")]
     InvalidModLock { field: &'static str },
+    #[error("world lock is invalid: {field}")]
+    InvalidWorldLock { field: &'static str },
     #[error(transparent)]
     Identity(#[from] IdentityError),
 }
@@ -50,6 +52,28 @@ pub struct LockedMod {
 #[serde(deny_unknown_fields)]
 pub struct ModLock {
     pub mods: Vec<LockedMod>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorldLock {
+    pub world_id: ModId,
+    pub version: Version,
+    pub content_hash: ContentHash,
+    pub manifest_schema: u32,
+    pub content_schema: u32,
+}
+
+impl WorldLock {
+    pub fn validate(&self) -> Result<(), PersistenceError> {
+        if self.manifest_schema == 0 {
+            return invalid_world("manifest_schema");
+        }
+        if self.content_schema == 0 {
+            return invalid_world("content_schema");
+        }
+        Ok(())
+    }
 }
 
 impl ModLock {
@@ -106,6 +130,7 @@ pub struct SaveManifest {
     pub format_version: u32,
     pub save_id: SaveId,
     pub world_id: WorldId,
+    pub world_lock: WorldLock,
     pub mod_lock: ModLock,
 }
 
@@ -114,12 +139,17 @@ impl SaveManifest {
         if self.format_version != SAVE_FORMAT_V1 {
             return Err(PersistenceError::UnsupportedSaveFormat);
         }
+        self.world_lock.validate()?;
         self.mod_lock.validate()
     }
 }
 
 fn invalid<T>(field: &'static str) -> Result<T, PersistenceError> {
     Err(PersistenceError::InvalidModLock { field })
+}
+
+fn invalid_world<T>(field: &'static str) -> Result<T, PersistenceError> {
+    Err(PersistenceError::InvalidWorldLock { field })
 }
 
 #[cfg(test)]
@@ -179,6 +209,13 @@ mod tests {
             world_id: "wld_01890f6a-2b3d-7d4e-8f90-123456789abc"
                 .parse()
                 .expect("world id"),
+            world_lock: WorldLock {
+                world_id: ModId::parse("games.loreloom").expect("world content ID"),
+                version: Version::new(1, 0, 0),
+                content_hash: ContentHash::parse("b".repeat(64)).expect("world hash"),
+                manifest_schema: 1,
+                content_schema: 1,
+            },
             mod_lock: ModLock {
                 mods: vec![locked("games.loreloom.base", Vec::new())],
             },
@@ -196,5 +233,13 @@ mod tests {
             .expect("manifest object")
             .insert("path".into(), serde_json::Value::String("private".into()));
         assert!(serde_json::from_value::<SaveManifest>(unknown).is_err());
+
+        let mut obsolete_development_save =
+            serde_json::to_value(&manifest).expect("encode development manifest");
+        obsolete_development_save
+            .as_object_mut()
+            .expect("manifest object")
+            .remove("world_lock");
+        assert!(serde_json::from_value::<SaveManifest>(obsolete_development_save).is_err());
     }
 }

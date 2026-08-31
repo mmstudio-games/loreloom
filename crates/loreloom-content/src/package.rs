@@ -6,6 +6,7 @@ use std::{
 
 use loreloom_core::{
     ContentDefinitionId, ContentHash, LockedDependency, LockedMod, ModId, ModLock, ModSourceKind,
+    WorldLock,
 };
 use semver::{Version, VersionReq};
 use serde::{Deserialize, Serialize};
@@ -14,7 +15,7 @@ use thiserror::Error;
 
 use crate::{
     CONTENT_SCHEMA_V1, ContentDocument, ContentError, ContentPackContext, Definition,
-    DefinitionRegistry,
+    DefinitionRegistry, WorldProjectError, WorldProjectSource,
 };
 
 pub const MOD_MANIFEST_SCHEMA_V1: u32 = 1;
@@ -269,6 +270,46 @@ pub struct CompiledModSet {
     resources: PackageResources,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompiledWorldSet {
+    registry: DefinitionRegistry,
+    world_lock: WorldLock,
+    mod_lock: ModLock,
+    resources: PackageResources,
+}
+
+impl CompiledWorldSet {
+    #[must_use]
+    pub fn registry(&self) -> &DefinitionRegistry {
+        &self.registry
+    }
+
+    #[must_use]
+    pub fn world_lock(&self) -> &WorldLock {
+        &self.world_lock
+    }
+
+    #[must_use]
+    pub fn mod_lock(&self) -> &ModLock {
+        &self.mod_lock
+    }
+
+    #[must_use]
+    pub fn resources(&self) -> &PackageResources {
+        &self.resources
+    }
+
+    #[must_use]
+    pub fn into_parts(self) -> (DefinitionRegistry, WorldLock, ModLock, PackageResources) {
+        (
+            self.registry,
+            self.world_lock,
+            self.mod_lock,
+            self.resources,
+        )
+    }
+}
+
 impl CompiledModSet {
     #[must_use]
     pub fn registry(&self) -> &DefinitionRegistry {
@@ -327,6 +368,30 @@ impl PackageCompiler {
         expected: &ModLock,
     ) -> Result<CompiledModSet, PackageError> {
         self.compile_inner(sources, Some(expected))
+    }
+
+    pub fn compile_world(
+        &self,
+        world: &WorldProjectSource,
+        engine_sources: impl IntoIterator<Item = PackageSource>,
+        mod_sources: impl IntoIterator<Item = PackageSource>,
+        engine_namespaces: &BTreeSet<ModId>,
+    ) -> Result<CompiledWorldSet, WorldProjectError> {
+        let mut sources = engine_sources.into_iter().collect::<Vec<_>>();
+        sources.push(PackageSource::Builtin(world.package().clone()));
+        sources.extend(mod_sources);
+        let CompiledModSet {
+            registry,
+            mod_lock: full_lock,
+            resources,
+        } = self.compile_inner(sources, None)?;
+        let (world_lock, mod_lock) = world.split_lock(full_lock, engine_namespaces)?;
+        Ok(CompiledWorldSet {
+            registry,
+            world_lock,
+            mod_lock,
+            resources,
+        })
     }
 
     fn compile_inner(
@@ -562,6 +627,9 @@ fn validate_payload_groups(
                 if !value.is_object() {
                     return Err(PackageError::InvalidData);
                 }
+            }
+            Some(PayloadKind::Prompt) => {
+                std::str::from_utf8(bytes).map_err(|_| PackageError::InvalidData)?;
             }
             Some(PayloadKind::Asset) => {}
             _ => return Err(PackageError::UnsafePath),
@@ -831,7 +899,7 @@ fn collect_resources(
             for (path, bytes) in &package.files {
                 if matches!(
                     classify_path(path),
-                    Some(PayloadKind::Locale | PayloadKind::Asset)
+                    Some(PayloadKind::Locale | PayloadKind::Prompt | PayloadKind::Asset)
                 ) {
                     entries.insert((mod_id.clone(), path.clone()), bytes.clone());
                 }
@@ -913,6 +981,7 @@ enum PayloadKind {
     Rules,
     Patch,
     Locale,
+    Prompt,
     Asset,
 }
 
@@ -923,6 +992,7 @@ fn classify_path(path: &str) -> Option<PayloadKind> {
         ["rules", file] if file.ends_with(".json") => Some(PayloadKind::Rules),
         ["patches", file] if file.ends_with(".json") => Some(PayloadKind::Patch),
         ["locales", file] if file.ends_with(".json") => Some(PayloadKind::Locale),
+        ["prompts", file] if file.ends_with(".md") => Some(PayloadKind::Prompt),
         ["assets", _, ..] => Some(PayloadKind::Asset),
         _ => None,
     }

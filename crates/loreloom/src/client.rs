@@ -185,15 +185,80 @@ fn failed_snapshot(mut snapshot: UiSnapshot, error: &RuntimeError) -> UiSnapshot
 #[cfg(test)]
 mod tests {
     use std::time::{Duration, Instant};
+    use std::{path::Path, sync::Arc};
 
-    use armillae_llm::{BridgeError, ErrorMetadata};
+    use armillae_core::{
+        AssistantContent, CompletionRequest, CompletionResponse, FinishReason, TextContent,
+    };
+    use armillae_llm::{
+        BoxFuture, BridgeCapabilities, BridgeError, CompletionStream, ErrorMetadata, LlmBridge,
+        ProjectionReport,
+    };
     use loreloom_agent::{ModelFailureDiagnostic, ModelFailureStage, ModelInvocationKind};
     use loreloom_core::{NoticeKind, RuntimePhase};
     use loreloom_runtime::RuntimeError;
     use loreloom_tui::RuntimeClient;
 
     use super::{RuntimeAdapter, RuntimeCommand, failed_snapshot};
-    use crate::demo::build_demo_with;
+    use crate::{
+        config::ConfiguredProviders,
+        world::{WorldSetup, build_world_with},
+    };
+
+    struct TextBridge;
+
+    impl LlmBridge for TextBridge {
+        fn capabilities(&self) -> BridgeCapabilities {
+            BridgeCapabilities::all()
+        }
+
+        fn project(&self, _request: &CompletionRequest) -> Result<ProjectionReport, BridgeError> {
+            Ok(ProjectionReport::exact("loreloom-test"))
+        }
+
+        fn complete<'a>(
+            &'a self,
+            _request: CompletionRequest,
+        ) -> BoxFuture<'a, Result<CompletionResponse, BridgeError>> {
+            Box::pin(async {
+                Ok(CompletionResponse {
+                    id: None,
+                    model: Some("loreloom-test".to_owned()),
+                    content: vec![AssistantContent::Text(TextContent::new("雨声仍在继续。"))],
+                    finish_reason: Some(FinishReason::Stop),
+                    usage: None,
+                    provider_metadata: serde_json::Value::Null,
+                })
+            })
+        }
+
+        fn stream<'a>(
+            &'a self,
+            _request: CompletionRequest,
+        ) -> BoxFuture<'a, Result<CompletionStream, BridgeError>> {
+            Box::pin(async {
+                Err(BridgeError::InvalidRequest {
+                    message: "streaming is not used in tests".to_owned(),
+                })
+            })
+        }
+    }
+
+    fn test_setup(io: &tokio::runtime::Runtime, save_path: &Path) -> WorldSetup {
+        let bridge: Arc<dyn LlmBridge> = Arc::new(TextBridge);
+        io.block_on(build_world_with(
+            &Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."),
+            save_path,
+            &[],
+            ConfiguredProviders {
+                narrator: Arc::clone(&bridge),
+                npc: bridge,
+                runtime: Default::default(),
+                rules: Default::default(),
+            },
+        ))
+        .expect("test world setup")
+    }
 
     #[test]
     fn submit_queues_without_waiting_for_a_worker_and_reports_busy() {
@@ -229,9 +294,7 @@ mod tests {
             .enable_all()
             .build()
             .expect("test runtime");
-        let setup = io
-            .block_on(build_demo_with(&temporary.path().join("save"), &[], None))
-            .expect("demo setup");
+        let setup = test_setup(&io, &temporary.path().join("save"));
         let bridge_error = BridgeError::ProviderRejected {
             code: Some("must-not-escape".to_owned()),
             message: "secret body must-not-escape".to_owned(),
@@ -266,9 +329,7 @@ mod tests {
             .enable_all()
             .build()
             .expect("test runtime");
-        let setup = io
-            .block_on(build_demo_with(&temporary.path().join("save"), &[], None))
-            .expect("demo setup");
+        let setup = test_setup(&io, &temporary.path().join("save"));
         let initial_revision = setup.initial_snapshot.revision;
         let mut adapter = RuntimeAdapter::spawn(setup.runtime).expect("runtime worker");
         let held_cancellation = adapter.cancellation.clone();
@@ -323,6 +384,7 @@ mod tests {
         phase: RuntimePhase,
     ) -> Box<loreloom_core::UiSnapshot> {
         let deadline = Instant::now() + Duration::from_secs(10);
+        let mut last_snapshot = None;
         loop {
             match adapter.try_recv().expect("runtime event") {
                 Some(loreloom_tui::RuntimeUiEvent::Snapshot(snapshot))
@@ -330,10 +392,15 @@ mod tests {
                 {
                     return snapshot;
                 }
+                Some(loreloom_tui::RuntimeUiEvent::Snapshot(snapshot)) => {
+                    last_snapshot = Some(snapshot);
+                }
                 Some(_) | None if Instant::now() < deadline => {
                     std::thread::yield_now();
                 }
-                Some(_) | None => panic!("timed out waiting for {phase:?} snapshot"),
+                Some(_) | None => panic!(
+                    "timed out waiting for {phase:?} snapshot; last snapshot: {last_snapshot:?}"
+                ),
             }
         }
     }

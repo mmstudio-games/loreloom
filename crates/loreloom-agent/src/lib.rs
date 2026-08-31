@@ -14,9 +14,9 @@ pub use failure::{
 };
 pub use protocol::{
     AgentDefinition, AgentError, AssignmentText, NarrationText, NarrativeImportance,
-    NarratorNpcDecision, NarratorPlan, NpcAgent, NpcAssignment, NpcContext, NpcControllerKind,
-    NpcGenerationRequest, NpcLifetime, NpcNarrativeAction, NpcTarget, NpcTurnRequest,
-    NpcTurnResult, NpcTurnStatus,
+    NarratorDefinition, NarratorNpcDecision, NarratorPlan, NpcAgent, NpcAssignment, NpcContext,
+    NpcControllerKind, NpcGenerationRequest, NpcLifetime, NpcNarrativeAction, NpcTarget,
+    NpcTurnRequest, NpcTurnResult, NpcTurnStatus, ResponseLanguagePolicy,
 };
 pub use runner::{
     AgentRunner, AgentToolContext, ToolCallOutcome, TurnFailureStage, TurnInvocation, TurnOutcome,

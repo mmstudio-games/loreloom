@@ -11,7 +11,7 @@ mod revision;
 mod text;
 mod view;
 
-pub use codec::{DomainError, DomainRecord, decode_domain_records, migrate_domain_records};
+pub use codec::{DomainError, DomainRecord, decode_domain_records};
 pub use domain::{
     ActionState, AgentBinding, AttributeAdjustment, AttributeOperation, AutonomyMode,
     BaseAttributes, CharacterController, CharacterLifetime, CharacterOrigin, CharacterProfile,
@@ -33,7 +33,7 @@ pub use identity::{
 pub use numeric::{Fixed, FixedError, WorldTime};
 pub use persistence::{
     LockedDependency, LockedMod, ModLock, ModSourceKind, PersistenceError, SAVE_FORMAT_V1,
-    SaveManifest,
+    SaveManifest, WorldLock,
 };
 pub use protocol::{
     ExecutionChangeSet, SceneTransitionTarget, SkillTargetRef, WorldCommand, WorldCommandKind,

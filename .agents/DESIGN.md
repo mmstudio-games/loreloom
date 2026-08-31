@@ -74,6 +74,7 @@ Loreloom Runtime ───────────────► Persistence
 | 文档 | 类型与状态 | 权威范围 |
 |---|---|---|
 | [RFC 0001：Loreloom 架构](rfcs/0001-loreloom-architecture.md) | Accepted RFC | 产品边界、ECS 权威状态、Agent/Tool 流程、持久化方向、TUI 和 crate 拆分 |
+| [RFC 0002：根世界与 Mod](rfcs/0002-root-world-and-mods.md) | Accepted RFC | 唯一根世界、Mod 扩展、世界 Prompt 与 WorldLock |
 | [Runtime Spec](specs/runtime.md) | Active Spec | 第一阶段工程约束与范围化实施门禁 |
 | [TODO 索引](TODO.md) | Active | 路由到从 Active Spec 派生的实施清单 |
 
@@ -107,7 +108,7 @@ Loreloom Runtime ───────────────► Persistence
     Agent Binding；
 12. 共享 `AgentRunner` 拥有 Bridge 与 Tool 执行能力，Agent 对象本身不持有 Provider Client、
     可变 World 或可持久化的运行服务；
-13. 预设 NPC/Scene 从版本化 Mod Package 中的 Content Pack 导入，运行时 NPC 由 Narrator 提出
+13. 预设 NPC/Scene 从根世界或已启用 Mod 的版本化 Content Pack 导入，运行时 NPC 由 Narrator 提出
     受限 Generation Request；两条路径都必须转换为同一 `CharacterSpawnSpec` 并经
     `NpcFactory`/WorldCommand 创建，不能直接 Patch ECS；
 14. 角色属性采用“Attribute Definition + BaseAttributes + 来源明确的 Modifier + 派生
@@ -118,8 +119,8 @@ Loreloom Runtime ───────────────► Persistence
     描述属于 CharacterProfile，不与机械属性混用；
 17. Narrator 可以在 NPC 创建时提供 Attribute/Condition Hint，但 NpcFactory 必须校验预算、
     上限和 Definition；NPC 创建后只能由 Tool/WorldCommand/System 改变权威属性或状态；
-18. 内置内容与外部 Mod 使用同一版本化 Mod Package、Definition Registry、SpawnSpec、Factory
-    和持久化路径，不为外部内容建立旁路；
+18. 主游戏是根目录 `world.toml` 描述的唯一 World，不是内置 Mod；根世界与已启用 Mod 使用同一
+    Definition Registry、SpawnSpec、Factory 和持久化提交路径，不为任一来源建立旁路；
 19. 第一阶段 Mod 分为纯数据 Content Mod 与声明式 Rule Mod；任意代码执行属于后续 Extension
     Mod，不直接加载 Rust 原生动态库；
 20. Event Definition 的触发、可见/可选条件、选项和效果必须结构化；选择 Event Option 时携带
@@ -128,8 +129,8 @@ Loreloom Runtime ───────────────► Persistence
     或动态 ECS Component 名称；
 22. 特殊玩法优先表达为 `Trigger -> Predicate -> Effect -> WorldCommand`，数据 Mod 只能调用引擎
     注册的白名单效果和通用 Gameplay Tool，不能自行注册任意 Tool 或扩大 Capability；
-23. 存档固定 Mod ID、版本、内容哈希和依赖闭包；缺失或不兼容内容必须迁移或拒绝加载，不能
-    依赖模糊加载顺序静默覆盖 Definition；
+23. 存档用 WorldLock 固定根世界身份、版本与内容哈希，并用 ModLock 单独固定已启用 Mod 的版本、
+    哈希和依赖闭包；缺失或不兼容内容必须迁移或拒绝加载，不能依赖模糊加载顺序静默覆盖 Definition；
 24. 第一阶段持久化后端固定为 SurrealDB + SurrealKV，SQLite 只作为测试对照；SurrealDB driver
     固定到公开 Git revision，已通过 Store Spike 验证显式事务、原生 JSON、migration tracking、
     Revision CAS、崩溃恢复和 10,000 Record 规模；确定性关闭、物理备份/恢复与存档切换受已确认的
@@ -159,8 +160,8 @@ Loreloom Runtime ───────────────► Persistence
 32. 每个 crate 在自己的 Manifest 中显式声明版本，禁止使用 `version.workspace`；项目不声明
     `rust-version`，使用 Semifold 的 Rust resolver 和 `.changes/` 变更集管理各 crate 版本；
     Semifold base branch 为 `main`，release branch 为非 `main` 的 `release`；
-33. 仓库内置模组内容位于 `mods/`，共享测试数据位于 `tests/data/`；具体 Mod Package 与测试数据
-    Schema 仍由对应协议冻结；
+33. 仓库根目录的 `world.toml`、`content/`、`rules/` 与 `prompts/` 属于唯一主世界；`mods/` 只放
+    主世界扩展，共享测试数据位于 `tests/data/`；
 34. 第一阶段 WorldCommand 先在唯一世界槽中把 ECS 从 committed Revision N 修改为隔离的
     candidate N+1，再用 expected Revision N 显式提交 Store durable unit；只有 commit 成功才发布
     ToolResult/UiSnapshot，失败或不确定时丢弃 candidate 并从 Store 重建；
@@ -173,18 +174,19 @@ Loreloom Runtime ───────────────► Persistence
     只作为已接受输入和幂等摘要保存，WorldEvent 只作为已发生事实、叙事 provenance 与审计记录；
     Load/Replay 不重新执行 Command、Rule、Agent 或 Provider。
 38. 领域 record 使用拒绝未知控制字段的 versioned JSON envelope；当前 payload codec 拒绝未知
-    字段和浮点数，旧版本只能通过逐版本、纯确定性的显式 migration 升级，新版本、未知 record
-    type、迁移缺口或数据库 `NONE` 必须在物化 World 前失败。
+    字段和浮点数。首个公开版本前只有当前 v1，旧开发数据直接拒绝；发布后的旧版本只能通过逐版本、
+    纯确定性的显式 migration 升级。新版本、未知 record type、迁移缺口或数据库 `NONE` 必须在物化
+    World 前失败。
 39. 第一阶段所有机械数值使用全局 scale 为 `1_000_000` 的 signed i64 Fixed；中间计算使用 i128，
     乘除采用 ties-to-even，任何最终越界都拒绝完整 candidate。WorldTime 是从 0 开始、只由显式
     Command 推进的逻辑秒 tick。
 40. 持久领域状态使用 typed aggregate records：World、Place/Scene、Character、Item、
     Condition、SkillGrant、Relationship、KnownFact、Goal、EventInstance、ParameterSet、RuleState 与
-    Transcript。派生属性、背包列表、可用技能和 UI 文本不保存；Generated provenance 扩展使用连续
-    payload migration 升到 v2，不能原地改写 v1。
+    Transcript。派生属性、背包列表、可用技能和 UI 文本不保存；Generated provenance 的 tagged
+    source 直接属于初始 payload v1，不为更早的开发期表示保留兼容分支。
 41. Content 与运行时生成共享 Core 拥有的 `CharacterSpawnSpec`；Content 拥有 Definition/NpcDraft
     Schema 与纯编译器，World 拥有结合当前状态校验并执行的 NpcFactory。Content document v1 拒绝
-    未知字段，升级按 content schema version 显式迁移。
+    未知字段；首个公开版本前直接更新 v1，发布后才按 content schema version 显式迁移。
 42. Beat lifetime 只允许 MentionOnly，不生成 Entity；Scene 与 Persistent 使用同一完整 Character
     record，Lightweight 只是没有 AgentBinding 的 NarratorProxy/Rules controller。Scene、其状态与
     Scene-owned entity 都是存档中的持久事实；离开 Scene 只停用，重新进入时恢复，不因离开或故事
@@ -223,6 +225,13 @@ Loreloom Runtime ───────────────► Persistence
     排除当前 Scene 并避免同一 Definition 的重复目标。`transition_scene` 只接受查询返回的精确 target，
     拒绝结果提供可操作的恢复方向；Narrator 不得在提交成功前叙述已经抵达，也不得原样重试已拒绝
     的请求。查询无匹配目标时表示当前内容不可达，不隐式生成新 Scene。
+52. 根世界拥有 Narrator Prompt 与响应语言策略；引擎只在其前保留不可覆盖的 Tool/ECS/安全协议。
+    初始 Save Format v1 直接保存 WorldLock 与只含已启用扩展的 ModLock，不为开发期存档增加兼容
+    分支。Rainbound Inn 必须从
+    Rust 硬编码迁移到根目录内容文件；生产二进制不使用硬编码 Demo Bridge 生成剧情。
+53. 首个公开版本发布前，Save Format、领域 payload 和内容 Schema 的破坏性修改直接压平进各自的
+    初始 v1；开发期产物直接拒绝并重建，不分配 v2、不注册兼容迁移，也不保留 legacy load 分支。
+    连续 migration 基础设施只为首个公开版本之后的已发布数据契约保留。
 
 项目方已于 2026-08-29 明确确认第 18–23 项的 Mod 子系统方向。该确认把 Content Mod、Rule Mod、
 统一导入路径、类型化参数、结构化 Event Option、通用 Gameplay Tool、ModLock 和 Extension Mod

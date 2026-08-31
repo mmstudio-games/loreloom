@@ -3,6 +3,7 @@ use std::{ffi::OsString, path::PathBuf};
 use crate::error::AppError;
 
 pub struct Cli {
+    pub world_path: PathBuf,
     pub save_path: PathBuf,
     pub mod_paths: Vec<PathBuf>,
     pub config_path: Option<PathBuf>,
@@ -14,18 +15,27 @@ impl Cli {
     pub fn parse(arguments: impl IntoIterator<Item = OsString>) -> Result<Self, AppError> {
         let mut arguments = arguments.into_iter();
         let _program = arguments.next();
-        let mut save_path = PathBuf::from(".loreloom/demo-save");
+        let mut world_path = PathBuf::from(".");
+        let mut save_path = None;
         let mut mod_paths = Vec::new();
         let mut config_path = None;
         let mut headless_input = None;
         let mut help = false;
         while let Some(argument) = arguments.next() {
             match argument.to_str() {
-                Some("--save") => {
-                    save_path = arguments
+                Some("--world") => {
+                    world_path = arguments
                         .next()
                         .map(PathBuf::from)
-                        .ok_or(AppError::Arguments("--save requires a path"))?;
+                        .ok_or(AppError::Arguments("--world requires a game root"))?;
+                }
+                Some("--save") => {
+                    save_path = Some(
+                        arguments
+                            .next()
+                            .map(PathBuf::from)
+                            .ok_or(AppError::Arguments("--save requires a path"))?,
+                    );
                 }
                 Some("--headless") => {
                     let input = arguments
@@ -56,7 +66,9 @@ impl Cli {
                 _ => return Err(AppError::Arguments("unknown argument")),
             }
         }
+        let save_path = save_path.unwrap_or_else(|| world_path.join(".loreloom/save"));
         Ok(Self {
+            world_path,
             save_path,
             mod_paths,
             config_path,
@@ -66,7 +78,7 @@ impl Cli {
     }
 }
 
-pub const HELP: &str = "Loreloom agentic world\n\nUsage: loreloom [--save PATH] [--mod PATH]... [--config PATH] [--headless INPUT]\n\n  --save PATH       Open or create the SurrealKV save\n  --mod PATH        Add an explicit directory Mod package root (repeatable)\n  --config PATH     Use strict TOML Provider, budget, Rule, and TUI configuration\n  --headless INPUT  Run one complete player turn without a terminal UI\n  -h, --help        Show this help\n";
+pub const HELP: &str = "Loreloom agentic world\n\nUsage: loreloom [--world PATH] [--save PATH] [--mod PATH]... --config PATH [--headless INPUT]\n\n  --world PATH      Use this game root (default: current directory)\n  --save PATH       Open or create the SurrealKV save\n  --mod PATH        Enable an explicit directory Mod package root (repeatable)\n  --config PATH     Use strict TOML Provider, budget, Rule, and TUI configuration\n  --headless INPUT  Run one complete player turn without a terminal UI\n  -h, --help        Show this help\n";
 
 #[cfg(test)]
 mod tests {
@@ -76,6 +88,8 @@ mod tests {
     fn parses_save_headless_and_help_without_external_state() {
         let parsed = Cli::parse([
             OsString::from("loreloom"),
+            OsString::from("--world"),
+            OsString::from("game-root"),
             OsString::from("--save"),
             OsString::from("save-dir"),
             OsString::from("--mod"),
@@ -88,6 +102,7 @@ mod tests {
             OsString::from("listen"),
         ])
         .expect("valid arguments");
+        assert_eq!(parsed.world_path, PathBuf::from("game-root"));
         assert_eq!(parsed.save_path, PathBuf::from("save-dir"));
         assert_eq!(
             parsed.mod_paths,
@@ -100,7 +115,18 @@ mod tests {
         let help =
             Cli::parse([OsString::from("loreloom"), OsString::from("-h")]).expect("help arguments");
         assert!(help.help);
+        let defaults = Cli::parse([
+            OsString::from("loreloom"),
+            OsString::from("--world"),
+            OsString::from("another-world"),
+        ])
+        .expect("default save path");
+        assert_eq!(
+            defaults.save_path,
+            PathBuf::from("another-world/.loreloom/save")
+        );
         assert!(Cli::parse([OsString::from("loreloom"), OsString::from("--unknown")]).is_err());
+        assert!(Cli::parse([OsString::from("loreloom"), OsString::from("--world")]).is_err());
         assert!(Cli::parse([OsString::from("loreloom"), OsString::from("--mod")]).is_err());
         assert!(Cli::parse([OsString::from("loreloom"), OsString::from("--config")]).is_err());
     }

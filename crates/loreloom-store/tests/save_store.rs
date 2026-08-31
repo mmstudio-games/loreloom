@@ -1,8 +1,8 @@
 use loreloom_core::{
-    ActionId, ActorId, DomainRecord, EventId, ExecutionChangeSet, LongText, ModLock, Revision,
-    SAVE_FORMAT_V1, SaveId, SaveManifest, SessionId, ShortText, TranscriptItemId,
+    ActionId, ActorId, ContentHash, DomainRecord, EventId, ExecutionChangeSet, LongText, ModLock,
+    Revision, SAVE_FORMAT_V1, SaveId, SaveManifest, SessionId, ShortText, TranscriptItemId,
     TranscriptItemRecord, TranscriptSpeaker, TranscriptState, WorldCommand, WorldCommandKind,
-    WorldEvent, WorldEventKind, WorldId, WorldStateRecord, WorldTime,
+    WorldEvent, WorldEventKind, WorldId, WorldLock, WorldStateRecord, WorldTime,
 };
 use loreloom_store::{ActionResolution, CommitRequest, CommitResult, CommittedAction, SaveStore};
 use tempfile::TempDir;
@@ -22,6 +22,13 @@ fn fixture() -> (SaveManifest, DomainRecord, ActorId) {
             format_version: SAVE_FORMAT_V1,
             save_id: parse::<SaveId>("sav_01890f6a-2b3e-7d4e-8f90-123456789abc"),
             world_id,
+            world_lock: WorldLock {
+                world_id: parse("games.loreloom.test"),
+                version: parse("1.0.0"),
+                content_hash: ContentHash::parse("b".repeat(64)).expect("world content hash"),
+                manifest_schema: 1,
+                content_schema: 1,
+            },
             mod_lock: ModLock::default(),
         },
         DomainRecord::WorldState(WorldStateRecord {

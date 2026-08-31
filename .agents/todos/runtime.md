@@ -37,10 +37,10 @@ OPEN 项、后续 RFC 或 P0 Spike；空 crate 不代表相关协议已经实现
 ## 后续协议与实现
 
 - [x] 冻结 Stable ID 与 Command/Event/RecordOp 重建权威关系；
-- [x] 冻结领域 record payload v1 Schema；record envelope、未知字段、迁移、重建、提交、后端和物理
-  恢复顺序均已冻结；
-- [x] 为 Generated provenance 实现领域 payload v1 -> v2 连续纯 migration，并保持其它 record
-  canonical 等价；
+- [x] 冻结领域 record payload 初始 v1 Schema；record envelope、未知字段、重建、提交、后端和物理
+  恢复顺序均已冻结；首个公开版本前直接压平破坏性修改并拒绝旧开发数据；
+- [x] 删除开发期领域 payload v1 -> v2 与 Save Format v2 兼容路径；当前 Save、领域 payload 与内容
+  Schema 均直接使用初始 v1，连续 migration 基础设施只为首个公开版本后的契约保留；
 - [x] 冻结角色、物品、技能、属性、资源、Condition、正交状态、KnownFact/Goal/Transcript Schema；
 - [x] 冻结 Character/Scene/Item/Skill 等 Content Definition v1 字段与迁移版本；
 - [x] 冻结 Mod Manifest/ModLock、Parameter、Event、Gameplay Action 与声明式 Rule 协议边界；
@@ -59,16 +59,16 @@ OPEN 项、后续 RFC 或 P0 Spike；空 crate 不代表相关协议已经实现
 - [ ] **RELEASE-GATED**：在实际分发前确认 Loreloom 采用与 `toasty-driver-surreal`
   `AGPL-3.0-only` 兼容的分发许可，或为该依赖取得兼容的重新许可；该选择不改变当前 Runtime、
   Store Schema 或存档格式；
-- [x] 实现 Runtime Client/Event loop、确定性 TUI 产品层与可运行的内置 demo 装配，完成最小可玩
-  Runtime、World、Agent、Store、TUI 纵向切片；
+- [x] 实现 Runtime Client/Event loop、确定性 TUI 产品层与目录根世界装配，完成最小可玩 Runtime、
+  World、Agent、Store、TUI 纵向切片；
 - [x] 实现正式目录 Mod package discovery、依赖/Patch/hash lock、统一内置/外部 Registry 加载与
   精确 ModLock 重开门禁；
-- [x] 把内置/外部初始 Scene 统一编译为 spawn plan，并通过共享 NpcFactory/初始化提交物化，不再由
-  demo 手工构造初始 Character/Item records；
+- [x] 把根世界/外部 Mod 的初始 Scene 统一编译为 spawn plan，并通过共享 NpcFactory/初始化提交物化，
+  不在应用代码中手工构造初始 Character/Item records；
 - [x] 实现 Event Option、Gameplay Action 与声明式 Rule 的产品 executor、可信 capability 门禁、
   Save/Session Parameter 语义和通用 Tool；
-- [x] 实现外部 Provider、严格非敏感 TOML、Environment/File Secret source、endpoint allowlist、
-  Runtime/Rule/TUI budget 与无 Secret demo 回退的二进制装配；
+- [x] 实现外部 Provider、严格非敏感 TOML、Environment/File Secret source、endpoint allowlist 与
+  Runtime/Rule/TUI budget；生产二进制要求 Provider 配置，Mock Bridge 只存在于测试；
 - [x] 实现 Condition periodic/expiry scheduler、同 tick periodic-first、target Effect 与原子 Rule
   cascade；
 - [x] 实现 confirmed KnownFact 驱动的 Condition 诊断投影，未诊断视图不得包含真实名称；
@@ -81,6 +81,8 @@ OPEN 项、后续 RFC 或 P0 Spike；空 crate 不代表相关协议已经实现
   `promote_npc` 只改变角色的领域归属；
 - [x] 为 Narrator 提供当前 Revision 的 canonical Scene 切换目标查询，拒绝猜测或过期目标，并让
   重复的同目标请求幂等收敛；
+- [x] 实现根级 `world.toml`、外部 Content/Prompt、WorldLock 与只含已启用扩展的 ModLock；
+- [x] 把 Rainbound Inn 从 `demo.rs` 迁移到根目录世界文件，并移除生产 Demo Bridge/英文剧情硬编码；
 - [x] 把 Spec 8.2 的 Character/Scene/Transcript 数量与字节上限接入 Narrator/NpcAgent 产品上下文，
   并在裁剪时投影 `truncated` metadata；
 - [x] 用 Runtime phase/status event 驱动 TUI thinking 展示，并移除 Provider 文本 streaming 产品协议；
@@ -91,5 +93,5 @@ OPEN 项、后续 RFC 或 P0 Spike；空 crate 不代表相关协议已经实现
 - [x] 保留 Armillae 模型失败的脱敏 category、阶段、安全 Provider 元数据与 `err_` correlation ID，
   贯通启动、AgentRunner、NpcTurnResult、Runtime、TUI notice 和 headless 错误；
 - [x] 完成 Active Spec 第 17 节实施审计：除显式 `UPSTREAM-GATED` 的第 47 条和上述分发许可选择外，
-  其余验收均有自动化或可复现证据；当前 locked 门禁为 148 tests passed，release headless 产物可在
-  同一 SurrealKV 存档从 Revision 3 重开并继续到 Revision 6，macOS arm64 release 基线为 81.2 MiB。
+  其余验收均有自动化或可复现证据；当前门禁为 146 tests passed，目录根世界的创建、锁分离、
+  Prompt 注入与存档内容锁重开拒绝均有确定性测试。macOS arm64 release 基线仍为 81.2 MiB。

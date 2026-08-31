@@ -3,9 +3,9 @@
 > 状态：Active Spec
 > 规范基线：2026-08-30
 > 适用范围：Loreloom Core、Content、World、Agent、Store、Runtime、TUI 与应用装配
-> 已确认基线：RFC 0001 核心架构、Content/Rule Mod 边界与 workspace 初始化约定
+> 已确认基线：RFC 0001 核心架构、RFC 0002 根世界/Mod 边界与 workspace 初始化约定
 > 设计入口：[Loreloom 设计索引](../DESIGN.md)
-> 决策来源：[RFC 0001：Loreloom 架构](../rfcs/0001-loreloom-architecture.md)
+> 决策来源：[RFC 0001：Loreloom 架构](../rfcs/0001-loreloom-architecture.md)、[RFC 0002：根世界与 Mod](../rfcs/0002-root-world-and-mods.md)
 > 基础设施依赖：[Armillae](https://github.com/mmstudio-games/armillae)
 
 本文把已接受的 RFC 0001 展开成第一阶段工程契约。本文中的“必须”“不得”和“只”约束所有
@@ -26,8 +26,8 @@ workspace、空 crate、版本工具和 P0 Spike 初始化。实现不得选择�
 - 玩家可以输入自然语言，查看叙事/对话和结构化状态变化；
 - Agent 只能通过已注册 Tool 查询或请求修改世界；
 - 一次被接受的行动形成可恢复的版本化世界结果；
-- 内置内容与至少一个外部 Content/Rule Mod 通过同一 Package 管线加载并可保存、重开；
-- 没有 Provider 时可以使用 Mock Bridge 运行确定性测试和演示；
+- 根目录唯一主世界与至少一个外部 Content/Rule Mod 通过同一 Registry/Factory 管线加载并可保存、重开；
+- Mock Bridge 只用于无需网络的确定性测试，不作为生产叙事来源；
 - TUI 在正常宽度下使用左状态、右内容、右下输入布局。
 
 ### 1.2 明确非目标
@@ -55,7 +55,8 @@ workspace、空 crate、版本工具和 P0 Spike 初始化。实现不得选择�
 8. **下层单次边界**：Armillae Bridge 一次调用，Tool Executor 一次执行，由 Runtime 组合循环。
 9. **UI 隔离**：TUI 只消费 UiSnapshot，不持有或查询 `World`。
 10. **无 MSRV**：Loreloom 不声明 `rust-version`，CI 跟随最新 stable。
-11. **统一 Mod 管线**：内置与外部内容使用相同 Package、Registry、Factory、提交和存档路径。
+11. **根世界与 Mod 分离**：主世界不是 Mod；两者使用相同 Registry、Factory 和提交路径，但分别
+    锁定为 WorldLock 与 ModLock。
 12. **类型化扩展状态**：模组参数、事件和规则状态必须有命名空间、Schema、版本和 Stable ID。
 13. **受限规则**：数据 Mod 只能执行有预算的声明式规则和白名单 Effect，不能注入代码或 Tool。
 14. **Mod 可重建**：存档固定 Mod 依赖闭包与内容哈希，缺失或不兼容时迁移或明确失败。
@@ -82,10 +83,10 @@ workspace、空 crate、版本工具和 P0 Spike 初始化。实现不得选择�
 
 拥有：
 
-- Mod Package manifest、Content Pack、Rule Bundle、包内资源索引和拥有所有权 Schema；
+- 根世界 Manifest、Mod Package manifest、Content Pack、Rule Bundle、Prompt/资源索引和拥有所有权 Schema；
 - Character/Scene/Event、Item/Skill/Attribute/Resource/Condition/Parameter 与 Gameplay Action
   Definition；
-- Mod 依赖图、版本兼容、内容哈希、Definition ID 唯一性、显式 Patch 和跨引用验证；
+- WorldLock、Mod 依赖图、版本兼容、内容哈希、Definition ID 唯一性、显式 Patch 和跨引用验证；
 - 静态 Definition Registry；
 - Character/Scene Definition 到公共领域 `CharacterSpawnSpec`/Scene spawn plan 的纯编译；
 - Event/Rule Definition 到受限 Trigger/Predicate/Effect plan 的纯编译与静态预算检查；
@@ -159,7 +160,7 @@ backup 协议遵循第 11.4 节。领域 record Schema、未知字段和领域�
 - Agent Step / Tool Loop 与 Narrator 编排状态机；
 - Revision 冲突、提交、取消与故障策略；
 - Content/Generation 请求的 Capability、数量和模型预算策略；
-- Mod 发现、依赖/Patch 顺序、内容哈希、Capability、导入事务和 save lock；
+- 根世界加载、Mod 发现、依赖/Patch 顺序、内容哈希、Capability、导入事务和 save lock；
 - Content、Store、World 与 Agent 的组合；
 - Transcript 提交和 UiSnapshot 发布。
 
@@ -170,14 +171,12 @@ Runtime 可以依赖 Core、Content、World、Agent 和 Store，是应用策略�
 TUI 拥有终端初始化/恢复、事件映射、布局、输入编辑、滚动与渲染。它只依赖 Core 暴露的
 View Model 和 Runtime Client，不依赖 Content/World/Agent/Store 实现。
 
-`loreloom` 二进制拥有配置读取、Secret 解析、Mod Package 来源、Provider Adapter、Store
+`loreloom` 二进制拥有根世界路径、配置读取、Secret 解析、Mod Package 来源、Provider Adapter、Store
 Backend、Runtime 与 TUI 装配，以及进程退出顺序。
 
-在外部 Provider/Mod 配置产品化前，二进制提供无 Secret 的本地 demo smoke path：默认打开 TUI，
-`--save PATH` 选择 SurrealKV 存档，`--headless INPUT` 对同一 Runtime 执行一个完整 Turn 供 CI/终端
-兼容诊断；可重复的 `--mod PATH` 把每个显式目录包根加入第 10.4 节同一编译闭包。该开发 demo 的
-内置内容使用 virtual directory source，不替代外部内容格式；已有 Save 必须用相同 candidate ModLock
-重开。
+二进制默认从当前目录 `world.toml` 加载唯一主世界；`--world PATH` 只覆盖游戏根目录路径。
+`--save PATH` 选择 SurrealKV 存档，`--headless INPUT` 执行一个完整 Turn；可重复的 `--mod PATH`
+显式启用目录 Mod。生产运行必须配置 Provider；无 Secret Mock Bridge 只用于确定性测试。
 
 ## 4. Rust、Cargo 与依赖策略
 
@@ -188,8 +187,8 @@ Backend、Runtime 与 TUI 装配，以及进程退出顺序。
 - Semifold 使用 Rust workspace resolver 与根级 `.changes/` 变更集管理成员版本；base branch 为
   `main`，release branch 为非 `main` 的 `release`。Semifold 必须直接更新各成员 Manifest 中的
   版本。
-- 内置 Mod 的仓库目录为 `mods/`，跨 crate 共享测试数据位于 `tests/data/`；运行时外部 Mod 来源
-  仍由配置决定，不要求复制进源码仓库。
+- 根世界文件位于仓库根级 `world.toml`、`content/`、`rules/` 与 `prompts/`；`mods/` 只放扩展，
+  跨 crate 共享测试数据位于 `tests/data/`。
 - Rust edition 固定为当前可用的 `2024`。
 - 工具链 channel 为 `stable`，不固定 `1.x.y` 数字。
 - 所有 Loreloom package 都不得设置 `package.rust-version`。
@@ -286,19 +285,14 @@ Wire 字段使用 `snake_case`，枚举使用显式 `type` tag。Envelope 固定
 `payload` 顶层必须为 JSON object。当前版本的领域 codec 必须拒绝未知 payload 字段；未知 record
 type 或高于运行时支持版本的 record 必须拒绝 Load，不能 opaque-pass-through 后发布 World。
 
-旧 payload 只能通过注册的连续 `vN -> vN+1` migration 链升级。Migration 必须纯、确定性、无
-Provider/墙钟/随机 I/O，逐步保留 stable identity，并在全部 record、ModLock、引用和领域不变量
-通过后才在一个显式事务/checkpoint 中发布升级结果；缺失步骤和 downgrade 均拒绝。原存档在完整
-升级发布前保持可恢复。
+首个公开版本发布前，当前领域 payload Schema 直接固定为 v1。开发期发生破坏性变化时覆盖 v1
+codec，旧开发存档直接拒绝并重建；不得为开发期数据分配 v2、注册 legacy migration 或保留兼容
+Load 分支。
 
-当前领域 payload Schema 为 v2。v1 -> v2 的唯一语义变化是把任意
-`EntityOrigin::Generated.origin.source_event: EventId` 替换为
-`source: { type: "world_event", event_id: EventId }`；因为 v1 只能表达 Event 来源，不得在 migration
-中猜测为 PlayerInput。没有该 Generated origin 的 record 必须执行 payload canonical 等价的 identity
-step，但仍显式升级 envelope `schema_version`。Store 必须在 checksum 验证和 checkpoint + RecordOp
-重建之后、typed decode 之前执行这条连续链；Runtime 只有在精确 ModLock、全部 typed record、跨引用
-和 World 不变量验证通过后，才可在当前 committed Revision 的单个显式事务中发布 canonical v2
-checkpoint。发布失败不得覆盖或删除仍可用于恢复的旧 checkpoint/RecordOp。
+首个公开版本发布后，旧 payload 才能通过注册的连续 `vN -> vN+1` migration 链升级。Migration
+必须纯、确定性、无 Provider/墙钟/随机 I/O，逐步保留 stable identity，并在全部 record、WorldLock、
+ModLock、引用和领域不变量通过后才在一个显式事务/checkpoint 中发布升级结果；缺失步骤和 downgrade
+均拒绝。原存档在完整升级发布前保持可恢复。
 
 后端可以用原生 JSON 保存版本化 payload，但“原生 JSON”只是无损存储表示，不授权任意无 Schema
 属性袋。嵌套对象和数组由具体 codec 明确约束；领域数值只使用有范围的 integer 或第 6.4 节 Fixed，
@@ -1279,9 +1273,9 @@ request ID 必须唯一。
 维护实际状态 provenance，并在 Prompt 中要求 Narrator 只把已提交变化叙述为事实；任何 narration
 或 NPC claim 本身仍不成为 ECS 或存档世界事实。
 
-### 10.2 Mod/Content Package、SpawnSpec 与运行时生成
+### 10.2 根世界/Mod Content、SpawnSpec 与运行时生成
 
-预设 NPC/Scene 必须来自版本化 Mod Package 中的 Content Pack。物理文件布局、编码和 Manifest
+预设 NPC/Scene 必须来自版本化根世界或已启用 Mod 的 Content Pack。物理文件布局、编码和 Manifest
 语法由 Mod/Rule Spike 冻结；本节已经冻结以下逻辑内容：
 
 - Mod/Pack ID、版本、Loreloom Schema/Engine 兼容范围、依赖和内容哈希；
@@ -1575,7 +1569,25 @@ Schema 扩展，不能靠重复物化产生无法区分的副本。World 不变�
 
 ### 10.4 Mod 加载、冲突与扩展边界
 
-Mod Package 是分发和完整性边界，逻辑上包含：
+主游戏根目录是唯一可直接游玩的 World 边界：
+
+```text
+world.toml
+content/*.json
+rules/*.json
+prompts/*.md
+locales/*.json
+assets/**
+mods/<mod-id>/...
+```
+
+`world.toml` Manifest Schema v1 声明 `world_id`、SemVer、Engine requirement、Content Schema、
+初始 Scene、Inventory Root、Spawn System、显式 content/rule/resource 文件列表，以及 Narrator Prompt 路径和
+`follow_player`/固定语言策略。只读取 Manifest 显式声明的世界文件；`mods/`、`.loreloom/`、Cargo
+源码和其它根目录文件不进入世界 payload。Manifest 原始 bytes、声明 payload 和 Prompt 全部进入
+WorldLock 内容哈希。
+
+Mod Package 是主世界扩展的分发和完整性边界，逻辑上包含：
 
 ```text
 Manifest
@@ -1585,8 +1597,8 @@ Manifest
   └── bounded package resources
 ```
 
-第一阶段只支持显式配置的**目录包**，不支持 archive 自动解压。内置 Mod 通过相同的 virtual
-directory pipeline 加载。目录布局固定为：
+第一阶段 Mod 只支持显式启用的**目录包**，不支持 archive 自动解压。`mods/` 只表示已安装位置，
+目录存在不等于启用；可重复 `--mod PATH` 形成候选闭包。目录布局固定为：
 
 ```text
 mod.toml
@@ -1595,6 +1607,7 @@ rules/*.json
 patches/*.json       # only files declared by Manifest
 locales/*.json       # optional display-only data
 assets/**            # optional bounded opaque resources
+prompts/*.md         # optional agent prompt resources
 ```
 
 `mod.toml` 是 UTF-8 TOML，Manifest Schema v1 至少声明 reverse-DNS lowercase Mod ID、SemVer
@@ -1626,30 +1639,32 @@ segment、symlink 和重复规范路径。Host 默认上限为 256 个 payload �
 
 Runtime/Content 加载顺序必须是：
 
-1. 从明确配置的来源发现目录包，规范化包内路径并执行文件数量、单文件/总大小和深度上限；
-2. 在不修改 World 前解析全部 Manifest，验证兼容范围、内容哈希和依赖闭包；
-3. required dependency 缺失即失败；optional dependency 缺失可忽略，但若已安装仍必须满足 SemVer；
+1. 从明确的游戏根目录读取并验证 `world.toml` 及其显式 payload；
+2. 从显式启用来源读取 Mod，规范化路径并执行文件数量、单文件/总大小和深度上限；
+3. 在不修改 Working World 前解析全部 Manifest，验证兼容范围、内容哈希和依赖闭包；
+4. required dependency 缺失即失败；optional dependency 缺失可忽略，但若已安装仍必须满足 SemVer；
    生成确定性的依赖拓扑顺序，零入度 tie 按 Mod ID byte-order，循环和不兼容版本直接失败；
-4. 验证所有 Definition/Rule/Patch，重复 Definition 默认失败；
-5. 显式 Patch 只有 patching Mod 直接依赖 target Mod，且 target Mod、Definition 和版本约束匹配时
+5. 验证所有 Definition/Rule/Patch，重复 Definition 默认失败；
+6. 显式 Patch 只有 patching Mod 显式依赖目标 namespace，且目标 World/Mod、Definition 和版本约束匹配时
    才能按 `dependency topology -> patch ID` 顺序应用；普通 Definition 不能靠加载顺序覆盖；
-6. 纯编译不可变 Definition Registry、Spawn plan 和 Rule plan；
-7. Runtime 在一个初始化提交边界内安装 Registry 并物化初始世界；
-8. 成功后生成保存 Mod ID、版本、内容哈希、依赖与 Patch 的 `ModLock`。
+7. 纯编译一个不可变 Definition Registry、Spawn plan 和 Rule plan；
+8. Runtime 在一个初始化提交边界内安装 Registry 并物化 `world.toml` 指定的初始 Scene；
+9. 成功后分别生成 WorldLock，以及只保存已启用扩展的 ModLock。
 
-ModLock 每项固定保存 Mod ID、resolved SemVer、content hash、Manifest/Content Schema version、
+WorldLock 固定保存根世界 ID、SemVer、content hash 与 Manifest/Content Schema；ModLock 每项固定保存
+Mod ID、resolved SemVer、content hash、Manifest/Content Schema version、
 `builtin | directory` source kind、已解析 dependency ID/version/optional flag 和按序 applied Patch ID；
 不保存机器绝对路径。打开存档必须重新构建 candidate lock 并精确比较；不一致时迁移或拒绝，失败不
 替换已发布 Registry/lock。
 
-包内文本、Agent Profile 和展示资源均视为不可信数据，不能改变系统 Prompt 优先级、Tool
+根世界/Mod 文本、Agent Profile 和展示资源均视为不可信数据，不能改变 Engine Prompt 优先级、Tool
 Capability 或日志/Secret 策略。Content/Rule Mod 没有包外文件、网络、Shell、Provider 或 Secret
 访问能力。数据文件不能注册 Tool Handler、Native System、动态 Component 或脚本解释器。
 
-Content 产品 API 以显式 package root 或内存 virtual directory 为输入；内置内容和测试 Fixture
-使用 virtual directory 只是来源差异，必须经过同一 Manifest、path/size、hash、dependency、Patch、
-Registry 与 ModLock 编译器。编译结果拥有不可变 DefinitionRegistry、规范 ModLock 与有界资源索引。
-打开既有 Save 时 Runtime 必须在物化 World 前比较 candidate ModLock 与 SaveManifest ModLock；不匹配
+Content 产品 API 以根世界路径、显式 Mod root 或测试 virtual directory 为输入；它们必须经过同一
+path/size、hash、Definition、Patch 与 Registry 验证。编译结果拥有不可变 DefinitionRegistry、规范
+WorldLock/ModLock 与有界资源索引。打开既有 Save 时 Runtime 必须在物化 World 前比较 candidate
+WorldLock/ModLock 与 SaveManifest；不匹配
 返回稳定 `content_lock_mismatch`，不能先替换 Registry 或加载部分 World。
 
 第一阶段不支持在活动 World 中热替换 Definition/Rule。启停或升级 Mod 必须关闭当前世界，并在
@@ -1805,12 +1820,23 @@ Loreloom 必须显式打开事务；普通 Toasty batch 不具有本 Spec 所需
 
 ### 11.0 Core 持久化契约
 
-第一阶段 Save Format 固定为 v1。Core 使用拥有所有权、`deny_unknown_fields` 的类型表达以下 wire
+初始 Save Format 固定为 v1，并直接包含 WorldLock。Loreloom 尚未正式发布，Save Format、领域
+payload 与内容 Schema 的破坏性变化都直接压平进各自初始 v1；不为开发期数据分配后续版本或增加
+向下兼容分支，这些存档必须重建。Core 使用拥有所有权、
+`deny_unknown_fields` 的类型表达以下 wire
 shape；Store adapter 可以使用不同的私有数据库 row，但不得把 Toasty、SurrealDB 类型暴露给
 Core、World、Agent 或 Runtime：
 
 ```rust
 pub const SAVE_FORMAT_V1: u32 = 1;
+
+pub struct WorldLock {
+    pub world_id: ModId,
+    pub version: semver::Version,
+    pub content_hash: ContentHash,
+    pub manifest_schema: u32,
+    pub content_schema: u32,
+}
 
 pub enum ModSourceKind {
     Builtin,
@@ -1842,15 +1868,17 @@ pub struct SaveManifest {
     pub format_version: u32,
     pub save_id: SaveId,
     pub world_id: WorldId,
+    pub world_lock: WorldLock,
     pub mod_lock: ModLock,
 }
 ```
 
-`ModLock.mods` 保存已解析 dependency topology 顺序且 Mod ID 唯一；每个 `dependencies` 按 Mod ID
+v1 Manifest 必须包含 WorldLock。`ModLock.mods` 只保存启用的扩展 Mod，不得包含根世界或 Engine
+Core；其 dependency topology 顺序且 Mod ID 唯一。每个 `dependencies` 按 Mod ID
 byte-order 排序且唯一。required dependency 必须存在、版本精确相等并排在依赖者之前；optional
 dependency 可以缺失，但已安装时同样必须精确匹配并排在依赖者之前。Manifest/Content Schema 必须
 非零。`applied_patches` 保存实际应用顺序且 ID 唯一，不能在保存时重新排序。`source_kind` 不携带
-机器路径。Load 比较的是完整 `SaveManifest.mod_lock`，不能只比较 Mod ID/版本。
+机器路径。Load 比较完整 WorldLock 与 ModLock，不能只比较 ID/版本。
 
 Runtime 到 Store 的 durable unit 使用以下后端无关语义；具体 Rust 构造器可以通过
 `ExecutionChangeSet` 生成它，但必须在打开事务前完成全部关联校验：
@@ -2174,7 +2202,7 @@ phase 与本地 spinner frame。Snapshot 更新不得覆盖 editor/scroll 等本
 - 非敏感：Provider kind、model、endpoint policy、Token/Tool/Rule budgets、UI 设置、save path、
   Mod source 与启用列表；
 - Secret：API key/token，只通过 Secret source 解析；
-- 世界内容：版本化 Mod/Content Package、Rule Bundle 与资源，不混入 Provider 凭证；
+- 世界内容：版本化根世界、Mod Package、Rule Bundle、Prompt 与资源，不混入 Provider 凭证；
 - Session：当前 save/actor 等运行期选择，不当作全局配置。
 
 要求：
@@ -2187,10 +2215,11 @@ phase 与本地 spinner frame。Snapshot 更新不得覆盖 editor/scroll 等本
   文本、规则参数或资源内容；
 - 自定义 Provider endpoint 遵守 Armillae 的 URL/host 安全策略。
 
-第一阶段产品二进制以可选 `--config PATH` 读取严格、`deny_unknown_fields` 的 TOML v1；未提供时保留
-无 Secret 的确定性 demo bridge。配置文件必须提供 `schema_version = 1`、`narrator` 与 `npc` 两个
-Armillae `BridgeConfig`，并可收紧/配置单 Turn、整轮编排、Rule 与 TUI budget。`--save` 与可重复的
-`--mod` 仍是非敏感 CLI 配置源；它们不写入 Provider 配置或 Secret source。
+第一阶段产品二进制必须以 `--config PATH` 读取严格、`deny_unknown_fields` 的 TOML v1；未提供时在
+创建/打开 World 和 Save 前明确失败。配置文件必须提供 `schema_version = 1`、`narrator` 与 `npc` 两个
+Armillae `BridgeConfig`，并可收紧/配置单 Turn、整轮编排、Rule 与 TUI budget。`--world`、`--save`
+与可重复的 `--mod` 仍是非敏感 CLI 配置源；它们不写入 Provider 配置或
+Secret source。
 
 Provider credential 只能使用 Armillae `CredentialRef::Environment` 或 `CredentialRef::File`；TOML
 不能出现原始 key/token 字段，第一阶段二进制也不安装通用 `Resolver`。配置解析、错误 Display、
@@ -2374,11 +2403,11 @@ CI 使用最新 stable，不执行 MSRV Job，不允许 manifest 出现 `rust-ve
 28. 回放固定记录不访问 Provider 并获得等价世界结果；
 29. Store 写入故障不会让 Runtime 把不确定状态继续当作已提交；
 30. Provider 失败后世界可继续或进入明确可恢复状态；
-31. Mock Bridge 的完整纵向切片无需网络通过；
+31. 测试专用 Mock Bridge 的完整纵向切片无需网络通过，生产二进制不装配 Mock Bridge；
 32. 宽屏双栏和窄屏降级都能完成查看、输入、取消与退出；
 33. 日志、错误、存档和测试快照不含 Secret；
 34. 最新 stable 的全部质量门禁通过且无 `rust-version`；
-35. 内置内容和外部 Mod 通过同一 Package/Registry/Factory/提交路径加载；
+35. 根世界与外部 Mod 通过同一 Registry/Factory/提交路径加载，并分别进入 WorldLock/ModLock；
 36. Mod 依赖缺失、循环、哈希不匹配、重复 Definition 或无效 Patch 在 World 修改前失败；
 37. 模组 Parameter 值按 Schema、范围、引用和可见性校验，并可等价保存恢复；
 38. Event Option 在 current Revision 重新验证，过期或不满足 Predicate 时不产生 Effect；
@@ -2410,7 +2439,8 @@ CI 使用最新 stable，不执行 MSRV Job，不允许 manifest 出现 `rust-ve
 RFC 0001 已于 2026-08-30 被项目方接受。以下事项继续阻塞对应公共 API、持久化格式或产品行为，
 但不阻塞 workspace、空 crate、Semifold、测试数据目录和 P0 Spike：
 
-- Stable ID 编码、record envelope/migration 与 Command/Event/RecordOp 重建权威关系已冻结；
+- Stable ID 编码、record envelope 与 Command/Event/RecordOp 重建权威关系已冻结；首个公开版本前
+  只有当前 v1 codec，不存在已激活的领域兼容 migration；
 - Store driver 的 AGPL 兼容分发方式在发布前确认；后端、公开依赖 revision 与
   commit/failure 协议已由 P0 Spike 冻结；物理 backup/restore/switch 仍受 SurrealDB shutdown
   上游能力门禁；

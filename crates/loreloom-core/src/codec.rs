@@ -3,31 +3,13 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Serialize, de::DeserializeOwned};
 use thiserror::Error;
 
-use crate::record::MigrationFn;
 use crate::{
     CharacterController, CharacterRecord, ConditionRecord, EventInstanceRecord, Fixed, GoalRecord,
-    ItemRecord, KnownFactRecord, MigrationRegistry, MigrationStep, ParameterSetRecord, PlaceRecord,
-    RecordEnvelope, RecordError, RecordId, RecordKey, RecordProvenance, RecordSet, RecordType,
-    RelationshipRecord, Revision, RuleStateRecord, SceneRecord, SchemaVersion, SkillGrantRecord,
-    TranscriptItemRecord, TranscriptState, WorldStateRecord,
+    ItemRecord, KnownFactRecord, ParameterSetRecord, PlaceRecord, RecordEnvelope, RecordError,
+    RecordId, RecordKey, RecordProvenance, RecordSet, RecordType, RelationshipRecord, Revision,
+    RuleStateRecord, SceneRecord, SchemaVersion, SkillGrantRecord, TranscriptItemRecord,
+    TranscriptState, WorldStateRecord,
 };
-
-const DOMAIN_RECORD_MIGRATIONS: &[(&str, MigrationFn)] = &[
-    ("world_state", identity_v1_to_v2),
-    ("scene", identity_v1_to_v2),
-    ("place", identity_v1_to_v2),
-    ("character", generated_origin_v1_to_v2),
-    ("item", generated_origin_v1_to_v2),
-    ("condition", generated_origin_v1_to_v2),
-    ("skill_grant", generated_origin_v1_to_v2),
-    ("relationship", identity_v1_to_v2),
-    ("known_fact", identity_v1_to_v2),
-    ("goal", identity_v1_to_v2),
-    ("event_instance", identity_v1_to_v2),
-    ("parameter_set", identity_v1_to_v2),
-    ("rule_state", identity_v1_to_v2),
-    ("transcript_item", identity_v1_to_v2),
-];
 
 #[derive(Debug, Error)]
 pub enum DomainError {
@@ -63,7 +45,7 @@ pub enum DomainRecord {
 }
 
 impl DomainRecord {
-    pub const SCHEMA_VERSION: SchemaVersion = SchemaVersion::V2;
+    pub const SCHEMA_VERSION: SchemaVersion = SchemaVersion::V1;
 
     #[must_use]
     pub const fn record_type_name(&self) -> &'static str {
@@ -221,96 +203,10 @@ impl DomainRecord {
 pub fn decode_domain_records(
     records: &RecordSet,
 ) -> Result<BTreeMap<RecordKey, DomainRecord>, DomainError> {
-    let (records, _) = migrate_domain_records(records)?;
     records
         .iter()
         .map(|(key, envelope)| Ok((key.clone(), DomainRecord::from_envelope(envelope)?)))
         .collect()
-}
-
-pub fn migrate_domain_records(records: &RecordSet) -> Result<(RecordSet, bool), DomainError> {
-    let registry = domain_migration_registry()?;
-    let mut migrated = false;
-    let mut upgraded = RecordSet::new();
-    for (key, envelope) in records {
-        let current = registry.upgrade(envelope.clone())?;
-        if current.key() != *key {
-            return Err(DomainError::RecordIdentityMismatch);
-        }
-        migrated |= current.schema_version() != envelope.schema_version();
-        upgraded.insert(key.clone(), current);
-    }
-    Ok((upgraded, migrated))
-}
-
-fn domain_migration_registry() -> Result<MigrationRegistry, DomainError> {
-    let mut registry = MigrationRegistry::default();
-    for (name, migrate) in DOMAIN_RECORD_MIGRATIONS {
-        let record_type = RecordType::parse(*name)?;
-        registry.register_record_type(record_type.clone(), DomainRecord::SCHEMA_VERSION)?;
-        registry.register_migration(MigrationStep {
-            record_type,
-            from: SchemaVersion::V1,
-            to: SchemaVersion::V2,
-            migrate: *migrate,
-        })?;
-    }
-    Ok(registry)
-}
-
-fn identity_v1_to_v2(payload: serde_json::Value) -> Result<serde_json::Value, RecordError> {
-    Ok(payload)
-}
-
-fn generated_origin_v1_to_v2(
-    mut payload: serde_json::Value,
-) -> Result<serde_json::Value, RecordError> {
-    let Some(origin) = payload
-        .as_object_mut()
-        .and_then(|record| record.get_mut("origin"))
-        .and_then(serde_json::Value::as_object_mut)
-    else {
-        return Ok(payload);
-    };
-    if origin.get("type").and_then(serde_json::Value::as_str) != Some("generated") {
-        return Ok(payload);
-    }
-    if origin.len() != 2 || !origin.contains_key("origin") {
-        return migration_failed("invalid v1 generated EntityOrigin");
-    }
-    let generated = origin
-        .get_mut("origin")
-        .and_then(serde_json::Value::as_object_mut)
-        .ok_or_else(|| RecordError::MigrationFailed {
-            message: "invalid v1 GeneratedOrigin".to_owned(),
-        })?;
-    if generated.len() != 3
-        || !generated.contains_key("generation_id")
-        || !generated.contains_key("generator_version")
-        || !generated.contains_key("source_event")
-    {
-        return migration_failed("invalid v1 GeneratedOrigin fields");
-    }
-    let event_id =
-        generated
-            .remove("source_event")
-            .ok_or_else(|| RecordError::MigrationFailed {
-                message: "missing v1 GeneratedOrigin source_event".to_owned(),
-            })?;
-    generated.insert(
-        "source".to_owned(),
-        serde_json::json!({
-            "type": "world_event",
-            "event_id": event_id,
-        }),
-    );
-    Ok(payload)
-}
-
-fn migration_failed<T>(message: &str) -> Result<T, RecordError> {
-    Err(RecordError::MigrationFailed {
-        message: message.to_owned(),
-    })
 }
 
 fn encode<T: Serialize>(value: &T, record_type: &str) -> Result<serde_json::Value, DomainError> {
@@ -429,11 +325,7 @@ fn validate_transcript(value: &TranscriptItemRecord) -> Result<(), DomainError> 
 mod tests {
     use std::num::NonZeroU32;
 
-    use crate::{
-        ActionState, ActorId, CharacterLifetime, CharacterProfile, DisplayName, EntityOrigin,
-        EventId, GeneratedOrigin, GenerationId, GenerationSource, LifeState, ObjectId, Posture,
-        RecordProvenance, ShortText, TranscriptItemId, TranscriptSpeaker,
-    };
+    use crate::{ActorId, ObjectId, TranscriptItemId, TranscriptSpeaker};
 
     use super::*;
 
@@ -456,170 +348,11 @@ mod tests {
         let envelope = record
             .to_envelope(Revision::ZERO, None)
             .expect("encode domain record");
+        assert_eq!(envelope.schema_version(), SchemaVersion::V1);
         assert_eq!(
             DomainRecord::from_envelope(&envelope).expect("decode"),
             record
         );
-    }
-
-    #[test]
-    fn generated_origin_v1_migrates_to_world_event_source_before_typed_decode() {
-        let event_id = parse::<EventId>("evt_01890f6a-2b3f-7d4e-8f90-123456789abc");
-        let record = DomainRecord::Character(CharacterRecord {
-            id: parse("obj_01890f6a-2b3d-7d4e-8f90-123456789abc"),
-            display_name: DisplayName::new("Mara").expect("display name"),
-            profile: CharacterProfile {
-                summary: ShortText::new("A generated witness.").expect("summary"),
-                values: Vec::new(),
-                speaking_style: ShortText::new("Careful.").expect("speaking style"),
-                narrative_tags: BTreeSet::new(),
-            },
-            controller: CharacterController::Agent,
-            lifetime: CharacterLifetime::Persistent,
-            location: parse("obj_01890f6a-2b3e-7d4e-8f90-123456789abc"),
-            inventory_root: parse("obj_01890f6a-2b3f-7d4e-8f90-123456789abc"),
-            agent_binding: None,
-            base_attributes: crate::BaseAttributes::default(),
-            attribute_adjustments: Vec::new(),
-            resources: BTreeMap::new(),
-            life_state: LifeState::Alive,
-            action_state: ActionState::Idle,
-            posture: Posture::Standing,
-            origin: EntityOrigin::Generated {
-                origin: GeneratedOrigin {
-                    generation_id: parse::<GenerationId>(
-                        "gen_01890f6a-2b40-7d4e-8f90-123456789abc",
-                    ),
-                    generator_version: ShortText::new("narrator-v1").expect("generator version"),
-                    source: GenerationSource::WorldEvent { event_id },
-                },
-            },
-        });
-        let current = record
-            .to_envelope(
-                Revision::new(7),
-                Some(RecordProvenance {
-                    action_id: Some(parse("act_01890f6a-2b41-7d4e-8f90-123456789abc")),
-                    mod_id: None,
-                    definition_id: None,
-                }),
-            )
-            .expect("current envelope");
-        let mut legacy_payload = current.payload().clone();
-        let generated = legacy_payload
-            .pointer_mut("/origin/origin")
-            .and_then(serde_json::Value::as_object_mut)
-            .expect("generated origin object");
-        let source = generated
-            .remove("source")
-            .and_then(|value| value.get("event_id").cloned())
-            .expect("world event source");
-        generated.insert("source_event".to_owned(), source);
-        let legacy = RecordEnvelope::new(
-            current.record_type().clone(),
-            SchemaVersion::V1,
-            current.record_id().clone(),
-            current.revision(),
-            legacy_payload,
-            current.provenance().cloned(),
-        )
-        .expect("legacy envelope");
-        let records = RecordSet::from([(legacy.key(), legacy.clone())]);
-
-        let (upgraded, migrated) = migrate_domain_records(&records).expect("migrate records");
-        let upgraded = upgraded.get(&legacy.key()).expect("upgraded character");
-        assert!(migrated);
-        assert_eq!(upgraded.schema_version(), SchemaVersion::V2);
-        assert_eq!(upgraded.record_id(), legacy.record_id());
-        assert_eq!(upgraded.revision(), legacy.revision());
-        assert_eq!(upgraded.provenance(), legacy.provenance());
-        assert_eq!(
-            decode_domain_records(&records)
-                .expect("decode migrated records")
-                .get(&legacy.key()),
-            Some(&record)
-        );
-    }
-
-    #[test]
-    fn every_domain_record_has_an_explicit_v1_to_v2_step() {
-        let registry = domain_migration_registry().expect("domain migration registry");
-        for (name, _) in DOMAIN_RECORD_MIGRATIONS {
-            let payload = serde_json::json!({"sentinel": name});
-            let envelope = RecordEnvelope::new(
-                RecordType::parse(*name).expect("record type"),
-                SchemaVersion::V1,
-                RecordId::parse("obj_01890f6a-2b42-7d4e-8f90-123456789abc").expect("record id"),
-                Revision::ZERO,
-                payload.clone(),
-                None,
-            )
-            .expect("legacy envelope");
-            let upgraded = registry.upgrade(envelope).expect("identity migration");
-            assert_eq!(upgraded.schema_version(), SchemaVersion::V2);
-            assert_eq!(upgraded.payload(), &payload);
-        }
-    }
-
-    #[test]
-    fn domain_migration_rejects_unknown_and_newer_record_schemas() {
-        let registry = domain_migration_registry().expect("domain migration registry");
-        let unknown = RecordEnvelope::new(
-            RecordType::parse("future_record").expect("record type"),
-            SchemaVersion::V1,
-            RecordId::parse("obj_01890f6a-2b43-7d4e-8f90-123456789abc").expect("record id"),
-            Revision::ZERO,
-            serde_json::json!({}),
-            None,
-        )
-        .expect("unknown envelope");
-        assert!(matches!(
-            registry.upgrade(unknown),
-            Err(RecordError::UnknownRecordType { .. })
-        ));
-
-        let newer = RecordEnvelope::new(
-            RecordType::parse("character").expect("record type"),
-            SchemaVersion::new(3).expect("v3"),
-            RecordId::parse("obj_01890f6a-2b44-7d4e-8f90-123456789abc").expect("record id"),
-            Revision::ZERO,
-            serde_json::json!({}),
-            None,
-        )
-        .expect("newer envelope");
-        assert!(matches!(
-            registry.upgrade(newer),
-            Err(RecordError::NewerSchema { .. })
-        ));
-    }
-
-    #[test]
-    fn generated_origin_migration_rejects_unknown_v1_fields() {
-        let envelope = RecordEnvelope::new(
-            RecordType::parse("character").expect("record type"),
-            SchemaVersion::V1,
-            RecordId::parse("obj_01890f6a-2b45-7d4e-8f90-123456789abc").expect("record id"),
-            Revision::ZERO,
-            serde_json::json!({
-                "origin": {
-                    "type": "generated",
-                    "origin": {
-                        "generation_id": "gen_01890f6a-2b46-7d4e-8f90-123456789abc",
-                        "generator_version": "narrator-v1",
-                        "source_event": "evt_01890f6a-2b47-7d4e-8f90-123456789abc",
-                        "future": true
-                    }
-                }
-            }),
-            None,
-        )
-        .expect("legacy envelope");
-        assert!(matches!(
-            domain_migration_registry()
-                .expect("domain migration registry")
-                .upgrade(envelope),
-            Err(RecordError::MigrationFailed { .. })
-        ));
     }
 
     #[test]

@@ -8,10 +8,10 @@ use armillae_core::{CompletionRequest, ContentPart, Message, Role};
 use armillae_llm::LlmBridge;
 use loreloom_agent::{
     AgentDefinition, AgentRunner, AgentToolContext, BudgetReason, CancellationToken,
-    ModelFailureDiagnostic, ModelInvocationKind, NarratorNpcDecision, NarratorPlan, NpcAgent,
-    NpcAssignment, NpcControllerKind, NpcLifetime, NpcNarrativeAction, NpcTarget, NpcTurnRequest,
-    NpcTurnResult, NpcTurnStatus, ResourceUsage, ToolCallOutcome, TurnInvocation, TurnOutcome,
-    TurnStatus,
+    ModelFailureDiagnostic, ModelInvocationKind, NarratorDefinition, NarratorNpcDecision,
+    NarratorPlan, NpcAgent, NpcAssignment, NpcControllerKind, NpcLifetime, NpcNarrativeAction,
+    NpcTarget, NpcTurnRequest, NpcTurnResult, NpcTurnStatus, ResourceUsage, ToolCallOutcome,
+    TurnInvocation, TurnOutcome, TurnStatus,
 };
 use loreloom_core::{
     ActorId, CharacterController, CharacterLifetime, ContentDefinitionId, GeneratedOrigin,
@@ -39,6 +39,7 @@ pub struct GameRuntime {
     executor: Arc<RuntimeToolExecutor>,
     runner: AgentRunner,
     narrator: Arc<dyn LlmBridge>,
+    narrator_definition: NarratorDefinition,
     default_npc_bridge: Arc<dyn LlmBridge>,
     npcs: BTreeMap<ActorId, NpcRegistration>,
     session_id: SessionId,
@@ -69,6 +70,7 @@ impl GameRuntime {
     pub fn new(
         service: Arc<WorldService>,
         narrator: Arc<dyn LlmBridge>,
+        narrator_definition: NarratorDefinition,
         session_id: SessionId,
         config: RuntimeConfig,
     ) -> Self {
@@ -78,6 +80,7 @@ impl GameRuntime {
             executor: Arc::clone(&executor),
             runner: AgentRunner::new(executor),
             narrator: Arc::clone(&narrator),
+            narrator_definition,
             default_npc_bridge: narrator,
             npcs: BTreeMap::new(),
             session_id,
@@ -207,14 +210,14 @@ impl GameRuntime {
                     "materialization_results": materialization_results,
                     "scene_transition_results": scene_transition_results,
                     "npc_results": npc_results,
-                    "committed_events": self.service.events().await,
-                    "instructions": "Use native tools for structured decisions and world changes. request_npc_turn queues NPCs in tool-call order. Before changing scenes, call list_scene_transitions and copy one exact returned target into transition_scene; never invent scene IDs. Do not narrate arrival until scene_transition_results reports committed. If no target matches the player's intent, explain that the destination is unavailable in the current world content. Never retry an unchanged rejected tool call. If no more orchestration is needed, return only the final natural-language narration for the player. Do not return JSON or a structured envelope. NPC responses are claims; only committed events are world facts."
+                    "committed_events": self.service.events().await
                 }),
                 self.runner
                     .definitions()
                     .into_iter()
                     .filter(|definition| definition.name != "submit_npc_draft")
                     .collect(),
+                &self.narrator_definition,
             )?;
             let narrator_turn = self
                 .runner
@@ -463,7 +466,10 @@ impl GameRuntime {
                     dialogue,
                     context_truncated,
                 )?;
-                let npc_request = agent.request(self.runner.definitions())?;
+                let npc_request = agent.request(
+                    self.runner.definitions(),
+                    &self.narrator_definition.response_language,
+                )?;
                 on_phase(RuntimePhase::NpcThinking);
                 let turn = self
                     .runner
@@ -746,14 +752,14 @@ impl GameRuntime {
                             "required_agent_profile": match &decision.controller {
                                 NpcControllerKind::Agent(profile_id) => Some(profile_id),
                                 _ => None,
-                            },
-                            "instructions": "Create one NPC and submit it through submit_npc_draft. Do not return the draft as JSON text. After the tool result, finish with a short natural-language acknowledgement."
+                            }
                         }),
                         self.runner
                             .definitions()
                             .into_iter()
                             .filter(|definition| definition.name == "submit_npc_draft")
                             .collect(),
+                        &self.narrator_definition,
                     )?;
                     on_phase(RuntimePhase::NarratorThinking);
                     let generation = self
@@ -1072,6 +1078,7 @@ fn narrator_request(
     kind: &'static str,
     payload: serde_json::Value,
     tools: Vec<armillae_core::ToolDefinition>,
+    narrator: &NarratorDefinition,
 ) -> Result<CompletionRequest, RuntimeError> {
     let payload = serde_json::to_string(&json!({ "kind": kind, "payload": payload }))
         .map_err(|error| RuntimeError::json("narrator_context", error))?;
@@ -1080,8 +1087,16 @@ fn narrator_request(
             Message::new(
                 Role::System,
                 vec![ContentPart::text(
-                    "Player input goes only to the narrator. Use native tools for every structured decision or world change. When scene transition tools are offered, call list_scene_transitions first and copy one returned target exactly; never invent a scene ID, retry an unchanged rejection, or narrate arrival before a committed transition result. Return natural-language prose in the response body; never return JSON or a structured control envelope. NPC claims are not committed facts.",
+                    "Player input goes only to the narrator. Use native tools for every structured decision or world change. request_npc_turn queues NPCs in tool-call order. When scene transition tools are offered, call list_scene_transitions first and copy one returned target exactly; never invent a scene ID, retry an unchanged rejection, or narrate arrival before a committed transition result. If no scene target matches, explain that the destination is unavailable in current world content. When submit_npc_draft is offered, submit exactly one NPC through that tool rather than returning draft data in text. Return only natural-language prose in the response body; never return JSON or a structured control envelope. NPC claims are not committed facts; only committed events are world facts.",
                 )],
+            ),
+            Message::new(
+                Role::System,
+                vec![ContentPart::text(narrator.system_prompt.as_str())],
+            ),
+            Message::new(
+                Role::System,
+                vec![ContentPart::text(narrator.response_language.instruction())],
             ),
             Message::user(payload),
         ],
@@ -1169,4 +1184,43 @@ fn append_tool_activity(activity: &mut Vec<ToolActivity>, tools: &[ToolCallOutco
 
 fn elapsed_ms(started: Instant) -> u64 {
     u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
+}
+
+#[cfg(test)]
+mod tests {
+    use armillae_core::ContentPart;
+    use loreloom_agent::{NarratorDefinition, ResponseLanguagePolicy};
+
+    use super::*;
+
+    fn text(message: &Message) -> &str {
+        match &message.content[..] {
+            [ContentPart::Text(value)] => value.text.as_str(),
+            _ => panic!("single text message"),
+        }
+    }
+
+    #[test]
+    fn narrator_context_orders_engine_world_language_and_observation() {
+        let definition = NarratorDefinition {
+            system_prompt: LongText::new("用克制的中文叙述这个世界。")
+                .expect("world narrator prompt"),
+            response_language: ResponseLanguagePolicy::Fixed(
+                ShortText::new("zh-CN").expect("language tag"),
+            ),
+        };
+        let request = narrator_request(
+            "narrator_turn",
+            json!({ "observation": { "revision": 7 } }),
+            Vec::new(),
+            &definition,
+        )
+        .expect("narrator request");
+
+        assert_eq!(request.messages.len(), 4);
+        assert!(text(&request.messages[0]).contains("native tools"));
+        assert_eq!(text(&request.messages[1]), "用克制的中文叙述这个世界。");
+        assert!(text(&request.messages[2]).contains("zh-CN"));
+        assert!(text(&request.messages[3]).contains("\"observation\""));
+    }
 }
