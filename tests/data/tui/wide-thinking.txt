@@ -1,4 +1,4 @@
- LORELOOM  Old Mill · Bell Room                                  working  rev 7
+ LORELOOM  Old Mill · Bell Room                                         working
 ────────────────────────────────────────────────────────────────────────────────
  Aster                 │ STORY
  Old Mill · Bell Room  │ › Ask Mira about the bell.
@@ -15,4 +15,4 @@
  Hands tremble.        │ │› Look closer▏                                      │
                        │ │                                                    │
                        │ ╰────────────────────────────────────────────────────╯
-    Narrator is thinking · r7 · Alt+M Mods · Esc cancel · PgUp/PgDn · ^C quit
+      Narrator is thinking · Alt+M Mods · Esc cancel · PgUp/PgDn · ^C quit

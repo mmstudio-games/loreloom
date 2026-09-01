@@ -1,4 +1,4 @@
- LORELOOM  Old Mill · Bell Room  working  rev 7
+ LORELOOM  Old Mill · Bell Room         working
 ────────────────────────────────────────────────
  STATE   STORY   Tab to switch
  Aster
@@ -15,4 +15,4 @@
  │› Look closer▏                              │
  │                                            │
  ╰────────────────────────────────────────────╯
-  working · r7 · Tab · F2 Mods · PgUp/PgDn · ^C
+    working · Tab · F2 Mods · PgUp/PgDn · ^C

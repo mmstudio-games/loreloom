@@ -280,6 +280,8 @@ fn product_renderer_is_deterministic_for_wide_and_narrow_layouts() {
     assert!(wide.contains("observe_scene  running"));
     assert!(wide.contains("Look closer▏"));
     assert!(wide.contains("Esc cancel"));
+    assert!(!wide.contains("rev 7"));
+    assert!(!wide.contains("r7"));
     assert!(
         find_ascii(wide_terminal.backend().buffer(), "Look closer").is_some_and(|(x, _)| x > 24),
         "the wide composer stays in the right narrative pane"

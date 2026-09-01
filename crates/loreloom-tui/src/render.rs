@@ -91,20 +91,14 @@ fn render_header(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
         left,
     );
     frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled(
-                header_phase_label(app.effective_phase()),
-                Style::default().fg(if app.working_phase.is_some() {
-                    Color::Yellow
-                } else {
-                    Color::Green
-                }),
-            ),
-            Span::styled(
-                format!("  rev {}", app.snapshot.revision),
-                Style::default().fg(MUTED),
-            ),
-        ]))
+        Paragraph::new(Span::styled(
+            header_phase_label(app.effective_phase()),
+            Style::default().fg(if app.working_phase.is_some() {
+                Color::Yellow
+            } else {
+                Color::Green
+            }),
+        ))
         .alignment(Alignment::Right),
         right,
     );
@@ -592,10 +586,6 @@ fn render_footer(frame: &mut Frame<'_>, app: &TuiApp, area: Rect, narrow: bool) 
                 } else {
                     Color::Green
                 }),
-            ),
-            Span::styled(
-                format!(" · r{}", app.snapshot.revision),
-                Style::default().fg(MUTED),
             ),
             Span::styled(help, Style::default().fg(MUTED)),
         ]))
