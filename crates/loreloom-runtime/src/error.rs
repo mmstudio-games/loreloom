@@ -9,6 +9,8 @@ use thiserror::Error;
 pub enum RuntimeError {
     #[error("player input is empty or invalid")]
     InvalidInput,
+    #[error("generated NPC draft is invalid at {field}")]
+    InvalidNpcDraft { field: &'static str },
     #[error("runtime actor or scene is unavailable")]
     Unavailable,
     #[error("save ModLock does not match the configured content packages")]
@@ -56,6 +58,7 @@ impl RuntimeError {
     pub const fn code(&self) -> &'static str {
         match self {
             Self::InvalidInput => "invalid_input",
+            Self::InvalidNpcDraft { .. } => "invalid_npc_draft",
             Self::Unavailable => "unavailable",
             Self::ContentLockMismatch => "content_lock_mismatch",
             Self::InvalidConfiguration { .. } => "invalid_configuration",

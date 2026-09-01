@@ -30,6 +30,7 @@ use loreloom_core::{
 };
 use loreloom_store::{ActionResolution, CommitRequest, CommitResult, CommittedAction, SaveStore};
 use loreloom_world::{GameWorld, WorldBootstrap, WorldConfig};
+use serde::de::DeserializeOwned;
 use serde_json::{Value as JsonValue, json};
 use tokio::sync::Mutex;
 
@@ -321,13 +322,10 @@ impl WorldService {
         policy: &GenerationPolicy,
     ) -> Result<Vec<Definition>, RuntimeError> {
         let inner = self.inner.lock().await;
-        let ids = policy
+        policy
             .constraints
             .allowed_definitions
             .iter()
-            .chain(policy.allowed_agent_profiles.iter())
-            .collect::<std::collections::BTreeSet<_>>();
-        ids.into_iter()
             .map(|id| {
                 inner
                     .registry
@@ -934,7 +932,7 @@ pub struct RuntimeToolExecutor {
     generation_policy: Option<GenerationPolicy>,
     pending_npc_decisions: Mutex<Vec<PendingNpcDecision>>,
     pending_npc_turns: Mutex<Vec<NpcTurnRequest>>,
-    pending_npc_drafts: Mutex<Vec<NpcDraft>>,
+    pending_npc_draft: Mutex<Option<NpcDraft>>,
     pending_topology: Mutex<Option<PendingTopologyRequest>>,
     request_ids: Mutex<SystemIdGenerator>,
 }
@@ -993,6 +991,17 @@ struct CreatePlaceToolRequest {
     description: ShortText,
 }
 
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NpcDraftProfileInput {
+    summary: ShortText,
+    #[serde(default)]
+    values: Vec<ShortText>,
+    speaking_style: ShortText,
+    #[serde(default)]
+    narrative_tags: BTreeSet<ContentDefinitionId>,
+}
+
 impl RuntimeToolExecutor {
     #[must_use]
     pub fn new(service: Arc<WorldService>) -> Self {
@@ -1009,7 +1018,7 @@ impl RuntimeToolExecutor {
             generation_policy,
             pending_npc_decisions: Mutex::new(Vec::new()),
             pending_npc_turns: Mutex::new(Vec::new()),
-            pending_npc_drafts: Mutex::new(Vec::new()),
+            pending_npc_draft: Mutex::new(None),
             pending_topology: Mutex::new(None),
             request_ids: Mutex::new(SystemIdGenerator),
         }
@@ -1023,8 +1032,8 @@ impl RuntimeToolExecutor {
         std::mem::take(&mut *self.pending_npc_turns.lock().await)
     }
 
-    pub(crate) async fn take_pending_npc_drafts(&self) -> Vec<NpcDraft> {
-        std::mem::take(&mut *self.pending_npc_drafts.lock().await)
+    pub(crate) async fn take_pending_npc_draft(&self) -> Option<NpcDraft> {
+        self.pending_npc_draft.lock().await.take()
     }
 
     pub(crate) async fn take_pending_topology(&self) -> Option<PendingTopologyRequest> {
@@ -1249,8 +1258,7 @@ impl ToolExecutor for RuntimeToolExecutor {
             },
             ToolDefinition {
                 name: "submit_npc_draft".to_owned(),
-                description: "Submit one generated NPC draft for Runtime validation."
-                    .to_owned(),
+                description: "Submit one generated NPC draft for Runtime validation. Only display_name, profile.summary, and profile.speaking_style are required; omit empty optional collections. A successful call ends this generation stage.".to_owned(),
                 input_schema: npc_draft_schema(),
             },
             ToolDefinition {
@@ -1778,20 +1786,22 @@ impl ToolExecutor for RuntimeToolExecutor {
                     } else if self.service.revision().await != runtime.revision {
                         Err(RuntimeError::Unavailable)
                     } else {
-                        match serde_json::from_value::<NpcDraft>(call.arguments.clone()) {
+                        match parse_npc_draft(&call.arguments) {
                             Ok(draft) => {
-                                let mut pending = self.pending_npc_drafts.lock().await;
-                                if pending.is_empty() {
-                                    pending.push(draft);
+                                let mut pending = self.pending_npc_draft.lock().await;
+                                if pending.is_none() {
+                                    *pending = Some(draft);
                                     Ok(json!({
                                         "status": "accepted_pending",
                                         "revision": runtime.revision
                                     }))
                                 } else {
-                                    Err(RuntimeError::InvalidInput)
+                                    Err(RuntimeError::InvalidNpcDraft {
+                                        field: "submission",
+                                    })
                                 }
                             }
-                            Err(_) => Err(RuntimeError::InvalidInput),
+                            Err(error) => Err(error),
                         }
                     }
                 }
@@ -2581,19 +2591,19 @@ fn skill_is_available(
 fn npc_draft_schema() -> JsonValue {
     json!({
         "type": "object",
-        "required": [
-            "display_name", "profile", "agent_profile", "base_attributes", "resources",
-            "conditions", "inventory", "skills", "knowledge", "goals"
-        ],
+        "required": ["display_name", "profile"],
         "properties": {
-            "display_name": { "type": "string" },
+            "display_name": { "type": "string", "maxLength": 256 },
             "profile": {
                 "type": "object",
-                "required": ["summary", "values", "speaking_style", "narrative_tags"],
+                "required": ["summary", "speaking_style"],
                 "properties": {
-                    "summary": { "type": "string" },
-                    "values": { "type": "array", "items": { "type": "string" } },
-                    "speaking_style": { "type": "string" },
+                    "summary": { "type": "string", "maxLength": 4096 },
+                    "values": {
+                        "type": "array",
+                        "items": { "type": "string", "maxLength": 4096 }
+                    },
+                    "speaking_style": { "type": "string", "maxLength": 4096 },
                     "narrative_tags": {
                         "type": "array",
                         "items": { "type": "string" },
@@ -2602,11 +2612,9 @@ fn npc_draft_schema() -> JsonValue {
                 },
                 "additionalProperties": false
             },
-            "agent_profile": {
-                "anyOf": [{ "type": "string" }, { "type": "null" }]
-            },
             "base_attributes": {
                 "type": "object",
+                "description": "Attribute values keyed by an allowed canonical definition ID; fixed-point values use raw millionths.",
                 "additionalProperties": { "type": "integer" }
             },
             "resources": {
@@ -2616,8 +2624,14 @@ fn npc_draft_schema() -> JsonValue {
                     "required": ["resource_id", "current", "base_maximum"],
                     "properties": {
                         "resource_id": { "type": "string" },
-                        "current": { "type": "integer" },
-                        "base_maximum": { "type": "integer" }
+                        "current": {
+                            "type": "integer",
+                            "description": "Raw fixed-point millionths."
+                        },
+                        "base_maximum": {
+                            "type": "integer",
+                            "description": "Raw fixed-point millionths."
+                        }
                     },
                     "additionalProperties": false
                 }
@@ -2630,7 +2644,10 @@ fn npc_draft_schema() -> JsonValue {
                     "properties": {
                         "condition_id": { "type": "string" },
                         "stacks": { "type": "integer", "minimum": 1 },
-                        "intensity": { "type": "integer" }
+                        "intensity": {
+                            "type": "integer",
+                            "description": "Raw fixed-point millionths."
+                        }
                     },
                     "additionalProperties": false
                 }
@@ -2641,7 +2658,7 @@ fn npc_draft_schema() -> JsonValue {
                     "type": "object",
                     "required": ["local_key", "item_id", "quantity"],
                     "properties": {
-                        "local_key": { "type": "string" },
+                        "local_key": { "type": "string", "maxLength": 4096 },
                         "item_id": { "type": "string" },
                         "quantity": { "type": "integer", "minimum": 1 },
                         "parent_local_key": {
@@ -2665,11 +2682,166 @@ fn npc_draft_schema() -> JsonValue {
                     "additionalProperties": false
                 }
             },
-            "knowledge": { "type": "array", "items": { "type": "object" } },
-            "goals": { "type": "array", "items": { "type": "object" } }
+            "knowledge": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "required": ["subject", "predicate_id", "value", "confidence"],
+                    "properties": {
+                        "subject": fact_subject_schema(),
+                        "predicate_id": { "type": "string" },
+                        "value": fact_value_schema(),
+                        "confidence": {
+                            "type": "integer",
+                            "description": "Raw fixed-point millionths from 0 to 1000000.",
+                            "minimum": 0,
+                            "maximum": 1000000
+                        }
+                    },
+                    "additionalProperties": false
+                }
+            },
+            "goals": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "required": ["description", "priority", "status"],
+                    "properties": {
+                        "description": { "type": "string", "maxLength": 4096 },
+                        "priority": { "type": "integer" },
+                        "status": {
+                            "type": "string",
+                            "enum": ["active", "achieved", "abandoned", "blocked"]
+                        }
+                    },
+                    "additionalProperties": false
+                }
+            }
         },
         "additionalProperties": false
     })
+}
+
+fn fact_subject_schema() -> JsonValue {
+    json!({
+        "oneOf": [
+            {
+                "type": "object",
+                "required": ["type"],
+                "properties": { "type": { "const": "world" } },
+                "additionalProperties": false
+            },
+            {
+                "type": "object",
+                "required": ["type", "object_id"],
+                "properties": {
+                    "type": { "const": "object" },
+                    "object_id": { "type": "string" }
+                },
+                "additionalProperties": false
+            },
+            {
+                "type": "object",
+                "required": ["type", "scene_id"],
+                "properties": {
+                    "type": { "const": "scene" },
+                    "scene_id": { "type": "string" }
+                },
+                "additionalProperties": false
+            }
+        ]
+    })
+}
+
+fn fact_value_schema() -> JsonValue {
+    json!({
+        "oneOf": [
+            tagged_fact_value_schema("bool", json!({ "type": "boolean" })),
+            tagged_fact_value_schema("fixed", json!({ "type": "integer" })),
+            tagged_fact_value_schema("counter", json!({ "type": "integer" })),
+            tagged_fact_value_schema(
+                "bounded_text",
+                json!({ "type": "string", "maxLength": 4096 }),
+            ),
+            tagged_fact_value_schema("object_ref", json!({ "type": "string" })),
+            tagged_fact_value_schema("tag", json!({ "type": "string" }))
+        ]
+    })
+}
+
+fn tagged_fact_value_schema(kind: &str, value: JsonValue) -> JsonValue {
+    json!({
+        "type": "object",
+        "required": ["type", "value"],
+        "properties": {
+            "type": { "const": kind },
+            "value": value
+        },
+        "additionalProperties": false
+    })
+}
+
+fn parse_npc_draft(arguments: &JsonValue) -> Result<NpcDraft, RuntimeError> {
+    const FIELDS: &[&str] = &[
+        "display_name",
+        "profile",
+        "base_attributes",
+        "resources",
+        "conditions",
+        "inventory",
+        "skills",
+        "knowledge",
+        "goals",
+    ];
+    let object = arguments
+        .as_object()
+        .ok_or(RuntimeError::InvalidNpcDraft { field: "root" })?;
+    if object.keys().any(|key| !FIELDS.contains(&key.as_str())) {
+        return Err(RuntimeError::InvalidNpcDraft { field: "root" });
+    }
+    let profile: NpcDraftProfileInput = draft_required_field(object, "profile")?;
+    Ok(NpcDraft {
+        display_name: draft_required_field(object, "display_name")?,
+        profile: loreloom_core::CharacterProfile {
+            summary: profile.summary,
+            values: profile.values,
+            speaking_style: profile.speaking_style,
+            narrative_tags: profile.narrative_tags,
+        },
+        base_attributes: draft_default_field(object, "base_attributes")?,
+        resources: draft_default_field(object, "resources")?,
+        conditions: draft_default_field(object, "conditions")?,
+        inventory: draft_default_field(object, "inventory")?,
+        skills: draft_default_field(object, "skills")?,
+        knowledge: draft_default_field(object, "knowledge")?,
+        goals: draft_default_field(object, "goals")?,
+    })
+}
+
+fn draft_required_field<T: DeserializeOwned>(
+    object: &serde_json::Map<String, JsonValue>,
+    field: &'static str,
+) -> Result<T, RuntimeError> {
+    object
+        .get(field)
+        .cloned()
+        .ok_or(RuntimeError::InvalidNpcDraft { field })
+        .and_then(|value| {
+            serde_json::from_value(value).map_err(|_| RuntimeError::InvalidNpcDraft { field })
+        })
+}
+
+fn draft_default_field<T: Default + DeserializeOwned>(
+    object: &serde_json::Map<String, JsonValue>,
+    field: &'static str,
+) -> Result<T, RuntimeError> {
+    object.get(field).map_or_else(
+        || Ok(T::default()),
+        |value| {
+            serde_json::from_value(value.clone())
+                .map_err(|_| RuntimeError::InvalidNpcDraft { field })
+        },
+    )
 }
 
 fn page_schema() -> JsonValue {
@@ -2792,6 +2964,11 @@ fn tool_result(call: &ToolCall, value: JsonValue, is_error: bool) -> ToolResult 
 
 fn runtime_error_json(error: &RuntimeError) -> JsonValue {
     match error {
+        RuntimeError::InvalidNpcDraft { field } => json!({
+            "code": error.code(),
+            "field": field,
+            "retry_unchanged": false,
+        }),
         RuntimeError::SceneTransitionTargetUnavailable => json!({
             "code": error.code(),
             "recovery_tool": "list_scene_transitions",

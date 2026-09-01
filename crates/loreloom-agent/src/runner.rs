@@ -26,6 +26,12 @@ pub enum TurnStatus {
     Failed(TurnFailureStage),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TurnCompletion {
+    FinalResponse,
+    AfterSuccessfulTool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolCallOutcome {
     pub call_id: String,
@@ -67,6 +73,7 @@ pub struct TurnInvocation<'a> {
     pub budget: ResourceBudget,
     pub max_context_tokens: u64,
     pub cancellation: &'a CancellationToken,
+    pub completion: TurnCompletion,
 }
 
 pub struct AgentRunner {
@@ -112,6 +119,7 @@ impl AgentRunner {
             budget,
             max_context_tokens,
             cancellation,
+            completion,
         } = invocation;
         let offered_tools = request
             .tools
@@ -303,21 +311,32 @@ impl AgentRunner {
                         is_error: true,
                     }
                 };
-                if !result.is_error {
+                let successful = !result.is_error;
+                if successful {
                     collect_events(&result, &mut committed_events);
                     advance_tool_revision(&result, &mut tool_context);
                 }
                 let error_code = result.is_error.then(|| tool_error_code(&result)).flatten();
-                let outcome = ToolCallOutcome {
+                let call_outcome = ToolCallOutcome {
                     call_id: call.id.as_str().to_owned(),
                     name: call.name,
                     is_error: result.is_error,
                     error_code,
                 };
-                on_tool_progress(ToolCallProgress::Finished(outcome.clone()));
-                tool_calls.push(outcome);
+                on_tool_progress(ToolCallProgress::Finished(call_outcome.clone()));
+                tool_calls.push(call_outcome);
                 request.messages.push(Message::tool_result(result.clone()));
                 tool_results.push(result);
+                if completion == TurnCompletion::AfterSuccessfulTool && successful {
+                    return outcome(
+                        TurnStatus::Completed,
+                        None,
+                        tool_results,
+                        tool_calls,
+                        committed_events,
+                        usage,
+                    );
+                }
             }
         }
     }

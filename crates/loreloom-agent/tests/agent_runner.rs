@@ -20,7 +20,7 @@ use futures_executor::block_on;
 use loreloom_agent::{
     AgentRunner, AgentToolContext, BudgetReason, CancellationToken, ModelFailureCategory,
     ModelFailureStage, ModelInvocationKind, NarratorPlan, ResourceBudget, ToolCallOutcome,
-    ToolCallProgress, TurnFailureStage, TurnInvocation, TurnStatus,
+    ToolCallProgress, TurnCompletion, TurnFailureStage, TurnInvocation, TurnStatus,
 };
 use loreloom_core::{ActorId, Revision, SessionId};
 use serde_json::json;
@@ -144,6 +144,7 @@ fn invocation<'a>(
         budget,
         max_context_tokens: u64::MAX,
         cancellation,
+        completion: TurnCompletion::FinalResponse,
     }
 }
 
@@ -268,6 +269,56 @@ fn product_runner_preserves_tool_order_correlation_and_committed_revision() {
         &requests[1].messages[3].content[..],
         [ContentPart::ToolResult(result)] if result.call_id.as_str() == "call-second"
     ));
+}
+
+#[test]
+fn product_runner_can_finish_on_the_first_successful_tool_without_a_follow_up_model_call() {
+    let executor = Arc::new(RecordingExecutor::default());
+    let runner = AgentRunner::new(executor.clone());
+    let bridge = MockBridge::scripted([MockResponse::completion(tool_response(vec![
+        call("accepted-draft", "commit_first"),
+        call("unneeded-second-draft", "inspect_after"),
+    ]))]);
+    let cancellation = CancellationToken::new();
+    let mut invocation = invocation(&bridge, &cancellation, ResourceBudget::default());
+    invocation.completion = TurnCompletion::AfterSuccessfulTool;
+
+    let outcome = block_on(runner.run_turn(invocation));
+
+    assert_eq!(outcome.status, TurnStatus::Completed);
+    assert_eq!(outcome.final_text, None);
+    assert_eq!(outcome.tool_calls.len(), 1);
+    assert_eq!(
+        executor.calls(),
+        vec![("commit_first".to_owned(), Revision::new(1))]
+    );
+    assert_eq!(bridge.requests().expect("request log").len(), 1);
+}
+
+#[test]
+fn successful_tool_completion_keeps_retrying_after_a_rejected_call() {
+    let executor = Arc::new(RecordingExecutor::default());
+    let runner = AgentRunner::new(executor.clone());
+    let bridge = MockBridge::scripted([
+        MockResponse::completion(tool_response(vec![call("rejected-draft", "inspect_after")])),
+        MockResponse::completion(tool_response(vec![call("corrected-draft", "commit_first")])),
+    ]);
+    let cancellation = CancellationToken::new();
+    let mut invocation = invocation(&bridge, &cancellation, ResourceBudget::default());
+    invocation.request.tools.truncate(1);
+    invocation.completion = TurnCompletion::AfterSuccessfulTool;
+
+    let outcome = block_on(runner.run_turn(invocation));
+
+    assert_eq!(outcome.status, TurnStatus::Completed);
+    assert_eq!(outcome.tool_calls.len(), 2);
+    assert!(outcome.tool_calls[0].is_error);
+    assert!(!outcome.tool_calls[1].is_error);
+    assert_eq!(
+        executor.calls(),
+        vec![("commit_first".to_owned(), Revision::new(1))]
+    );
+    assert_eq!(bridge.requests().expect("request log").len(), 2);
 }
 
 #[test]

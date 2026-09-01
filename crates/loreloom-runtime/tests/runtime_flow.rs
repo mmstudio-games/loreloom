@@ -1069,28 +1069,28 @@ impl LlmBridge for RecoveringNarratorBridge {
 }
 
 struct GeneratedNarratorBridge {
-    profile_id: ContentDefinitionId,
     calls: AtomicUsize,
     saw_materialized_profile: std::sync::atomic::AtomicBool,
+    saw_simplified_draft_contract: std::sync::atomic::AtomicBool,
     repeat_materialization: bool,
     materialized_actor: std::sync::Mutex<Option<(ActorId, Revision)>>,
 }
 
 impl GeneratedNarratorBridge {
-    fn new(profile_id: ContentDefinitionId) -> Self {
+    fn new() -> Self {
         Self {
-            profile_id,
             calls: AtomicUsize::new(0),
             saw_materialized_profile: std::sync::atomic::AtomicBool::new(false),
+            saw_simplified_draft_contract: std::sync::atomic::AtomicBool::new(false),
             repeat_materialization: false,
             materialized_actor: std::sync::Mutex::new(None),
         }
     }
 
-    fn repeating(profile_id: ContentDefinitionId) -> Self {
+    fn repeating() -> Self {
         Self {
             repeat_materialization: true,
-            ..Self::new(profile_id)
+            ..Self::new()
         }
     }
 
@@ -1126,7 +1126,6 @@ impl GeneratedNarratorBridge {
                 speaking_style: text("Careful and concrete."),
                 narrative_tags: BTreeSet::new(),
             },
-            agent_profile: Some(self.profile_id.clone()),
             base_attributes: BaseAttributes::default(),
             resources: Vec::new(),
             conditions: Vec::new(),
@@ -1161,13 +1160,48 @@ impl LlmBridge for GeneratedNarratorBridge {
                         .expect("materialization arguments"),
                 })),
                 1 => Ok(text_response("The witness request is queued.")),
-                2 => Ok(tool_response(ToolCall {
-                    id: ToolCallId::new("submit-witness-draft").expect("draft tool call ID"),
-                    name: "submit_npc_draft".to_owned(),
-                    arguments: serde_json::to_value(self.draft()).expect("generated draft"),
-                })),
-                3 => Ok(text_response("The generated draft is ready.")),
-                4 => {
+                2 => {
+                    let payload = request
+                        .messages
+                        .iter()
+                        .rev()
+                        .find_map(|message| {
+                            message.content.iter().find_map(|part| match part {
+                                armillae_core::ContentPart::Text(text) => {
+                                    serde_json::from_str::<JsonValue>(&text.text).ok()
+                                }
+                                _ => None,
+                            })
+                        })
+                        .ok_or_else(|| BridgeError::InvalidRequest {
+                            message: "missing generation payload".to_owned(),
+                        })?;
+                    let draft_schema = request
+                        .tools
+                        .iter()
+                        .find(|definition| definition.name == "submit_npc_draft")
+                        .map(|definition| &definition.input_schema);
+                    self.saw_simplified_draft_contract.store(
+                        payload["kind"] == json!("npc_generation")
+                            && payload["payload"].get("generation_policy").is_none()
+                            && payload["payload"].get("required_agent_profile").is_none()
+                            && payload["payload"]["generation_constraints"].is_object()
+                            && payload["payload"]["allowed_definitions"]
+                                .as_array()
+                                .is_some_and(Vec::is_empty)
+                            && draft_schema.is_some_and(|schema| {
+                                schema["required"] == json!(["display_name", "profile"])
+                                    && schema["properties"].get("agent_profile").is_none()
+                            }),
+                        Ordering::SeqCst,
+                    );
+                    Ok(tool_response(ToolCall {
+                        id: ToolCallId::new("submit-witness-draft").expect("draft tool call ID"),
+                        name: "submit_npc_draft".to_owned(),
+                        arguments: serde_json::to_value(self.draft()).expect("generated draft"),
+                    }))
+                }
+                3 => {
                     let payload = request
                         .messages
                         .iter()
@@ -1218,7 +1252,7 @@ impl LlmBridge for GeneratedNarratorBridge {
                         Ok(self.npc_turn_response(actor_id))
                     }
                 }
-                5 => {
+                4 => {
                     if self.repeat_materialization {
                         let (actor_id, _) = self
                             .materialized_actor
@@ -1229,10 +1263,10 @@ impl LlmBridge for GeneratedNarratorBridge {
                     }
                     Ok(text_response("The generated NPC turn is queued."))
                 }
-                6 if self.repeat_materialization => {
+                5 if self.repeat_materialization => {
                     Ok(text_response("The generated NPC turn is queued."))
                 }
-                6 | 7 => Ok(text_response(
+                5 | 6 => Ok(text_response(
                     "Ilya answers only after becoming part of the world.",
                 )),
                 _ => Err(BridgeError::InvalidRequest {
@@ -2588,7 +2622,7 @@ async fn generated_npc_is_committed_before_narrator_replans_and_dispatches_it() 
         },
         allowed_agent_profiles: BTreeSet::from([fixture.profile_id.clone()]),
     };
-    let narrator = Arc::new(GeneratedNarratorBridge::new(fixture.profile_id.clone()));
+    let narrator = Arc::new(GeneratedNarratorBridge::new());
     let npc = Arc::new(MockBridge::scripted([MockResponse::text(
         "I saw the lantern before the rain, and I will answer truthfully.",
     )]));
@@ -2611,7 +2645,12 @@ async fn generated_npc_is_committed_before_narrator_replans_and_dispatches_it() 
         .expect("complete generated NPC turn");
 
     assert!(narrator.saw_materialized_profile.load(Ordering::SeqCst));
-    assert_eq!(narrator.calls.load(Ordering::SeqCst), 7);
+    assert!(
+        narrator
+            .saw_simplified_draft_contract
+            .load(Ordering::SeqCst)
+    );
+    assert_eq!(narrator.calls.load(Ordering::SeqCst), 6);
     assert_eq!(npc.requests().expect("NPC request log").len(), 1);
     assert_eq!(outcome.npc_results.len(), 1);
     assert_eq!(outcome.npc_results[0].status, NpcTurnStatus::Completed);
@@ -2681,9 +2720,7 @@ async fn repeated_materialization_request_does_not_generate_a_second_character()
     .await
     .expect("open service");
     let policy_id = definition_id("generation_policy", "deduplicated");
-    let narrator = Arc::new(GeneratedNarratorBridge::repeating(
-        fixture.profile_id.clone(),
-    ));
+    let narrator = Arc::new(GeneratedNarratorBridge::repeating());
     let npc = Arc::new(MockBridge::scripted([MockResponse::text(
         "There is still only one of me.",
     )]));
@@ -2705,7 +2742,7 @@ async fn repeated_materialization_request_does_not_generate_a_second_character()
         .await
         .expect("complete deduplicated NPC turn");
 
-    assert_eq!(narrator.calls.load(Ordering::SeqCst), 8);
+    assert_eq!(narrator.calls.load(Ordering::SeqCst), 7);
     assert_eq!(npc.requests().expect("NPC requests").len(), 1);
     let loaded = observer.load().await.expect("load deduplicated save");
     assert_eq!(
@@ -2981,7 +3018,7 @@ async fn npc_generation_consumes_the_shared_started_agent_turn_budget() {
     .await
     .expect("open service");
     let policy_id = definition_id("generation_policy", "turn_budget");
-    let narrator = Arc::new(GeneratedNarratorBridge::new(fixture.profile_id.clone()));
+    let narrator = Arc::new(GeneratedNarratorBridge::new());
     let config = RuntimeConfig {
         orchestration_budget: OrchestrationBudget {
             max_started_agent_turns: 1,
@@ -3018,6 +3055,131 @@ async fn npc_generation_consumes_the_shared_started_agent_turn_budget() {
             })
         )
     }));
+}
+
+#[tokio::test]
+async fn npc_draft_tool_accepts_minimal_input_and_reports_only_safe_field_categories() {
+    let directory = TempDir::new().expect("temporary save parent");
+    let fixture = fixture();
+    let store = SaveStore::create(
+        directory.path().join("save"),
+        fixture.manifest.clone(),
+        fixture.records,
+    )
+    .await
+    .expect("create save");
+    let service = WorldService::open(
+        store,
+        fixture.registry,
+        &fixture.manifest.world_lock,
+        &fixture.manifest.mod_lock,
+        fixture.world_config,
+    )
+    .await
+    .expect("open service");
+    let executor = RuntimeToolExecutor::with_generation_policy(
+        Arc::clone(&service),
+        Some(generation_policy(
+            definition_id("generation_policy", "draft_contract"),
+            fixture.profile_id,
+        )),
+    );
+    let schema = executor
+        .definitions()
+        .into_iter()
+        .find(|definition| definition.name == "submit_npc_draft")
+        .expect("draft tool definition")
+        .input_schema;
+    assert_eq!(schema["required"], json!(["display_name", "profile"]));
+    assert!(schema["properties"].get("agent_profile").is_none());
+    assert_eq!(
+        schema["properties"]["knowledge"]["items"]["additionalProperties"],
+        json!(false)
+    );
+    assert_eq!(
+        schema["properties"]["goals"]["items"]["required"],
+        json!(["description", "priority", "status"])
+    );
+    let context = || {
+        ToolContext::new().with_extension(AgentToolContext {
+            actor_id: fixture.player,
+            revision: Revision::ZERO,
+            session_id: parse("ses_01890f6a-2bc8-7d4e-8f90-123456789abc"),
+            capabilities: BTreeSet::from(["narrator.submit_npc_draft".to_owned()]),
+        })
+    };
+    let profile = json!({
+        "summary": "A careful witness.",
+        "speaking_style": "Concrete and restrained."
+    });
+
+    let control_field = executor
+        .execute(
+            context(),
+            ToolCall {
+                id: ToolCallId::new("draft-with-control-field").expect("tool call ID"),
+                name: "submit_npc_draft".to_owned(),
+                arguments: json!({
+                    "display_name": "Ilya",
+                    "profile": profile.clone(),
+                    "agent_profile": "must-not-be-model-controlled"
+                }),
+            },
+        )
+        .await
+        .expect("correlated control-field rejection");
+    assert_eq!(
+        tool_result_json(&control_field),
+        &json!({
+            "code": "invalid_npc_draft",
+            "field": "root",
+            "retry_unchanged": false
+        })
+    );
+
+    let invalid_goal = executor
+        .execute(
+            context(),
+            ToolCall {
+                id: ToolCallId::new("draft-with-invalid-goal").expect("tool call ID"),
+                name: "submit_npc_draft".to_owned(),
+                arguments: json!({
+                    "display_name": "Ilya",
+                    "profile": profile.clone(),
+                    "goals": [{ "description": "Tell the truth." }]
+                }),
+            },
+        )
+        .await
+        .expect("correlated goal rejection");
+    assert_eq!(
+        tool_result_json(&invalid_goal),
+        &json!({
+            "code": "invalid_npc_draft",
+            "field": "goals",
+            "retry_unchanged": false
+        })
+    );
+
+    let accepted = executor
+        .execute(
+            context(),
+            ToolCall {
+                id: ToolCallId::new("minimal-valid-draft").expect("tool call ID"),
+                name: "submit_npc_draft".to_owned(),
+                arguments: json!({
+                    "display_name": "Ilya",
+                    "profile": profile
+                }),
+            },
+        )
+        .await
+        .expect("correlated minimal draft acceptance");
+    assert!(!accepted.is_error);
+    assert_eq!(
+        tool_result_json(&accepted)["status"],
+        json!("accepted_pending")
+    );
 }
 
 #[tokio::test]
@@ -3641,6 +3803,7 @@ async fn mock_agent_continuation_splits_stack_then_uses_skill_at_advanced_revisi
             budget: ResourceBudget::default(),
             max_context_tokens: u64::MAX,
             cancellation: &cancellation,
+            completion: loreloom_agent::TurnCompletion::FinalResponse,
         })
         .await;
     assert_eq!(outcome.status, TurnStatus::Completed);

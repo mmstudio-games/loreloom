@@ -11,7 +11,7 @@ use loreloom_agent::{
     ModelFailureDiagnostic, ModelInvocationKind, NarratorDefinition, NarratorNpcDecision,
     NarratorPlan, NpcAgent, NpcAssignment, NpcControllerKind, NpcLifetime, NpcNarrativeAction,
     NpcTarget, NpcTurnRequest, NpcTurnResult, NpcTurnStatus, ResourceUsage, ToolCallOutcome,
-    ToolCallProgress, TurnInvocation, TurnOutcome, TurnStatus,
+    ToolCallProgress, TurnCompletion, TurnInvocation, TurnOutcome, TurnStatus,
 };
 use loreloom_core::{
     ActorId, CharacterController, CharacterLifetime, ContentDefinitionId, GeneratedOrigin,
@@ -281,6 +281,7 @@ impl GameRuntime {
                         budget: self.config.turn_budget,
                         max_context_tokens: self.config.context_projection.max_context_tokens,
                         cancellation: &self.cancellation,
+                        completion: TurnCompletion::FinalResponse,
                     },
                     |progress| {
                         publish_tool_progress(&mut tool_activity, progress, on_progress);
@@ -577,6 +578,7 @@ impl GameRuntime {
                             budget: self.config.turn_budget,
                             max_context_tokens: self.config.context_projection.max_context_tokens,
                             cancellation: &self.cancellation,
+                            completion: TurnCompletion::FinalResponse,
                         },
                         |progress| {
                             publish_tool_progress(&mut tool_activity, progress, on_progress);
@@ -836,18 +838,14 @@ impl GameRuntime {
                             continue;
                         }
                     };
-                    let _ = self.executor.take_pending_npc_drafts().await;
+                    let _ = self.executor.take_pending_npc_draft().await;
                     let generation_request = narrator_request(
                         "npc_generation",
                         json!({
                             "observation": observation,
                             "request": request,
-                            "generation_policy": policy,
+                            "generation_constraints": policy.constraints,
                             "allowed_definitions": definitions,
-                            "required_agent_profile": match &decision.controller {
-                                NpcControllerKind::Agent(profile_id) => Some(profile_id),
-                                _ => None,
-                            }
                         }),
                         self.runner
                             .definitions()
@@ -878,6 +876,7 @@ impl GameRuntime {
                                     .context_projection
                                     .max_context_tokens,
                                 cancellation: &self.cancellation,
+                                completion: TurnCompletion::AfterSuccessfulTool,
                             },
                             |progress| {
                                 publish_tool_progress(tool_activity, progress, on_progress);
@@ -889,16 +888,15 @@ impl GameRuntime {
                         self.config.orchestration_budget,
                         started,
                     )?;
-                    let draft = match require_text(&generation) {
-                        Ok(_) => {
-                            let mut drafts = self.executor.take_pending_npc_drafts().await;
-                            if drafts.len() == 1 {
-                                drafts.pop().expect("one draft was checked above")
+                    let draft = match require_completed(&generation) {
+                        Ok(()) => {
+                            if let Some(draft) = self.executor.take_pending_npc_draft().await {
+                                draft
                             } else {
                                 outcomes.push(NpcMaterializationResult::rejected(
                                     pending,
                                     self.service.revision().await,
-                                    "invalid_npc_draft",
+                                    "missing_npc_draft",
                                 ));
                                 continue;
                             }
@@ -929,14 +927,6 @@ impl GameRuntime {
                         NpcControllerKind::Agent(profile_id) => Some(profile_id),
                         _ => None,
                     };
-                    if draft.agent_profile.as_ref() != required_profile {
-                        outcomes.push(NpcMaterializationResult::rejected(
-                            pending,
-                            self.service.revision().await,
-                            "generated_agent_profile_mismatch",
-                        ));
-                        continue;
-                    }
                     let (controller, _) = controller(&decision.controller);
                     let lifetime = lifetime(decision.lifetime, scene_id)?;
                     let materialization = CharacterMaterializationRequest {
@@ -1280,7 +1270,7 @@ fn narrator_request(
     let mut messages = vec![Message::new(
         Role::System,
         vec![ContentPart::text(
-            "Player input goes only to the narrator. Use native tools for every structured decision or world change. request_npc_turn accepts only an actor_id marked npc_turn_available in the current observation plus a natural-language assignment; scene and revision are supplied by the runtime. create_npc accepts only source, lifetime and mode; after creation the runtime replans with the committed actor before any NPC turn. Pure narrative mentions need no tool. When scene transition tools are offered, call list_scene_transitions first and copy one returned target exactly; never invent a scene ID, retry an unchanged rejection, or narrate arrival before a committed transition result. If no scene target matches, explain that the destination is unavailable in current world content. When submit_npc_draft is offered, submit exactly one NPC through that tool rather than returning draft data in text. Return only natural-language prose in the response body; never return JSON or a structured control envelope. Never expose tool failures or internal orchestration in player-facing prose. NPC claims are not committed facts; only committed events are world facts.",
+            "Player input goes only to the narrator. Use native tools for every structured decision or world change. request_npc_turn accepts only an actor_id marked npc_turn_available in the current observation plus a natural-language assignment; scene and revision are supplied by the runtime. create_npc accepts only source, lifetime and mode; after creation the runtime replans with the committed actor before any NPC turn. Pure narrative mentions need no tool. When scene transition tools are offered, call list_scene_transitions first and copy one returned target exactly; never invent a scene ID, retry an unchanged rejection, or narrate arrival before a committed transition result. If no scene target matches, explain that the destination is unavailable in current world content. When submit_npc_draft is offered, that tool is the entire task: submit one NPC, omit empty optional collections, and do not add prose or control fields. Return only natural-language prose in other response bodies; never return JSON or a structured control envelope. Never expose tool failures or internal orchestration in player-facing prose. NPC claims are not committed facts; only committed events are world facts.",
         )],
     )];
     messages.extend(
@@ -1298,13 +1288,18 @@ fn narrator_request(
 }
 
 fn require_text(outcome: &TurnOutcome) -> Result<String, RuntimeError> {
+    require_completed(outcome)?;
+    outcome
+        .final_text
+        .clone()
+        .ok_or(RuntimeError::ModelProtocol {
+            stage: "missing_text",
+        })
+}
+
+fn require_completed(outcome: &TurnOutcome) -> Result<(), RuntimeError> {
     match outcome.status {
-        TurnStatus::Completed => outcome
-            .final_text
-            .clone()
-            .ok_or(RuntimeError::ModelProtocol {
-                stage: "missing_text",
-            }),
+        TurnStatus::Completed => Ok(()),
         TurnStatus::Cancelled => Err(RuntimeError::Cancelled),
         TurnStatus::BudgetExhausted(reason) => Err(RuntimeError::Budget(reason)),
         TurnStatus::Failed(_) => match outcome.failure.clone() {

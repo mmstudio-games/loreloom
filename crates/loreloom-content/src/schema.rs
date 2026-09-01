@@ -540,15 +540,13 @@ pub struct CharacterDefinition {
     pub spawn_constraints: SpawnConstraints,
 }
 
-/// Untrusted model output for a generated NPC. Capability and constraints always come from the
-/// separately trusted [`GenerationPolicy`].
+/// Untrusted model output for a generated NPC. Agent binding, capability, and constraints always
+/// come from the separately trusted [`GenerationPolicy`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NpcDraft {
     pub display_name: DisplayName,
     pub profile: CharacterProfile,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub agent_profile: Option<ContentDefinitionId>,
     pub base_attributes: BaseAttributes,
     pub resources: Vec<InitialResource>,
     pub conditions: Vec<InitialCondition>,

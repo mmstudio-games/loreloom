@@ -20,6 +20,6 @@ pub use protocol::{
     NpcTurnResult, NpcTurnStatus,
 };
 pub use runner::{
-    AgentRunner, AgentToolContext, ToolCallOutcome, ToolCallProgress, TurnFailureStage,
-    TurnInvocation, TurnOutcome, TurnStatus,
+    AgentRunner, AgentToolContext, ToolCallOutcome, ToolCallProgress, TurnCompletion,
+    TurnFailureStage, TurnInvocation, TurnOutcome, TurnStatus,
 };

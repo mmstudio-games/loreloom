@@ -83,7 +83,7 @@ OPEN 项、后续 RFC 或 P0 Spike；空 crate 不代表相关协议已经实现
   Preset/Generated 两阶段物化与重规划；
 - [x] 把默认 GenerationPolicy 与生成用 AgentProfile 移入根世界锁定内容，由 Runtime 注入当前
   Scene/Place，移除产品 Provider 配置中的世界生成策略；
-- [ ] 收敛 `npc_generation` 为首次成功 `submit_npc_draft` 即结束的单用途 Tool stage，移除 Draft
+- [x] 收敛 `npc_generation` 为首次成功 `submit_npc_draft` 即结束的单用途 Tool stage，移除 Draft
   wire 和模型 payload 中的 AgentProfile/GenerationPolicyId，允许省略空集合，并以不回显参数的
   字段类别诊断替代笼统 `invalid_input`；
 - [x] 把 `request_npc_turn` 压平为 ActorId + assignment，在 Observation 投影
@@ -124,5 +124,5 @@ OPEN 项、后续 RFC 或 P0 Spike；空 crate 不代表相关协议已经实现
 - [x] 从启用编译候选和未启用目录检查生成非持久化 `PackageContentView`，在 Mods overlay 展示每个
   Mod 的顶层 Definition 总数/分类以及 Prompt/Patch 数量，并覆盖 enabled 优先合并和滚动边界；
 - [x] 完成 Active Spec 第 17 节实施审计：除显式 `UPSTREAM-GATED` 的第 47 条和上述分发许可选择外，
-  其余验收均有自动化或可复现证据；当前门禁为 171 tests passed，目录根世界的创建、锁分离、
+  其余验收均有自动化或可复现证据；当前门禁为 174 tests passed，目录根世界的创建、锁分离、
   Prompt 注入与存档内容锁重开拒绝均有确定性测试。macOS arm64 release 基线仍为 81.2 MiB。

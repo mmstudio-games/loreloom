@@ -460,10 +460,17 @@ impl DefinitionRegistry {
     ) -> Result<CharacterSpawnSpec, ContentError> {
         validate_draft_references(&self.definitions, policy, draft)?;
         validate_draft_budget(policy, draft)?;
-        let agent_binding = match (request.controller, &draft.agent_profile) {
-            (CharacterController::Agent, Some(profile_id))
-                if policy.allowed_agent_profiles.contains(profile_id) =>
-            {
+        let agent_binding = match request.controller {
+            CharacterController::Agent => {
+                let profile_id = policy
+                    .allowed_agent_profiles
+                    .iter()
+                    .next()
+                    .filter(|_| policy.allowed_agent_profiles.len() == 1)
+                    .ok_or_else(|| ContentError::CompileCharacter {
+                        id: policy.id.clone(),
+                        reason: "GenerationPolicy must select exactly one AgentProfile",
+                    })?;
                 let Some(Definition::AgentProfile(profile)) = self
                     .definitions
                     .get(profile_id)
@@ -480,13 +487,7 @@ impl DefinitionRegistry {
                     autonomy: profile.autonomy,
                 })
             }
-            (CharacterController::Agent, _) => {
-                return Err(ContentError::CompileCharacter {
-                    id: policy.id.clone(),
-                    reason: "draft Agent controller is not allowed by GenerationPolicy",
-                });
-            }
-            (_, _) => None,
+            _ => None,
         };
         let resources = draft
             .resources
@@ -585,9 +586,6 @@ fn validate_draft_references(
     policy: &GenerationPolicy,
     draft: &NpcDraft,
 ) -> Result<(), ContentError> {
-    if let Some(agent_profile) = &draft.agent_profile {
-        require_kind(definitions, &policy.id, agent_profile, "agent_profile")?;
-    }
     for agent_profile in &policy.allowed_agent_profiles {
         require_kind(definitions, &policy.id, agent_profile, "agent_profile")?;
     }

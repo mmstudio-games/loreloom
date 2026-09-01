@@ -324,7 +324,6 @@ fn runtime_draft_uses_trusted_generation_policy_and_same_spawn_spec() {
     let draft = NpcDraft {
         display_name: name("Generated Mara"),
         profile: character.profile.clone(),
-        agent_profile: character.agent_profile.clone(),
         base_attributes: character.base_attributes.clone(),
         resources: character.resources.clone(),
         conditions: character.conditions.clone(),
@@ -365,6 +364,12 @@ fn runtime_draft_uses_trusted_generation_policy_and_same_spawn_spec() {
         .compile_draft(&draft, &policy, request.clone())
         .expect("compile generated draft");
     assert_eq!(spec.display_name.as_str(), "Generated Mara");
+    assert_eq!(
+        spec.agent_binding
+            .as_ref()
+            .map(|binding| &binding.profile_id),
+        character.agent_profile.as_ref()
+    );
     assert!(matches!(
         spec.origin,
         loreloom_core::EntityOrigin::Generated { .. }
