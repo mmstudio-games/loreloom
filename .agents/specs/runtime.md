@@ -1806,31 +1806,33 @@ Runtime 配置必须同时形成单个 Agent Turn 与完整 PlayerInput 编排�
 
 | Agent Turn 字段 | 默认值 |
 |---|---:|
-| `max_model_calls` | 8 |
-| `max_tool_calls` | 16 |
-| `max_input_tokens` | 131,072 |
-| `max_output_tokens` | 16,384 |
-| `max_total_tokens` | 147,456 |
-| `max_model_output_bytes` | 262,144 |
-| `max_elapsed_ms` | 180,000 |
+| `max_model_calls` | 16 |
+| `max_tool_calls` | 64 |
+| `max_input_tokens` | 524,288 |
+| `max_output_tokens` | 32,768 |
+| `max_total_tokens` | 557,056 |
+| `max_model_output_bytes` | 1,048,576 |
+| `max_elapsed_ms` | 600,000 |
 | `require_reported_tokens` | false |
 
 | PlayerInput 编排字段 | 默认值 |
 |---|---:|
-| `max_started_agent_turns` | 24 |
-| `max_orchestration_rounds` | 4 |
-| `max_model_calls` | 64 |
-| `max_tool_calls` | 128 |
-| `max_input_tokens` | 1,048,576 |
-| `max_output_tokens` | 131,072 |
-| `max_total_tokens` | 1,179,648 |
-| `max_model_output_bytes` | 2,097,152 |
-| `max_elapsed_ms` | 900,000 |
+| `max_started_agent_turns` | 48 |
+| `max_orchestration_rounds` | 8 |
+| `max_model_calls` | 128 |
+| `max_tool_calls` | 512 |
+| `max_input_tokens` | 4,194,304 |
+| `max_output_tokens` | 524,288 |
+| `max_total_tokens` | 4,718,592 |
+| `max_model_output_bytes` | 8,388,608 |
+| `max_elapsed_ms` | 1,800,000 |
 | `require_reported_tokens` | false |
 
 `max_started_agent_turns` 统计每个 Narrator Turn、每个实际启动的 NPC Turn 与 generation Turn；
 未启动即 stale、取消或预算拒绝的 Request 不消耗 started turn，但仍产生结果。NpcTurnRequest 数量
 不另设固定常量，实际可执行量自然受 started turn、Model/Tool/Token/time 与轮次预算共同约束。
+默认档按单 Turn 最多 16 次 Model continuation、每次最多 32,768 input context token 的累计上界设置
+input budget；它是防失控上限而非目标消耗量，模型可随时以正文完成 Turn，玩家也可随时取消。
 
 配置来源为 Runtime 全局、World/Save 与 Agent Profile。每轮开始时生成不可变 effective budget：
 每个数值字段取所有适用层中最小值，`require_reported_tokens` 使用逻辑 OR；缺失层不扩大已存在上限。

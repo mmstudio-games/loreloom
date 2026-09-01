@@ -72,6 +72,8 @@ OPEN 项、后续 RFC 或 P0 Spike；空 crate 不代表相关协议已经实现
   Save/Session Parameter 语义和通用 Tool；
 - [x] 实现外部 Provider、严格非敏感 TOML、Environment/File Secret source、endpoint allowlist 与
   Runtime/Rule/TUI budget；生产二进制要求 Provider 配置，Mock Bridge 只存在于测试；
+- [ ] 提高单 Agent Turn 与完整 PlayerInput 编排的默认 Model/Tool/Token/时间预算，保证默认档支持
+  多次 Tool continuation 和多轮 Narrator/NPC 调度，并让 Rust 默认值与示例配置保持一致；
 - [x] 实现 Condition periodic/expiry scheduler、同 tick periodic-first、target Effect 与原子 Rule
   cascade；
 - [x] 实现 confirmed KnownFact 驱动的 Condition 诊断投影，未诊断视图不得包含真实名称；
