@@ -10,6 +10,11 @@ pub enum NarrowPage {
     Story,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TuiOverlay {
+    Mods,
+}
+
 impl NarrowPage {
     pub fn toggle(&mut self) {
         *self = match self {
@@ -51,10 +56,14 @@ pub struct TuiApp {
     pub snapshot: UiSnapshot,
     pub editor: InputEditor,
     pub narrow_page: NarrowPage,
+    pub overlay: Option<TuiOverlay>,
     /// Visual rows above the latest visible transcript position.
     pub transcript_scroll: u16,
     pub transcript_scroll_max: u16,
     pub transcript_page_rows: u16,
+    pub mods_scroll: u16,
+    pub mods_scroll_max: u16,
+    pub mods_page_rows: u16,
     pub working_phase: Option<RuntimePhase>,
     pub spinner_frame: u8,
     pending_submission: Option<PendingSubmission>,
@@ -74,9 +83,13 @@ impl TuiApp {
             snapshot,
             editor: InputEditor::default(),
             narrow_page: NarrowPage::Story,
+            overlay: None,
             transcript_scroll: 0,
             transcript_scroll_max: 0,
             transcript_page_rows: 1,
+            mods_scroll: 0,
+            mods_scroll_max: 0,
+            mods_page_rows: 1,
             working_phase: None,
             spinner_frame: 0,
             pending_submission: None,
@@ -208,15 +221,71 @@ impl TuiApp {
         self.transcript_scroll_max
             .saturating_sub(self.transcript_scroll)
     }
+
+    pub fn toggle_mods_overlay(&mut self) {
+        if self.overlay == Some(TuiOverlay::Mods) {
+            self.overlay = None;
+        } else {
+            self.overlay = Some(TuiOverlay::Mods);
+            self.mods_scroll = 0;
+        }
+    }
+
+    pub fn close_overlay(&mut self) {
+        self.overlay = None;
+    }
+
+    pub fn scroll_mods_up_lines(&mut self, rows: u16) {
+        self.mods_scroll = self.mods_scroll.saturating_sub(rows);
+    }
+
+    pub fn scroll_mods_down_lines(&mut self, rows: u16) {
+        self.mods_scroll = self
+            .mods_scroll
+            .saturating_add(rows)
+            .min(self.mods_scroll_max);
+    }
+
+    pub(crate) fn update_mods_layout(&mut self, maximum: u16, page_rows: u16) {
+        self.mods_scroll_max = maximum;
+        self.mods_page_rows = page_rows.max(1);
+        self.mods_scroll = self.mods_scroll.min(maximum);
+    }
 }
 
 pub fn handle_key(app: &mut TuiApp, key: KeyEvent) -> Option<UiIntent> {
     if !matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
         return None;
     }
+    if matches!(key.code, KeyCode::Char('c')) && key.modifiers.contains(KeyModifiers::CONTROL) {
+        return Some(UiIntent::Quit);
+    }
+    if app.overlay == Some(TuiOverlay::Mods) {
+        match (key.code, key.modifiers) {
+            (KeyCode::Esc | KeyCode::F(2), _) => app.close_overlay(),
+            (KeyCode::Char('m' | 'M'), modifiers) if modifiers.contains(KeyModifiers::ALT) => {
+                app.close_overlay();
+            }
+            (KeyCode::Up, _) => app.scroll_mods_up_lines(1),
+            (KeyCode::Down, _) => app.scroll_mods_down_lines(1),
+            (KeyCode::PageUp, _) => {
+                app.scroll_mods_up_lines(app.mods_page_rows.saturating_sub(1).max(1));
+            }
+            (KeyCode::PageDown, _) => {
+                app.scroll_mods_down_lines(app.mods_page_rows.saturating_sub(1).max(1));
+            }
+            _ => {}
+        }
+        return None;
+    }
     match (key.code, key.modifiers) {
-        (KeyCode::Char('c'), modifiers) if modifiers.contains(KeyModifiers::CONTROL) => {
-            Some(UiIntent::Quit)
+        (KeyCode::F(2), _) => {
+            app.toggle_mods_overlay();
+            None
+        }
+        (KeyCode::Char('m' | 'M'), modifiers) if modifiers.contains(KeyModifiers::ALT) => {
+            app.toggle_mods_overlay();
+            None
         }
         (KeyCode::Enter, modifiers) if modifiers.contains(KeyModifiers::ALT) => {
             let _ = app.editor.insert("\n");
@@ -294,6 +363,14 @@ pub fn handle_key(app: &mut TuiApp, key: KeyEvent) -> Option<UiIntent> {
 
 pub fn handle_mouse(app: &mut TuiApp, mouse: MouseEvent) {
     const WHEEL_ROWS: u16 = 3;
+    if app.overlay == Some(TuiOverlay::Mods) {
+        match mouse.kind {
+            MouseEventKind::ScrollUp => app.scroll_mods_up_lines(WHEEL_ROWS),
+            MouseEventKind::ScrollDown => app.scroll_mods_down_lines(WHEEL_ROWS),
+            _ => {}
+        }
+        return;
+    }
     match mouse.kind {
         MouseEventKind::ScrollUp => app.scroll_up_lines(WHEEL_ROWS),
         MouseEventKind::ScrollDown => app.scroll_down_lines(WHEEL_ROWS),
@@ -302,5 +379,9 @@ pub fn handle_mouse(app: &mut TuiApp, mouse: MouseEvent) {
 }
 
 pub fn handle_paste(app: &mut TuiApp, text: &str) -> Result<(), EditorError> {
-    app.editor.insert(text)
+    if app.overlay.is_none() {
+        app.editor.insert(text)
+    } else {
+        Ok(())
+    }
 }

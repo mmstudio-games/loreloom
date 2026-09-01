@@ -15,4 +15,4 @@
  Hands tremble.        │ │› Look closer▏                                      │
                        │ │                                                    │
                        │ ╰────────────────────────────────────────────────────╯
- Narrator is thinking  ·  rev 7  ·  Esc cancel  ·  PgUp/PgDn scroll  ·  ^C quit
+    Narrator is thinking · r7 · Alt+M Mods · Esc cancel · PgUp/PgDn · ^C quit

@@ -15,4 +15,4 @@
  │› Look closer▏                              │
  │                                            │
  ╰────────────────────────────────────────────╯
-    working  ·  rev 7 · Tab · PgUp/PgDn · ^C
+  working · r7 · Tab · F2 Mods · PgUp/PgDn · ^C

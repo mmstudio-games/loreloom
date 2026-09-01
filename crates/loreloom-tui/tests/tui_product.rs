@@ -9,14 +9,15 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKi
 use loreloom_core::{
     ActionState, ActorId, AttributeView, CharacterContext, CharacterProfile, ConditionRecord,
     ConditionSource, ConditionView, DisplayName, EntityOrigin, Fixed, LifeState, LongText, ModId,
-    NoticeKind, ObjectId, PackageCatalogView, Posture, Revision, RuntimePhase, SceneContext,
-    SessionId, ShortText, ToolActivity, ToolActivityState, TranscriptItemId, TranscriptItemRecord,
-    TranscriptSpeaker, TranscriptState, TranscriptWindow, UiNotice, UiSnapshot, WorldPackageView,
-    WorldTime,
+    ModPackageStatus, ModPackageView, NoticeKind, ObjectId, PackageCatalogView, Posture, Revision,
+    RuntimePhase, SceneContext, SessionId, ShortText, ToolActivity, ToolActivityState,
+    TranscriptItemId, TranscriptItemRecord, TranscriptSpeaker, TranscriptState, TranscriptWindow,
+    UiNotice, UiSnapshot, WorldPackageView, WorldTime,
 };
 use loreloom_tui::{
     EditorError, InputEditor, MAX_INPUT_BYTES, NarrowPage, RuntimeUiEvent, TerminalOps,
-    TerminalSession, TuiApp, UiIntent, handle_key, handle_mouse, render_ui,
+    TerminalSession, TuiApp, TuiOverlay, UiIntent, handle_key, handle_mouse, handle_paste,
+    render_ui,
 };
 use ratatui::{Terminal, backend::TestBackend, buffer::Buffer};
 
@@ -117,8 +118,21 @@ fn snapshot() -> UiSnapshot {
                 world_id: ModId::parse("games.loreloom.demo").expect("world ID"),
                 version: "1.0.0".parse().expect("world version"),
             },
-            mods: Vec::new(),
-            unavailable_installed: 0,
+            mods: vec![
+                ModPackageView {
+                    mod_id: ModId::parse("games.loreloom.weather").expect("enabled Mod ID"),
+                    version: "1.2.0".parse().expect("enabled Mod version"),
+                    status: ModPackageStatus::Enabled,
+                    dependency_count: 1,
+                },
+                ModPackageView {
+                    mod_id: ModId::parse("games.loreloom.characters").expect("installed Mod ID"),
+                    version: "2.0.0".parse().expect("installed Mod version"),
+                    status: ModPackageStatus::Installed,
+                    dependency_count: 0,
+                },
+            ],
+            unavailable_installed: 1,
         },
         transcript: TranscriptWindow {
             items: vec![
@@ -560,6 +574,87 @@ fn key_mapping_emits_ui_intents_without_constructing_world_commands() {
         ),
         Some(UiIntent::Quit)
     );
+}
+
+#[test]
+fn mods_overlay_is_read_only_scrollable_and_does_not_steal_plain_input() {
+    let mut app = sample_app();
+    app.working_phase = None;
+    let original_editor = app.editor.clone();
+    assert_eq!(
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('m'), KeyModifiers::ALT)
+        ),
+        None
+    );
+    assert_eq!(app.overlay, Some(TuiOverlay::Mods));
+    let overlay = text_snapshot(render_mut(&mut app, 80, 22).backend().buffer());
+    assert!(overlay.contains("MODS · Alt+M / F2 / Esc close"));
+    assert!(overlay.contains("games.loreloom.demo"));
+    assert!(overlay.contains("ENABLED (1)"));
+    assert!(overlay.contains("games.loreloom.weather"));
+    assert!(overlay.contains("INSTALLED, NOT ENABLED (1)"));
+    assert!(overlay.contains("games.loreloom.characters"));
+    assert!(overlay.contains("1 installed candidate(s) unavailable"));
+    assert!(!overlay.contains("content_hash"));
+
+    handle_key(
+        &mut app,
+        KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE),
+    );
+    handle_paste(&mut app, "must not enter the editor").expect("ignored overlay paste");
+    assert_eq!(app.editor, original_editor);
+    app.snapshot.can_cancel = true;
+    assert_eq!(
+        handle_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+        None
+    );
+    assert_eq!(app.overlay, None);
+
+    handle_key(&mut app, KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE));
+    assert_eq!(app.overlay, Some(TuiOverlay::Mods));
+    handle_key(&mut app, KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE));
+    assert_eq!(app.overlay, None);
+
+    handle_key(
+        &mut app,
+        KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE),
+    );
+    assert!(app.editor.text().ends_with('m'));
+}
+
+#[test]
+fn mods_overlay_uses_independent_keyboard_and_mouse_scroll() {
+    let mut app = sample_app();
+    for index in 0..20 {
+        app.snapshot.packages.mods.push(ModPackageView {
+            mod_id: ModId::parse(format!("games.loreloom.extra-{index:02}")).expect("extra Mod ID"),
+            version: "1.0.0".parse().expect("extra Mod version"),
+            status: ModPackageStatus::Installed,
+            dependency_count: 0,
+        });
+    }
+    app.toggle_mods_overlay();
+    let transcript_scroll = app.transcript_scroll;
+    let first = text_snapshot(render_mut(&mut app, 60, 14).backend().buffer());
+    assert!(first.contains("games.loreloom.demo"));
+    assert!(app.mods_scroll_max > 0);
+
+    handle_key(
+        &mut app,
+        KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE),
+    );
+    assert!(app.mods_scroll > 0);
+    let keyboard_scroll = app.mods_scroll;
+    handle_mouse(&mut app, wheel(MouseEventKind::ScrollDown));
+    assert!(app.mods_scroll >= keyboard_scroll);
+    assert_eq!(app.transcript_scroll, transcript_scroll);
+    let later = text_snapshot(render_mut(&mut app, 60, 14).backend().buffer());
+    assert_ne!(first, later);
+
+    handle_mouse(&mut app, wheel(MouseEventKind::ScrollUp));
+    assert!(app.mods_scroll <= keyboard_scroll);
 }
 
 #[test]

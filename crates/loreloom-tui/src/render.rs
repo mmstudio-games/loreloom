@@ -1,16 +1,17 @@
 use loreloom_core::{
-    ActionState, Fixed, LifeState, NoticeKind, ParameterValue, Posture, RuntimePhase, ToolActivity,
-    ToolActivityState, TranscriptSpeaker, TranscriptState, UiSnapshot, WorldTime,
+    ActionState, Fixed, LifeState, ModPackageStatus, NoticeKind, ParameterValue, Posture,
+    RuntimePhase, ToolActivity, ToolActivityState, TranscriptSpeaker, TranscriptState, UiSnapshot,
+    WorldTime,
 };
 use ratatui::{
     Frame,
     layout::{Alignment, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, BorderType, Borders, Paragraph, Wrap},
+    widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap},
 };
 
-use crate::{NarrowPage, TuiApp};
+use crate::{NarrowPage, TuiApp, TuiOverlay};
 
 pub const WIDE_LAYOUT_MINIMUM: u16 = 80;
 
@@ -56,6 +57,9 @@ pub(crate) fn render_ui_with_state_width(
         render_narrow(frame, app, main);
     }
     render_footer(frame, app, footer, area.width < WIDE_LAYOUT_MINIMUM);
+    if app.overlay == Some(TuiOverlay::Mods) {
+        render_mods_overlay(frame, app, area);
+    }
 }
 
 fn render_header(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
@@ -569,11 +573,11 @@ fn render_footer(frame: &mut Frame<'_>, app: &TuiApp, area: Rect, narrow: bool) 
         return;
     }
     let help = if narrow {
-        " · Tab · PgUp/PgDn · ^C"
+        " · Tab · F2 Mods · PgUp/PgDn · ^C"
     } else if app.can_cancel() {
-        "  ·  Esc cancel  ·  PgUp/PgDn scroll  ·  ^C quit"
+        " · Alt+M Mods · Esc cancel · PgUp/PgDn · ^C quit"
     } else {
-        "  ·  Enter send  ·  Alt+Enter newline  ·  PgUp/PgDn scroll  ·  ^C quit"
+        " · Alt+M Mods · Enter send · Alt+Enter newline · ^C quit"
     };
     frame.render_widget(
         Paragraph::new(Line::from(vec![
@@ -590,7 +594,7 @@ fn render_footer(frame: &mut Frame<'_>, app: &TuiApp, area: Rect, narrow: bool) 
                 }),
             ),
             Span::styled(
-                format!("  ·  rev {}", app.snapshot.revision),
+                format!(" · r{}", app.snapshot.revision),
                 Style::default().fg(MUTED),
             ),
             Span::styled(help, Style::default().fg(MUTED)),
@@ -598,6 +602,151 @@ fn render_footer(frame: &mut Frame<'_>, app: &TuiApp, area: Rect, narrow: bool) 
         .alignment(Alignment::Center),
         area,
     );
+}
+
+fn render_mods_overlay(frame: &mut Frame<'_>, app: &mut TuiApp, area: Rect) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let overlay = centered_overlay(area, 76, 30);
+    let block = Block::default()
+        .title(Span::styled(
+            " MODS · Alt+M / F2 / Esc close · ↑/↓ scroll ",
+            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+        ))
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(ACCENT));
+    let body = block.inner(overlay);
+    let catalog = &app.snapshot.packages;
+    let enabled = catalog
+        .mods
+        .iter()
+        .filter(|package| package.status == ModPackageStatus::Enabled)
+        .collect::<Vec<_>>();
+    let installed = catalog
+        .mods
+        .iter()
+        .filter(|package| package.status == ModPackageStatus::Installed)
+        .collect::<Vec<_>>();
+    let mut lines = vec![
+        Line::from(Span::styled(
+            "WORLD",
+            Style::default().fg(MUTED).add_modifier(Modifier::BOLD),
+        )),
+        Line::from(vec![
+            Span::styled("◆ ", Style::default().fg(ACCENT)),
+            Span::styled(
+                catalog.world.world_id.to_string(),
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
+        ]),
+        Line::from(Span::styled(
+            format!("  v{} · main world", catalog.world.version),
+            Style::default().fg(MUTED),
+        )),
+        Line::from(""),
+        Line::from(Span::styled(
+            format!("ENABLED ({})", enabled.len()),
+            Style::default().fg(MUTED).add_modifier(Modifier::BOLD),
+        )),
+    ];
+    if enabled.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "No enabled extension Mods.",
+            Style::default().fg(MUTED),
+        )));
+    } else {
+        for package in enabled {
+            push_mod_package(&mut lines, package, true);
+        }
+    }
+    lines.extend([
+        Line::from(""),
+        Line::from(Span::styled(
+            format!("INSTALLED, NOT ENABLED ({})", installed.len()),
+            Style::default().fg(MUTED).add_modifier(Modifier::BOLD),
+        )),
+    ]);
+    if installed.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "No valid inactive Mods found in mods/.",
+            Style::default().fg(MUTED),
+        )));
+    } else {
+        for package in installed {
+            push_mod_package(&mut lines, package, false);
+        }
+    }
+    if catalog.unavailable_installed > 0 {
+        lines.extend([
+            Line::from(""),
+            Line::from(vec![
+                Span::styled("! ", Style::default().fg(Color::Yellow)),
+                Span::styled(
+                    format!(
+                        "{} installed candidate(s) unavailable",
+                        catalog.unavailable_installed
+                    ),
+                    Style::default().fg(Color::Yellow),
+                ),
+            ]),
+        ]);
+    }
+    let maximum = lines.len().saturating_sub(usize::from(body.height));
+    app.update_mods_layout(u16::try_from(maximum).unwrap_or(u16::MAX), body.height);
+    frame.render_widget(Clear, overlay);
+    frame.render_widget(block, overlay);
+    frame.render_widget(Paragraph::new(lines).scroll((app.mods_scroll, 0)), body);
+}
+
+fn push_mod_package(
+    lines: &mut Vec<Line<'static>>,
+    package: &loreloom_core::ModPackageView,
+    enabled: bool,
+) {
+    lines.push(Line::from(vec![
+        Span::styled(
+            if enabled { "● " } else { "○ " },
+            Style::default().fg(if enabled { Color::Green } else { ACCENT }),
+        ),
+        Span::styled(
+            package.mod_id.to_string(),
+            Style::default().add_modifier(Modifier::BOLD),
+        ),
+    ]));
+    let dependency_label = if package.dependency_count == 1 {
+        "dependency"
+    } else {
+        "dependencies"
+    };
+    lines.push(Line::from(Span::styled(
+        format!(
+            "  v{} · {} {}",
+            package.version, package.dependency_count, dependency_label
+        ),
+        Style::default().fg(MUTED),
+    )));
+}
+
+fn centered_overlay(area: Rect, maximum_width: u16, maximum_height: u16) -> Rect {
+    let width = if area.width > 4 {
+        area.width.saturating_sub(4).min(maximum_width)
+    } else {
+        area.width
+    };
+    let height = if area.height > 2 {
+        area.height.saturating_sub(2).min(maximum_height)
+    } else {
+        area.height
+    };
+    Rect::new(
+        area.x.saturating_add(area.width.saturating_sub(width) / 2),
+        area.y
+            .saturating_add(area.height.saturating_sub(height) / 2),
+        width,
+        height,
+    )
 }
 
 fn push_tool_activity(lines: &mut Vec<Line<'static>>, activity: &[ToolActivity]) {
