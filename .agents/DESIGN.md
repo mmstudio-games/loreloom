@@ -221,7 +221,8 @@ Loreloom Runtime ───────────────► Persistence
     `ActorId` 的内部 `NarratorPlan`；Scene 与 Revision 来自 ToolContext 和当前 World，不能由模型
     提交。Observation 对当前可调度角色显式投影 `npc_turn_available`，同一 Revision 中使用该
     ActorId 的请求不得再被隐藏条件拒绝。Narrator 调用 `create_npc` 请求 Preset/Generated NPC 时，
-    当前 Turn 先结束，Runtime 才能串行完成
+    第一个成功 ToolResult 直接结束当前 Turn，且同一模型响应中排在它之后的 ToolCall 不再执行；
+    Runtime 随即串行完成
     编译或 `npc_generation`、经统一 `CharacterSpawnSpec -> SpawnCharacter` 路径提交；随后 Runtime
     在同一次玩家输入中把物化结果和更新后的 Scene Observation 交给 Narrator。Narrator 看过完整
     角色投影后才能为其调用 `request_npc_turn`；内部物化状态、Place、GenerationPolicy、AgentProfile、

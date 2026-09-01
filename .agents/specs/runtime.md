@@ -992,9 +992,12 @@ ToolCall 的顺序向内部 NarratorPlan 追加请求；只有 Narrator Turn 完
 
 `create_npc` 同样是 Orchestration Tool，而不是在 Narrator Turn 内同步生成角色的 Command Tool。
 它只校验并暂存模型提供的 source/lifetime/mode；Preset 编译、`npc_generation` Agent Turn 与最终
-`SpawnCharacter` Command 都必须等当前 Narrator Turn 完成并释放唯一执行槽后开始。Scene、Place、
-GenerationPolicy 与 AgentProfile 由 Runtime 注入。ToolResult 只能表示请求已进入本轮待处理队列，
-不能在角色提交前返回成功的 ActorId。
+`SpawnCharacter` Command 都必须等当前 Narrator Turn 释放唯一执行槽后开始。第一个成功的
+`create_npc` ToolResult 是 Turn barrier：AgentRunner 不再向 Provider 请求自然语言收尾，也不执行
+同一 Assistant response 中排在其后的 ToolCall；Runtime 随即处理该唯一创建请求并基于提交后的
+Observation 重新调用 Narrator。Scene、Place、GenerationPolicy 与 AgentProfile 由 Runtime 注入。
+ToolResult 只能表示请求已进入本轮待处理队列，不能在角色提交前返回成功的 ActorId。被拒绝的
+`create_npc` 不触发 barrier，仍允许模型在剩余预算内修正。
 
 `npc_generation` 是单用途 Tool stage，只提供 `submit_npc_draft`。第一个成功的 Draft ToolResult
 直接完成该 stage，Runtime 不再要求或调用模型生成一个随后会被丢弃的自然语言收尾；只有 Draft
@@ -1040,7 +1043,7 @@ Narrator 可以使用：
 
 | 分类 | Tool 候选 | 责任 |
 |---|---|---|
-| Orchestration | `create_npc` | 暂存 Preset/Generated source、Scene/Persistent lifetime 与 narrated/agent mode，待当前 Narrator Turn 结束后物化 |
+| Orchestration | `create_npc` | 暂存 Preset/Generated source、Scene/Persistent lifetime 与 narrated/agent mode；成功即结束当前 Turn，并立即进入物化与重规划 |
 | Command | `promote_npc` | 请求把已有 Scene-owned NPC 提升为世界级角色 |
 | Orchestration | `request_npc_turn` | 请求 Runtime 为已有 AgentBinding NPC 追加一次 Turn |
 | Query | `list_scene_transitions` | 返回当前 Scene 与当前 Revision 可用的 canonical Scene 切换目标 |
@@ -1496,8 +1499,10 @@ Model/Token/byte/time 预算，不新增 generator Provider 配置。
 
 Preset/Generated 使用统一、质量优先的两阶段编排：
 
-1. Narrator 在当前 Turn 中调用 `create_npc`；Tool 只把合法请求加入 Runtime 临时队列；
-2. Narrator Turn 先结束并释放唯一 Agent 执行槽；只要队列非空就先处理创建并再次调用 Narrator；
+1. Narrator 在当前 Turn 中调用 `create_npc`；Tool 只把合法请求加入 Runtime 临时队列，并以成功
+   ToolResult 直接结束当前 Turn；
+2. AgentRunner 不请求无用的自然语言收尾，也不执行同一响应内后续 ToolCall；Runtime 释放唯一
+   Agent 执行槽后立即处理创建并再次调用 Narrator；
 3. Runtime 按 ToolCall 顺序处理队列，注入当前 Scene/Place。Preset 使用 `compile_character`；
    Generated 启动独立 `npc_generation` Turn，再用锁定 GenerationPolicy 调用 `compile_draft`；
 4. 两种来源都只通过 `CharacterSpawnSpec -> SpawnCharacter` 提交，并从 committed
