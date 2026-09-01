@@ -222,6 +222,51 @@ pub enum ModPackageStatus {
     Installed,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PackageContentView {
+    pub characters: u32,
+    pub scenes: u32,
+    pub places: u32,
+    pub items: u32,
+    pub skills: u32,
+    pub conditions: u32,
+    pub events: u32,
+    pub gameplay_actions: u32,
+    pub rules: u32,
+    pub parameters: u32,
+    pub support_definitions: u32,
+    pub narrator_prompts: u32,
+    pub npc_prompts: u32,
+    pub patches: u32,
+}
+
+impl PackageContentView {
+    #[must_use]
+    pub fn definition_count(&self) -> u32 {
+        [
+            self.characters,
+            self.scenes,
+            self.places,
+            self.items,
+            self.skills,
+            self.conditions,
+            self.events,
+            self.gameplay_actions,
+            self.rules,
+            self.parameters,
+            self.support_definitions,
+        ]
+        .into_iter()
+        .fold(0_u32, u32::saturating_add)
+    }
+
+    #[must_use]
+    pub fn prompt_count(&self) -> u32 {
+        self.narrator_prompts.saturating_add(self.npc_prompts)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ModPackageView {
@@ -229,6 +274,7 @@ pub struct ModPackageView {
     pub version: Version,
     pub status: ModPackageStatus,
     pub dependency_count: u32,
+    pub content: PackageContentView,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

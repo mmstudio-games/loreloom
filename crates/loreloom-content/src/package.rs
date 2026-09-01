@@ -6,7 +6,7 @@ use std::{
 
 use loreloom_core::{
     ContentDefinitionId, ContentHash, LockedDependency, LockedMod, LongText, ModId, ModLock,
-    ModSourceKind, WorldLock,
+    ModSourceKind, PackageContentView, WorldLock,
 };
 use semver::{Version, VersionReq};
 use serde::{Deserialize, Serialize};
@@ -73,6 +73,29 @@ pub struct ModManifest {
     #[serde(default)]
     pub prompts: PromptManifest,
     pub content_hash: ContentHash,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InspectedPackage {
+    manifest: ModManifest,
+    content: PackageContentView,
+}
+
+impl InspectedPackage {
+    #[must_use]
+    pub fn manifest(&self) -> &ModManifest {
+        &self.manifest
+    }
+
+    #[must_use]
+    pub fn content(&self) -> &PackageContentView {
+        &self.content
+    }
+
+    #[must_use]
+    pub fn into_parts(self) -> (ModManifest, PackageContentView) {
+        (self.manifest, self.content)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -283,6 +306,7 @@ pub struct CompiledModSet {
     resources: PackageResources,
     prompts: CompiledAgentPrompts,
     prompt_sets: BTreeMap<ModId, CompiledAgentPrompts>,
+    package_content: BTreeMap<ModId, PackageContentView>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -315,6 +339,7 @@ pub struct CompiledWorldSet {
     mod_lock: ModLock,
     resources: PackageResources,
     prompts: CompiledAgentPrompts,
+    package_content: BTreeMap<ModId, PackageContentView>,
 }
 
 impl CompiledWorldSet {
@@ -341,6 +366,11 @@ impl CompiledWorldSet {
     #[must_use]
     pub fn prompts(&self) -> &CompiledAgentPrompts {
         &self.prompts
+    }
+
+    #[must_use]
+    pub fn package_content(&self) -> &BTreeMap<ModId, PackageContentView> {
+        &self.package_content
     }
 
     #[must_use]
@@ -373,6 +403,11 @@ impl CompiledModSet {
     #[must_use]
     pub fn prompts(&self) -> &CompiledAgentPrompts {
         &self.prompts
+    }
+
+    #[must_use]
+    pub fn package_content(&self) -> &BTreeMap<ModId, PackageContentView> {
+        &self.package_content
     }
 
     #[must_use]
@@ -421,11 +456,19 @@ impl PackageCompiler {
 
     /// Inspects one installed directory package with the same safety, compatibility, and
     /// integrity checks used by the activation path, without resolving or enabling dependencies.
-    pub fn inspect_directory(&self, root: impl AsRef<Path>) -> Result<ModManifest, PackageError> {
+    pub fn inspect_directory(
+        &self,
+        root: impl AsRef<Path>,
+    ) -> Result<InspectedPackage, PackageError> {
         self.limits.validate()?;
         let raw = read_directory_package(root.as_ref(), self.limits)?;
         let package = parse_package(raw, &self.engine_version, self.limits)?;
-        Ok(package.manifest)
+        let unit = parse_definition_documents(&package)?;
+        let content = package_content_view(&package.manifest, &unit.documents);
+        Ok(InspectedPackage {
+            manifest: package.manifest,
+            content,
+        })
     }
 
     pub fn compile_world(
@@ -444,6 +487,7 @@ impl PackageCompiler {
             resources,
             prompts: _,
             prompt_sets,
+            package_content,
         } = self.compile_inner(sources, None)?;
         let (world_lock, mod_lock) = world.split_lock(full_lock, engine_namespaces)?;
         let prompt_order = std::iter::once(&world.manifest().world_id)
@@ -455,6 +499,7 @@ impl PackageCompiler {
             mod_lock,
             resources,
             prompts,
+            package_content,
         })
     }
 
@@ -491,6 +536,19 @@ impl PackageCompiler {
             })?;
             units.insert(mod_id.clone(), parse_definition_documents(package)?);
         }
+        let mut package_content = BTreeMap::new();
+        for mod_id in &order {
+            let package = parsed.get(mod_id).ok_or(PackageError::InvalidManifest {
+                field: "dependency_graph",
+            })?;
+            let unit = units.get(mod_id).ok_or(PackageError::InvalidManifest {
+                field: "dependency_graph",
+            })?;
+            package_content.insert(
+                mod_id.clone(),
+                package_content_view(&package.manifest, &unit.documents),
+            );
+        }
         let baseline = build_registry(&order, &units)?;
         apply_patches(&order, &parsed, &baseline, &mut units)?;
         let registry = build_registry(&order, &units)?;
@@ -507,6 +565,7 @@ impl PackageCompiler {
             resources,
             prompts,
             prompt_sets,
+            package_content,
         })
     }
 }
@@ -763,6 +822,45 @@ fn parse_definition_documents(package: &ParsedPackage) -> Result<PackageUnit, Pa
         },
         documents,
     })
+}
+
+fn package_content_view(
+    manifest: &ModManifest,
+    documents: &[ContentDocument],
+) -> PackageContentView {
+    let mut content = PackageContentView {
+        narrator_prompts: bounded_count(manifest.prompts.narrator.len()),
+        npc_prompts: bounded_count(manifest.prompts.npc.len()),
+        patches: bounded_count(manifest.patches.len()),
+        ..PackageContentView::default()
+    };
+    for definition in documents.iter().flat_map(|document| &document.definitions) {
+        let count = match definition {
+            Definition::Character(_) => &mut content.characters,
+            Definition::Scene(_) => &mut content.scenes,
+            Definition::Place(_) => &mut content.places,
+            Definition::Item(_) => &mut content.items,
+            Definition::Skill(_) => &mut content.skills,
+            Definition::Condition(_) => &mut content.conditions,
+            Definition::Event(_) => &mut content.events,
+            Definition::GameplayAction(_) => &mut content.gameplay_actions,
+            Definition::Rule(_) => &mut content.rules,
+            Definition::Parameter(_) => &mut content.parameters,
+            Definition::AgentProfile(_)
+            | Definition::GenerationPolicy(_)
+            | Definition::Tag(_)
+            | Definition::RelationshipKind(_)
+            | Definition::Attribute(_)
+            | Definition::Resource(_)
+            | Definition::EquipmentSlot(_) => &mut content.support_definitions,
+        };
+        *count = count.saturating_add(1);
+    }
+    content
+}
+
+fn bounded_count(count: usize) -> u32 {
+    u32::try_from(count).unwrap_or(u32::MAX)
 }
 
 fn is_rule_definition(definition: &Definition) -> bool {

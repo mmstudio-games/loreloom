@@ -910,6 +910,7 @@ fn package_catalog(manifest: &SaveManifest) -> PackageCatalogView {
             version: locked.version.clone(),
             status: ModPackageStatus::Enabled,
             dependency_count: u32::try_from(locked.dependencies.len()).unwrap_or(u32::MAX),
+            content: Default::default(),
         })
         .collect::<Vec<_>>();
     mods.sort_by(|left, right| {

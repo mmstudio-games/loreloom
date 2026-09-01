@@ -9,10 +9,10 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKi
 use loreloom_core::{
     ActionState, ActorId, AttributeView, CharacterContext, CharacterProfile, ConditionRecord,
     ConditionSource, ConditionView, DisplayName, EntityOrigin, Fixed, LifeState, LongText, ModId,
-    ModPackageStatus, ModPackageView, NoticeKind, ObjectId, PackageCatalogView, Posture, Revision,
-    RuntimePhase, SceneContext, SessionId, ShortText, ToolActivity, ToolActivityState,
-    TranscriptItemId, TranscriptItemRecord, TranscriptSpeaker, TranscriptState, TranscriptWindow,
-    UiNotice, UiSnapshot, WorldPackageView, WorldTime,
+    ModPackageStatus, ModPackageView, NoticeKind, ObjectId, PackageCatalogView, PackageContentView,
+    Posture, Revision, RuntimePhase, SceneContext, SessionId, ShortText, ToolActivity,
+    ToolActivityState, TranscriptItemId, TranscriptItemRecord, TranscriptSpeaker, TranscriptState,
+    TranscriptWindow, UiNotice, UiSnapshot, WorldPackageView, WorldTime,
 };
 use loreloom_tui::{
     EditorError, InputEditor, MAX_INPUT_BYTES, NarrowPage, RuntimeUiEvent, TerminalOps,
@@ -124,12 +124,33 @@ fn snapshot() -> UiSnapshot {
                     version: "1.2.0".parse().expect("enabled Mod version"),
                     status: ModPackageStatus::Enabled,
                     dependency_count: 1,
+                    content: PackageContentView {
+                        characters: 2,
+                        scenes: 1,
+                        places: 3,
+                        items: 4,
+                        skills: 2,
+                        conditions: 1,
+                        events: 1,
+                        gameplay_actions: 1,
+                        rules: 1,
+                        parameters: 3,
+                        support_definitions: 2,
+                        narrator_prompts: 1,
+                        npc_prompts: 1,
+                        patches: 1,
+                    },
                 },
                 ModPackageView {
                     mod_id: ModId::parse("games.loreloom.characters").expect("installed Mod ID"),
                     version: "2.0.0".parse().expect("installed Mod version"),
                     status: ModPackageStatus::Installed,
                     dependency_count: 0,
+                    content: PackageContentView {
+                        characters: 6,
+                        narrator_prompts: 1,
+                        ..Default::default()
+                    },
                 },
             ],
             unavailable_installed: 1,
@@ -591,13 +612,19 @@ fn mods_overlay_is_read_only_scrollable_and_does_not_steal_plain_input() {
         None
     );
     assert_eq!(app.overlay, Some(TuiOverlay::Mods));
-    let overlay = text_snapshot(render_mut(&mut app, 80, 22).backend().buffer());
+    let overlay = text_snapshot(render_mut(&mut app, 80, 30).backend().buffer());
     assert!(overlay.contains("MODS · Ctrl+O / F2 / Esc close"));
     assert!(overlay.contains("games.loreloom.demo"));
     assert!(overlay.contains("ENABLED (1)"));
     assert!(overlay.contains("games.loreloom.weather"));
+    assert!(overlay.contains("21 definitions · 2 prompts · 1 patch"));
+    assert!(overlay.contains("2 characters · 1 scene · 3 places"));
+    assert!(overlay.contains("4 items · 2 skills · 1 condition"));
+    assert!(overlay.contains("1 event · 1 action · 1 rule · 3 parameters"));
+    assert!(overlay.contains("2 support definitions"));
     assert!(overlay.contains("INSTALLED, NOT ENABLED (1)"));
     assert!(overlay.contains("games.loreloom.characters"));
+    assert!(overlay.contains("6 definitions · 1 prompt · 0 patches"));
     assert!(overlay.contains("1 installed candidate(s) unavailable"));
     assert!(!overlay.contains("content_hash"));
 
@@ -651,6 +678,7 @@ fn mods_overlay_uses_independent_keyboard_and_mouse_scroll() {
             version: "1.0.0".parse().expect("extra Mod version"),
             status: ModPackageStatus::Installed,
             dependency_count: 0,
+            content: Default::default(),
         });
     }
     app.toggle_mods_overlay();

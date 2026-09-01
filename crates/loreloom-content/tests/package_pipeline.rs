@@ -159,6 +159,19 @@ fn builtin_and_directory_packages_share_dependency_patch_registry_and_lock_pipel
         compiled.mod_lock().mods[1].applied_patches,
         vec![definition_id("games.loreloom.patch:patch/rain-name")]
     );
+    let base_content = compiled
+        .package_content()
+        .get(&mod_id("games.loreloom.base"))
+        .expect("base content summary");
+    assert_eq!(base_content.definition_count(), 1);
+    assert_eq!(base_content.support_definitions, 1);
+    assert_eq!(base_content.prompt_count(), 1);
+    let patch_content = compiled
+        .package_content()
+        .get(&mod_id("games.loreloom.patch"))
+        .expect("patch content summary");
+    assert_eq!(patch_content.definition_count(), 0);
+    assert_eq!(patch_content.patches, 1);
     assert_eq!(
         compiled
             .resources()
@@ -215,12 +228,31 @@ fn installed_directory_inspection_uses_the_activation_integrity_checks() {
         .inspect_directory(temporary.path())
         .expect("valid installed package");
 
-    assert_eq!(inspected.mod_id, mod_id("games.loreloom.base"));
-    assert_eq!(inspected.version, Version::new(1, 0, 0));
+    assert_eq!(inspected.manifest().mod_id, mod_id("games.loreloom.base"));
+    assert_eq!(inspected.manifest().version, Version::new(1, 0, 0));
+    assert_eq!(inspected.content().definition_count(), 1);
+    assert_eq!(inspected.content().support_definitions, 1);
+    assert_eq!(inspected.content().narrator_prompts, 1);
     fs::write(temporary.path().join("assets/weather/rain.txt"), "changed").expect("tamper payload");
     assert!(matches!(
         compiler.inspect_directory(temporary.path()),
         Err(PackageError::HashMismatch { .. })
+    ));
+}
+
+#[test]
+fn installed_directory_inspection_rejects_invalid_definition_documents() {
+    let temporary = TempDir::new().expect("temporary package root");
+    let package = VirtualPackage::builtin(
+        draft("games.loreloom.invalid", vec![ModCapability::Content]),
+        vec![PackagePayload::new("content/invalid.json", b"not JSON")],
+    )
+    .expect("sealed invalid-data fixture");
+    write_directory(temporary.path(), &package);
+
+    assert!(matches!(
+        PackageCompiler::default().inspect_directory(temporary.path()),
+        Err(PackageError::InvalidData)
     ));
 }
 

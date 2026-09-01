@@ -717,6 +717,73 @@ fn push_mod_package(
         ),
         Style::default().fg(MUTED),
     )));
+    lines.push(Line::from(Span::styled(
+        format!(
+            "  {} · {} · {}",
+            content_count(
+                package.content.definition_count(),
+                "definition",
+                "definitions"
+            ),
+            content_count(package.content.prompt_count(), "prompt", "prompts"),
+            content_count(package.content.patches, "patch", "patches"),
+        ),
+        Style::default().fg(MUTED),
+    )));
+    push_content_counts(
+        lines,
+        &[
+            (package.content.characters, "character", "characters"),
+            (package.content.scenes, "scene", "scenes"),
+            (package.content.places, "place", "places"),
+        ],
+    );
+    push_content_counts(
+        lines,
+        &[
+            (package.content.items, "item", "items"),
+            (package.content.skills, "skill", "skills"),
+            (package.content.conditions, "condition", "conditions"),
+        ],
+    );
+    push_content_counts(
+        lines,
+        &[
+            (package.content.events, "event", "events"),
+            (package.content.gameplay_actions, "action", "actions"),
+            (package.content.rules, "rule", "rules"),
+            (package.content.parameters, "parameter", "parameters"),
+        ],
+    );
+    push_content_counts(
+        lines,
+        &[(
+            package.content.support_definitions,
+            "support definition",
+            "support definitions",
+        )],
+    );
+}
+
+fn push_content_counts(
+    lines: &mut Vec<Line<'static>>,
+    counts: &[(u32, &'static str, &'static str)],
+) {
+    let labels = counts
+        .iter()
+        .filter(|(count, _, _)| *count > 0)
+        .map(|(count, singular, plural)| content_count(*count, singular, plural))
+        .collect::<Vec<_>>();
+    if !labels.is_empty() {
+        lines.push(Line::from(Span::styled(
+            format!("  {}", labels.join(" · ")),
+            Style::default().fg(MUTED),
+        )));
+    }
+}
+
+fn content_count(count: u32, singular: &str, plural: &str) -> String {
+    format!("{count} {}", if count == 1 { singular } else { plural })
 }
 
 fn centered_overlay(area: Rect, maximum_width: u16, maximum_height: u16) -> Rect {

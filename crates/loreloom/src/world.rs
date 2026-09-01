@@ -48,6 +48,27 @@ pub async fn build_world_with(
         &engine_namespaces,
     )?;
     let prompts = compiled.prompts().clone();
+    let enabled_mod_details = compiled
+        .mod_lock()
+        .mods
+        .iter()
+        .map(|locked| {
+            let content = compiled
+                .package_content()
+                .get(&locked.mod_id)
+                .cloned()
+                .ok_or(AppError::WorldPolicy(
+                    "compiled Mod content summary is unavailable",
+                ))?;
+            Ok(ModPackageView {
+                mod_id: locked.mod_id.clone(),
+                version: locked.version.clone(),
+                status: ModPackageStatus::Enabled,
+                dependency_count: u32::try_from(locked.dependencies.len()).unwrap_or(u32::MAX),
+                content,
+            })
+        })
+        .collect::<Result<Vec<_>, AppError>>()?;
     let (registry, world_lock, mod_lock, _) = compiled.into_parts();
     #[cfg(test)]
     let test_world_lock = world_lock.clone();
@@ -114,7 +135,9 @@ pub async fn build_world_with(
         configured.runtime,
     );
     runtime.set_default_npc_bridge(configured.npc);
-    runtime.set_installed_mod_catalog(installed_mods, unavailable_installed);
+    let mut mod_catalog_details = installed_mods;
+    mod_catalog_details.extend(enabled_mod_details);
+    runtime.set_mod_catalog_details(mod_catalog_details, unavailable_installed);
     let initial_snapshot = runtime.initial_snapshot().await?;
     Ok(WorldSetup {
         runtime,
@@ -167,18 +190,20 @@ fn discover_installed_mods(
     candidates.sort();
     let mut installed = BTreeMap::new();
     for candidate in candidates {
-        let manifest = match compiler.inspect_directory(&candidate) {
-            Ok(manifest) => manifest,
+        let inspected = match compiler.inspect_directory(&candidate) {
+            Ok(inspected) => inspected,
             Err(_) => {
                 unavailable = unavailable.saturating_add(1);
                 continue;
             }
         };
+        let (manifest, content) = inspected.into_parts();
         let package = ModPackageView {
             mod_id: manifest.mod_id,
             version: manifest.version,
             status: ModPackageStatus::Installed,
             dependency_count: u32::try_from(manifest.dependencies.len()).unwrap_or(u32::MAX),
+            content,
         };
         installed.insert((package.mod_id.clone(), package.version.clone()), package);
     }
@@ -331,6 +356,30 @@ mod tests {
         );
     }
 
+    #[tokio::test(flavor = "multi_thread")]
+    async fn enabled_mod_catalog_uses_the_compiled_content_summary() {
+        let temporary = tempfile::tempdir().expect("save and Mod parent");
+        let mod_path = temporary.path().join("weather");
+        write_installed_package(&mod_path, &installed_package());
+        let save_path = temporary.path().join("save");
+        let world_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+
+        let setup = build_world_with(&world_root, &save_path, &[mod_path], configured())
+            .await
+            .expect("create root world with enabled Mod");
+        let package = setup
+            .initial_snapshot
+            .packages
+            .mods
+            .iter()
+            .find(|package| package.mod_id.as_str() == "games.loreloom.weather")
+            .expect("enabled Mod catalog entry");
+
+        assert_eq!(package.status, ModPackageStatus::Enabled);
+        assert_eq!(package.content.definition_count(), 1);
+        assert_eq!(package.content.support_definitions, 1);
+    }
+
     #[test]
     fn installed_mod_discovery_is_safe_stable_and_does_not_enable_packages() {
         let temporary = tempfile::tempdir().expect("world root");
@@ -347,6 +396,8 @@ mod tests {
         assert_eq!(installed[0].mod_id.as_str(), "games.loreloom.weather");
         assert_eq!(installed[0].version, Version::new(1, 2, 3));
         assert_eq!(installed[0].status, ModPackageStatus::Installed);
+        assert_eq!(installed[0].content.definition_count(), 1);
+        assert_eq!(installed[0].content.support_definitions, 1);
         assert_eq!(unavailable, 1);
     }
 }

@@ -49,8 +49,8 @@ pub use text::{BoundedText, DisplayName, LongText, ShortText, TextError};
 pub use view::{
     ActiveEventView, AdjacentPlaceView, AttributeView, CharacterContext, ConditionView,
     DIAGNOSED_CONDITION_PREDICATE_ID, EventOptionView, InventoryView, ModPackageStatus,
-    ModPackageView, NoticeKind, PackageCatalogView, ParameterSetView, ParameterValueView,
-    ResourceView, RuntimePhase, RuntimeProgressEvent, SceneContext, SceneObservation, SkillView,
-    ToolActivity, ToolActivityState, TranscriptWindow, UiNotice, UiSnapshot, VisibleActorView,
-    WorldPackageView,
+    ModPackageView, NoticeKind, PackageCatalogView, PackageContentView, ParameterSetView,
+    ParameterValueView, ResourceView, RuntimePhase, RuntimeProgressEvent, SceneContext,
+    SceneObservation, SkillView, ToolActivity, ToolActivityState, TranscriptWindow, UiNotice,
+    UiSnapshot, VisibleActorView, WorldPackageView,
 };
