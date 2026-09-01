@@ -103,6 +103,8 @@ OPEN 项、后续 RFC 或 P0 Spike；空 crate 不代表相关协议已经实现
 - [x] 把 Spec 8.2 的 Character/Scene/Transcript 数量与字节上限接入 Narrator/NpcAgent 产品上下文，
   并在裁剪时投影 `truncated` metadata；
 - [x] 用 Runtime phase/status event 驱动 TUI thinking 展示，并移除 Provider 文本 streaming 产品协议；
+- [ ] 在 Tool 执行前后发布安全的当前 Turn Activity，实时更新 TUI pending/终态状态并保持玩家输入、
+  Tool Activity、Narrator 正文的显示顺序；
 - [x] 完成面向叙事阅读的 TUI 视觉重构；
 - [x] 修复 Transcript 底部锚定、按折行 viewport 约束的 PageUp/PageDown 与鼠标滚轮滚动；
 - [x] 在玩家输入被 Runtime command queue 接受后立即显示本地 pending 玩家行，并由最终 Snapshot

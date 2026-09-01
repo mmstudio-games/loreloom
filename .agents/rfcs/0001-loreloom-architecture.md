@@ -869,7 +869,8 @@ LLM 输出本身不被宣称为确定性。Loreloom 的可回放承诺应是：
 47. Narrator 正文只按自然语言使用；内部 Plan 只来自已接受 ToolCall。不存在固定 NPC 数量常量，
     循环由可配置整轮/单 Turn 资源上限与最大编排轮数终止；
 48. 等待 Provider 时 TUI 的 Runtime thinking 状态、取消和退出保持响应，未完成 Provider 正文不
-    展示，逻辑 World Clock 不随墙钟时间隐式推进。
+    展示；已解析 ToolCall 的安全名称与执行状态可以作为临时 Activity 实时显示，但不包含参数、
+    ToolResult 或持久化语义；逻辑 World Clock 不随墙钟时间隐式推进。
 
 ## 14. 待决问题
 
@@ -1072,3 +1073,13 @@ Narrator 通过 Tool 创建二者：`create_scene` 原子创建 inactive Scene �
 项目方同时确认把该能力与已冻结的 WorldLock/ModLock 候选内容协调一并实施。本节是对既有 Active
 Runtime Spec 的增量确认，不引入通用 Definition migration，也不为公开版本前开发存档增加兼容
 分支。
+
+### 16.9 实时 Tool Activity 确认记录
+
+项目方于 2026-09-01 确认 Agent ToolCall 不再等到完整玩家回合结束后统一显示：AgentRunner 在完整
+ToolCall 已解析且即将执行时发布 Pending，并在 ToolResult 返回后原位发布 Succeeded、Rejected 或
+Failed；Runtime/TUI 只传递 call ID、Tool 名称、状态与脱敏错误码，不传递原始参数或 ToolResult。
+
+Tool Activity 是当前玩家回合的临时 UI 进度，不进入 Transcript、Agent Context 或存档；最终画面按
+玩家输入、Tool Activity、Narrator 正文的叙事顺序投影。该修订不启用 Provider 正文 streaming，不
+改变 Tool 授权、执行顺序、提交原子性、Narrator 编排所有权或已提交世界事实。

@@ -156,8 +156,9 @@ Loreloom Runtime ───────────────► Persistence
 30. 玩家输入被 Runtime command queue 接受后，TUI 立即在 thinking 状态之前显示一条本地 pending
     玩家行；该行不修改 committed Transcript，并由后续权威 Snapshot 对账或清除。等待 Provider 时
     TUI 显示由 Runtime 阶段驱动的临时 thinking 状态，并保持取消和退出响应；不向玩家转发 Provider
-    的未完成正文。第一阶段逻辑 World Clock 不随真实墙钟时间隐式推进，世界只通过明确
-    WorldCommand/System 变化。
+    的未完成正文。Runtime 在已解析 ToolCall 开始执行前和获得 ToolResult 后发布只含 call ID、名称、
+    状态与脱敏错误码的临时 Tool Activity；参数与结果不进入 UI，Activity 不进入 Transcript 或存档。
+    第一阶段逻辑 World Clock 不随真实墙钟时间隐式推进，世界只通过明确 WorldCommand/System 变化。
 31. 第一阶段使用 Cargo virtual workspace，包含 `loreloom-core`、`loreloom-content`、
     `loreloom-world`、`loreloom-agent`、`loreloom-store`、`loreloom-runtime`、`loreloom-tui` 七个
     library crate 和 `loreloom` binary crate；
@@ -221,9 +222,11 @@ Loreloom Runtime ───────────────► Persistence
     ModLock 的 Scene Definition ID，当前 Narrator Turn 结束后才执行单个原子 `TransitionScene`
     Command。切换同时停用旧 Scene、激活或首次物化目标 Scene、移动现有玩家并产生 SceneLeft/
     SceneEntered Event；随后必须基于新 Revision 重新调用 Narrator，不能沿用切换前的 NPC 请求。
-48. Runtime 对 TUI 只发布粗粒度 `RuntimePhase`，不转发 Provider stream 或内部隐藏推理；phase
-    固定覆盖 PersistingInput、NarratorThinking、ResolvingOrchestration、NpcThinking、UpdatingWorld
-    与终态。Phase event 不改变 committed Snapshot，只驱动本地 thinking 文案、spinner 和输入门禁。
+48. Runtime 对 TUI 只发布粗粒度 `RuntimePhase` 与安全的当前 Turn `ToolActivity`，不转发 Provider
+    stream 或内部隐藏推理；phase 固定覆盖 PersistingInput、NarratorThinking、
+    ResolvingOrchestration、NpcThinking、UpdatingWorld 与终态。Phase/Tool Activity event 不改变
+    committed Snapshot；Tool Activity 在执行前为 Pending，结束后原位收敛为 Succeeded、Rejected 或
+    Failed，且不携带 Tool 参数或 ToolResult。
 49. Transcript 默认锚定最新内容；本地滚动状态表达“距最新内容的视觉行数”，按当前宽度折行后的
     内容高度和 viewport 约束。`PageUp`/鼠标滚轮向上查看旧内容，`PageDown`/鼠标滚轮向下返回最新；
     位于底部时新 Snapshot 自动跟随，滚动和 resize 都不触发 Runtime 请求或修改世界。

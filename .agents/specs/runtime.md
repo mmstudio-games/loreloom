@@ -1761,8 +1761,20 @@ pub enum RuntimePhase {
 
 这些值不等于内部 Agent Step，也不携带 Actor、Prompt、模型正文、Tool 参数或错误详情。
 `GameRuntime` 在状态实际开始前同步通知应用层提供的 observer；应用 adapter 把它转换为
-`RuntimeUiEvent::PhaseChanged`。observer/channel 关闭不能改变 World 结果，终态仍由 committed 或
-失败 Snapshot 收敛。
+`RuntimeUiEvent::PhaseChanged`。同一 observer 还接收当前玩家回合的完整安全 Tool Activity 列表：
+
+```rust
+pub enum RuntimeProgressEvent {
+    PhaseChanged(RuntimePhase),
+    ToolActivityChanged(Vec<ToolActivity>),
+}
+```
+
+AgentRunner 在完整 ToolCall 已解析、通过预算门禁且准备交给 `ToolExecutor` 前先发布 Pending；执行
+返回后用相同 call ID 与名称把该项原位更新为 Succeeded、Rejected 或 Failed，再继续下一次 Model
+Call。列表只包含 call ID、Tool 名称、状态和经过约束的错误码，不包含 Tool 参数、ToolResult、模型
+正文或隐藏推理。observer/channel 关闭不能改变 Tool 执行或 World 结果，终态仍由 committed 或失败
+Snapshot 收敛。
 
 规范行为：
 
@@ -2184,8 +2196,12 @@ Event Option 在 current Revision 求值 `visible_if`，不可见项不进入列
 - 等待 Provider 或 Runtime 编排时显示一个 ephemeral thinking row；文本由本地 Runtime phase 映射
   产生，例如 Narrator is thinking、NPC is responding、Updating world，不来自模型正文；
 - thinking row 可以使用本地 spinner 动画；完成、取消或失败后由最终 Snapshot 替换或清除；
-- Tool pending、succeeded、rejected 和 failed 使用确定性、可区分的视觉状态；颜色只是增强信息，
-  必要的文本含义必须保留，但成功的常规 Tool 不应淹没叙事内容；
+- Tool pending、succeeded、rejected 和 failed 通过 Runtime progress event 在执行发生时即时显示，并
+  使用确定性、可区分的视觉状态；颜色只是增强信息，必要的文本含义必须保留；只显示名称、状态和
+  脱敏错误码，不显示原始参数或 ToolResult；
+- 当前回合 Tool Activity 是 ephemeral UI projection，不进入 Transcript、Agent Context 或存档；
+  终态 Snapshot 到达后仍按“玩家输入、Tool Activity、Narrator 正文”顺序显示，但成功的常规 Tool
+  不应淹没叙事内容；
 - 终端 session 初始化顺序为 raw mode、alternate screen、隐藏 cursor、bracketed paste、mouse
   capture；正常退出、部分初始化失败与 panic unwind 均按逆序尝试恢复所有已启用状态；
 - 渲染测试不得访问网络或真实 Provider。
@@ -2205,6 +2221,7 @@ pub enum UiIntent {
 pub enum RuntimeUiEvent {
     Snapshot(Box<UiSnapshot>),
     PhaseChanged(RuntimePhase),
+    ToolActivityChanged(Vec<ToolActivity>),
 }
 
 pub trait RuntimeClient {
@@ -2229,15 +2246,16 @@ TUI crate 不依赖 Runtime/World/Store/Provider。`UiClientError` 只暴露稳�
 
 `TuiApp` 拥有 `UiSnapshot`、grapheme editor、输入历史、窄屏页面、距最新内容的 transcript scroll、
 当前折行 viewport 指标、至多一条已入队但尚未由 Snapshot 确认的 pending 玩家输入、当前 working
-phase 与本地 spinner frame。Snapshot 更新不得覆盖 editor/scroll 等本地交互字段；终态 Snapshot
-清除 working phase 并与 pending 输入对账，resize 只重新 render。Editor 最大 UTF-8 bytes
+phase、本地 spinner frame 与当前 Turn 的 live Tool Activity。Snapshot 更新不得覆盖 editor/scroll
+等本地交互字段；终态 Snapshot 清除 working phase/live Activity 并与 pending 输入对账，resize 只
+重新 render。Editor 最大 UTF-8 bytes
 固定为 `LongText` 的 65,536 bytes，单次插入 all-or-reject。`TuiConfig.state_width_percent` 默认 30，
 只允许 25–35；event poll 默认 50 ms。
 
 产品 `run` loop 每轮先无阻塞 drain Runtime event、再 render，并使用有限 poll 等待 Crossterm event；
 因此等待 Provider 时仍可处理 cancel、quit、resize 和 spinner。`RuntimeUiEvent::Snapshot` 是唯一能
-改变 committed transcript/世界状态的 UI 输入；本地 pending 玩家行与 phase event 都只是 ephemeral
-投影，不获得 committed 语义。
+改变 committed transcript/世界状态的 UI 输入；本地 pending 玩家行、phase event 与 Tool Activity
+event 都只是 ephemeral 投影，不获得 committed 语义。
 
 ## 13. 配置、Secret 与日志
 
@@ -2486,6 +2504,9 @@ CI 使用最新 stable，不执行 MSRV Job，不允许 manifest 出现 `rust-ve
     后连接等价且未知、跨 Scene、单向或自连接 edge 被拒绝。
 57. Narrator 可延迟创建 inactive Scene + entry Place，或在 active Scene 创建并双向连接 Place；
     Runtime 分配身份与 GeneratedOrigin，创建不自动切换/移动，提交后强制重规划，NpcAgent 无该权限。
+58. ToolCall 在开始执行前实时显示 Pending，并在结果返回后原位收敛；UI 只接收 call ID、名称、状态
+    和脱敏错误码，终态按玩家输入、Tool Activity、Narrator 正文排序，且 Activity 不进入 Transcript、
+    Agent Context 或存档。
 
 ## 18. Active Spec 下的范围化实施门禁
 
