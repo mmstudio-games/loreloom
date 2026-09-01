@@ -419,6 +419,15 @@ impl PackageCompiler {
         self.compile_inner(sources, Some(expected))
     }
 
+    /// Inspects one installed directory package with the same safety, compatibility, and
+    /// integrity checks used by the activation path, without resolving or enabling dependencies.
+    pub fn inspect_directory(&self, root: impl AsRef<Path>) -> Result<ModManifest, PackageError> {
+        self.limits.validate()?;
+        let raw = read_directory_package(root.as_ref(), self.limits)?;
+        let package = parse_package(raw, &self.engine_version, self.limits)?;
+        Ok(package.manifest)
+    }
+
     pub fn compile_world(
         &self,
         world: &WorldProjectSource,

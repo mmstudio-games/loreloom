@@ -20,12 +20,13 @@ use loreloom_core::{
     AttributeView, CharacterContext, CharacterController, CharacterLifetime, CharacterSpawnSpec,
     ConditionRecord, ConditionView, ContentDefinitionId, DIAGNOSED_CONDITION_PREDICATE_ID,
     DisplayName, DomainRecord, EventId, EventOptionView, FactSubject, FactValue, GeneratedOrigin,
-    InventoryView, KnowledgeStatus, LongText, ModLock, NpcTurnRequestId, ObjectId,
-    ParameterSetView, ParameterValue, ParameterValueView, ResourceView, Revision, RuntimePhase,
-    SAVE_FORMAT_V1, SaveId, SaveManifest, SceneContext, SceneObservation, SceneRecord,
-    SceneTransitionTarget, SessionId, ShortText, SkillTargetRef, SkillView, SystemIdGenerator,
-    ToolActivity, TranscriptWindow, UiNotice, UiSnapshot, VisibleActorView, WorldCommand,
-    WorldCommandKind, WorldEvent, WorldEventKind, WorldLock,
+    InventoryView, KnowledgeStatus, LongText, ModLock, ModPackageStatus, ModPackageView,
+    NpcTurnRequestId, ObjectId, PackageCatalogView, ParameterSetView, ParameterValue,
+    ParameterValueView, ResourceView, Revision, RuntimePhase, SAVE_FORMAT_V1, SaveId, SaveManifest,
+    SceneContext, SceneObservation, SceneRecord, SceneTransitionTarget, SessionId, ShortText,
+    SkillTargetRef, SkillView, SystemIdGenerator, ToolActivity, TranscriptWindow, UiNotice,
+    UiSnapshot, VisibleActorView, WorldCommand, WorldCommandKind, WorldEvent, WorldEventKind,
+    WorldLock, WorldPackageView,
 };
 use loreloom_store::{ActionResolution, CommitRequest, CommitResult, CommittedAction, SaveStore};
 use loreloom_world::{GameWorld, WorldBootstrap, WorldConfig};
@@ -874,6 +875,7 @@ impl WorldService {
                 &inner.registry,
             )?,
             active_events: active_event_views(&records, &inner.registry, player_id)?,
+            packages: package_catalog(inner.store.manifest()),
             transcript: transcript_window(&records, UI_TRANSCRIPT_LIMIT),
             tool_activity,
             phase,
@@ -895,6 +897,33 @@ impl WorldService {
             notices,
             supporting_events,
         })
+    }
+}
+
+fn package_catalog(manifest: &SaveManifest) -> PackageCatalogView {
+    let mut mods = manifest
+        .mod_lock
+        .mods
+        .iter()
+        .map(|locked| ModPackageView {
+            mod_id: locked.mod_id.clone(),
+            version: locked.version.clone(),
+            status: ModPackageStatus::Enabled,
+            dependency_count: u32::try_from(locked.dependencies.len()).unwrap_or(u32::MAX),
+        })
+        .collect::<Vec<_>>();
+    mods.sort_by(|left, right| {
+        left.mod_id
+            .cmp(&right.mod_id)
+            .then_with(|| left.version.cmp(&right.version))
+    });
+    PackageCatalogView {
+        world: WorldPackageView {
+            world_id: manifest.world_lock.world_id.clone(),
+            version: manifest.world_lock.version.clone(),
+        },
+        mods,
+        unavailable_installed: 0,
     }
 }
 

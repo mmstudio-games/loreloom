@@ -206,6 +206,25 @@ fn builtin_and_directory_packages_share_dependency_patch_registry_and_lock_pipel
 }
 
 #[test]
+fn installed_directory_inspection_uses_the_activation_integrity_checks() {
+    let temporary = TempDir::new().expect("temporary package root");
+    let package = base_package();
+    write_directory(temporary.path(), &package);
+    let compiler = PackageCompiler::default();
+    let inspected = compiler
+        .inspect_directory(temporary.path())
+        .expect("valid installed package");
+
+    assert_eq!(inspected.mod_id, mod_id("games.loreloom.base"));
+    assert_eq!(inspected.version, Version::new(1, 0, 0));
+    fs::write(temporary.path().join("assets/weather/rain.txt"), "changed").expect("tamper payload");
+    assert!(matches!(
+        compiler.inspect_directory(temporary.path()),
+        Err(PackageError::HashMismatch { .. })
+    ));
+}
+
+#[test]
 fn canonical_hash_ignores_manifest_whitespace_but_covers_payload_bytes_and_paths() {
     let base = base_package();
     let mut spaced_manifest = base.manifest_bytes().to_vec();

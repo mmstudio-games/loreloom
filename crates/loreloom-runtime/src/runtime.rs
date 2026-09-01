@@ -15,9 +15,10 @@ use loreloom_agent::{
 };
 use loreloom_core::{
     ActorId, CharacterController, CharacterLifetime, ContentDefinitionId, GeneratedOrigin,
-    GenerationId, GenerationSource, LongText, NoticeKind, Revision, RuntimePhase,
-    RuntimeProgressEvent, SessionId, ShortText, ToolActivity, ToolActivityState, TranscriptItemId,
-    TranscriptSpeaker, UiNotice, UiSnapshot, WorldCommandKind,
+    GenerationId, GenerationSource, LongText, ModPackageStatus, ModPackageView, NoticeKind,
+    PackageCatalogView, Revision, RuntimePhase, RuntimeProgressEvent, SessionId, ShortText,
+    ToolActivity, ToolActivityState, TranscriptItemId, TranscriptSpeaker, UiNotice, UiSnapshot,
+    WorldCommandKind,
 };
 use serde::Serialize;
 use serde_json::json;
@@ -47,6 +48,8 @@ pub struct GameRuntime {
     session_id: SessionId,
     config: RuntimeConfig,
     cancellation: CancellationToken,
+    installed_mods: Vec<ModPackageView>,
+    unavailable_installed_mods: u32,
 }
 
 impl std::fmt::Debug for GameRuntime {
@@ -91,6 +94,8 @@ impl GameRuntime {
             session_id,
             config,
             cancellation: CancellationToken::new(),
+            installed_mods: Vec::new(),
+            unavailable_installed_mods: 0,
         }
     }
 
@@ -108,13 +113,31 @@ impl GameRuntime {
         self.default_npc_bridge = bridge;
     }
 
+    pub fn set_installed_mod_catalog(
+        &mut self,
+        mut installed_mods: Vec<ModPackageView>,
+        unavailable: u32,
+    ) {
+        installed_mods.retain(|package| package.status == ModPackageStatus::Installed);
+        installed_mods.sort_by(|left, right| {
+            left.mod_id
+                .cmp(&right.mod_id)
+                .then_with(|| left.version.cmp(&right.version))
+        });
+        installed_mods
+            .dedup_by(|left, right| left.mod_id == right.mod_id && left.version == right.version);
+        self.installed_mods = installed_mods;
+        self.unavailable_installed_mods = unavailable;
+    }
+
     #[must_use]
     pub fn cancellation_token(&self) -> CancellationToken {
         self.cancellation.clone()
     }
 
     pub async fn initial_snapshot(&self) -> Result<UiSnapshot, RuntimeError> {
-        self.service
+        let mut snapshot = self
+            .service
             .snapshot(
                 self.session_id,
                 RuntimePhase::Idle,
@@ -122,7 +145,9 @@ impl GameRuntime {
                 Vec::new(),
                 Vec::new(),
             )
-            .await
+            .await?;
+        self.attach_installed_mods(&mut snapshot);
+        Ok(snapshot)
     }
 
     pub fn handle_player_input(
@@ -419,7 +444,7 @@ impl GameRuntime {
                         supporting_events.clone(),
                     )
                     .await?;
-                let snapshot = self
+                let mut snapshot = self
                     .service
                     .snapshot(
                         self.session_id,
@@ -429,6 +454,7 @@ impl GameRuntime {
                         supporting_events,
                     )
                     .await?;
+                self.attach_installed_mods(&mut snapshot);
                 return Ok(PlayerTurnOutcome {
                     narration,
                     npc_results,
@@ -991,6 +1017,46 @@ impl GameRuntime {
         }
         Ok(())
     }
+
+    fn attach_installed_mods(&self, snapshot: &mut UiSnapshot) {
+        merge_installed_mods(
+            &mut snapshot.packages,
+            &self.installed_mods,
+            self.unavailable_installed_mods,
+        );
+    }
+}
+
+fn merge_installed_mods(
+    catalog: &mut PackageCatalogView,
+    installed_mods: &[ModPackageView],
+    unavailable: u32,
+) {
+    let enabled = catalog
+        .mods
+        .iter()
+        .filter(|package| package.status == ModPackageStatus::Enabled)
+        .map(|package| (package.mod_id.clone(), package.version.clone()))
+        .collect::<BTreeSet<_>>();
+    catalog.mods.extend(
+        installed_mods
+            .iter()
+            .filter(|package| {
+                package.status == ModPackageStatus::Installed
+                    && !enabled.contains(&(package.mod_id.clone(), package.version.clone()))
+            })
+            .cloned(),
+    );
+    catalog.mods.sort_by(|left, right| {
+        left.status
+            .cmp(&right.status)
+            .then_with(|| left.mod_id.cmp(&right.mod_id))
+            .then_with(|| left.version.cmp(&right.version))
+    });
+    catalog.mods.dedup_by(|left, right| {
+        left.mod_id == right.mod_id && left.version == right.version && left.status == right.status
+    });
+    catalog.unavailable_installed = unavailable;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -1414,5 +1480,45 @@ mod tests {
             ] if pending[0].state == ToolActivityState::Pending
                 && settled[0].state == ToolActivityState::Rejected
         ));
+    }
+
+    #[test]
+    fn installed_catalog_keeps_enabled_authority_and_stable_order() {
+        let enabled = ModPackageView {
+            mod_id: "games.loreloom.weather".parse().expect("enabled Mod ID"),
+            version: "1.0.0".parse().expect("enabled version"),
+            status: ModPackageStatus::Enabled,
+            dependency_count: 1,
+        };
+        let mut catalog = PackageCatalogView {
+            world: loreloom_core::WorldPackageView {
+                world_id: "games.loreloom.world".parse().expect("world ID"),
+                version: "1.0.0".parse().expect("world version"),
+            },
+            mods: vec![enabled.clone()],
+            unavailable_installed: 0,
+        };
+        let installed = vec![
+            ModPackageView {
+                status: ModPackageStatus::Installed,
+                ..enabled
+            },
+            ModPackageView {
+                mod_id: "games.loreloom.characters"
+                    .parse()
+                    .expect("installed Mod ID"),
+                version: "2.0.0".parse().expect("installed version"),
+                status: ModPackageStatus::Installed,
+                dependency_count: 0,
+            },
+        ];
+
+        merge_installed_mods(&mut catalog, &installed, 2);
+
+        assert_eq!(catalog.mods.len(), 2);
+        assert_eq!(catalog.mods[0].status, ModPackageStatus::Enabled);
+        assert_eq!(catalog.mods[1].status, ModPackageStatus::Installed);
+        assert_eq!(catalog.mods[1].mod_id.as_str(), "games.loreloom.characters");
+        assert_eq!(catalog.unavailable_installed, 2);
     }
 }

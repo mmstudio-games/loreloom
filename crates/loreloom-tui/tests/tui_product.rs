@@ -8,10 +8,11 @@ use std::{
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
 use loreloom_core::{
     ActionState, ActorId, AttributeView, CharacterContext, CharacterProfile, ConditionRecord,
-    ConditionSource, ConditionView, DisplayName, EntityOrigin, Fixed, LifeState, LongText,
-    NoticeKind, ObjectId, Posture, Revision, RuntimePhase, SceneContext, SessionId, ShortText,
-    ToolActivity, ToolActivityState, TranscriptItemId, TranscriptItemRecord, TranscriptSpeaker,
-    TranscriptState, TranscriptWindow, UiNotice, UiSnapshot, WorldTime,
+    ConditionSource, ConditionView, DisplayName, EntityOrigin, Fixed, LifeState, LongText, ModId,
+    NoticeKind, ObjectId, PackageCatalogView, Posture, Revision, RuntimePhase, SceneContext,
+    SessionId, ShortText, ToolActivity, ToolActivityState, TranscriptItemId, TranscriptItemRecord,
+    TranscriptSpeaker, TranscriptState, TranscriptWindow, UiNotice, UiSnapshot, WorldPackageView,
+    WorldTime,
 };
 use loreloom_tui::{
     EditorError, InputEditor, MAX_INPUT_BYTES, NarrowPage, RuntimeUiEvent, TerminalOps,
@@ -111,6 +112,14 @@ fn snapshot() -> UiSnapshot {
         },
         parameters: Vec::new(),
         active_events: Vec::new(),
+        packages: PackageCatalogView {
+            world: WorldPackageView {
+                world_id: ModId::parse("games.loreloom.demo").expect("world ID"),
+                version: "1.0.0".parse().expect("world version"),
+            },
+            mods: Vec::new(),
+            unavailable_installed: 0,
+        },
         transcript: TranscriptWindow {
             items: vec![
                 TranscriptItemRecord {

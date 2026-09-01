@@ -1,10 +1,11 @@
+use semver::Version;
 use serde::{Deserialize, Serialize};
 
 use crate::{
     ActionState, ActorId, CharacterController, CharacterProfile, ConditionRecord,
     ContentDefinitionId, DisplayName, EventId, Fixed, GoalRecord, ItemRecord, KnownFactRecord,
-    LifeState, ObjectId, ParameterValue, Posture, Revision, SessionId, ShortText, SkillGrantRecord,
-    TranscriptItemId, TranscriptItemRecord, WorldEvent, WorldTime,
+    LifeState, ModId, ObjectId, ParameterValue, Posture, Revision, SessionId, ShortText,
+    SkillGrantRecord, TranscriptItemId, TranscriptItemRecord, WorldEvent, WorldTime,
 };
 
 pub const DIAGNOSED_CONDITION_PREDICATE_ID: &str = "games.loreloom.core:tag/diagnosed_condition";
@@ -209,6 +210,37 @@ pub struct ActiveEventView {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct WorldPackageView {
+    pub world_id: ModId,
+    pub version: Version,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModPackageStatus {
+    Enabled,
+    Installed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModPackageView {
+    pub mod_id: ModId,
+    pub version: Version,
+    pub status: ModPackageStatus,
+    pub dependency_count: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PackageCatalogView {
+    pub world: WorldPackageView,
+    pub mods: Vec<ModPackageView>,
+    pub unavailable_installed: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TranscriptWindow {
     pub items: Vec<TranscriptItemRecord>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -224,6 +256,7 @@ pub struct UiSnapshot {
     pub scene: SceneContext,
     pub parameters: Vec<ParameterSetView>,
     pub active_events: Vec<ActiveEventView>,
+    pub packages: PackageCatalogView,
     pub transcript: TranscriptWindow,
     pub tool_activity: Vec<ToolActivity>,
     pub phase: RuntimePhase,
