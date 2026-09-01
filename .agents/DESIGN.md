@@ -64,6 +64,9 @@ Loreloom Runtime ───────────────► Persistence
 - Agent Harness 把 Armillae `BridgeError` 投影为只含 correlation ID、调用阶段、归一化类别和安全
   Provider 元数据的诊断；Runtime 必须保持该诊断到模型、玩家和进程错误投影，不能把所有失败折叠
   成不可判断的 `bridge_unavailable`，也不能传播 Provider 原始错误正文；
+- 二进制装配层在 World/Save 打开前预检 Narrator/NPC Provider，并把启动失败投影为包含 Provider
+  槽位、稳定 setup code、安全 Provider 名称、必要时的环境变量名和本地修复提示的诊断；不得通过
+  解析 Armillae 自由文本错误来猜测原因，也不得显示 Secret 值或凭证文件内容；
 - Persistence 保存稳定逻辑 ID 和拥有所有权的版本化记录，不序列化 Bevy 内部身份或内存布局；
   第一阶段固定为通过 Toasty 使用嵌入式 SurrealDB + SurrealKV，SQLite 只保留为提交契约测试
   对照；durable unit 必须使用显式事务；
@@ -257,6 +260,10 @@ Loreloom Runtime ───────────────► Persistence
     并与玩家当前 Place 建立双向边；Runtime 分配全部 Stable ID、绑定 Scene、保存 GeneratedOrigin，
     创建后强制重规划且不自动切换或移动。NpcAgent 不拥有改变世界拓扑的 Capability；预设与运行时
     生成的 Scene/Place 都是存档事实，离开后不删除。
+55. Provider 启动诊断由 Loreloom 二进制装配层拥有：它必须区分 `narrator`/`npc`，使用稳定的
+    setup code 标识缺失、空或不可读取的 credential reference、endpoint policy、Provider 支持与
+    Bridge 创建失败，并给出不含 Secret 的本地修复提示。环境变量名可以作为安全配置引用显示；
+    Secret 值、凭证文件内容和 Armillae 原始错误正文不得进入 Display、Debug、日志或测试输出。
 
 项目方已于 2026-08-29 明确确认第 18–23 项的 Mod 子系统方向。该确认把 Content Mod、Rule Mod、
 统一导入路径、类型化参数、结构化 Event Option、通用 Gameplay Tool、ModLock 和 Extension Mod

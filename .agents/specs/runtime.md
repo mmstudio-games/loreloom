@@ -2288,6 +2288,21 @@ Provider credential 只能使用 Armillae `CredentialRef::Environment` 或 `Cred
 `Debug`、测试 Fixture 和存档都不得暴露解析后的 `SecretString`。二进制通过固定 Armillae revision 的
 Rig factory 装配其支持的 Provider；真实网络测试保持 ignored，只有用户显式提供配置和凭证时运行。
 
+二进制装配层必须在打开 World/Save 前分别预检 `narrator` 与 `npc`，并使用启动期
+`ProviderSetupDiagnostic` 报告失败。诊断固定包含 `err_` correlation ID、Provider 槽位和稳定
+setup code，可以包含经过安全字符约束的 Provider 名称；Environment credential 失败时还可以包含
+配置中的环境变量名。用户提示必须说明修复动作，例如变量必须被导出到启动 Loreloom 的同一进程
+环境，而不是只重复 `invalid_configuration`。Secret 值、凭证文件内容、完整文件路径和 Armillae
+自由文本错误正文不得被保留或显示。
+
+第一阶段 setup code 至少覆盖 `credential_reference_missing`、
+`credential_environment_missing`、`credential_environment_invalid`、
+`credential_environment_empty`、`credential_file_unreadable`、`credential_file_empty`、
+`credential_resolver_unsupported`、`invalid_bridge_configuration`、`endpoint_not_allowed`、
+`unsupported_provider`、`credential_resolution_failed`、`provider_configuration_rejected` 与
+`bridge_creation_failed`。配置层必须从本地可验证事实产生这些代码；Bridge resolve/create 的兜底
+分类只检查结构化 `BridgeError` variant，不解析 message/code。
+
 显式 endpoint 必须同时通过 Armillae 结构校验和 Host `allowed_endpoint_hosts` 精确 allowlist；非
 loopback host 只允许 HTTPS，HTTP 只允许显式列出的 localhost 或 loopback IP。未配置 endpoint 的
 命名 Provider 使用 Adapter 自身默认 endpoint，不经过自定义 host 例外。配置加载或任一 Bridge
@@ -2343,9 +2358,10 @@ resolve/create 失败必须在创建/打开 World 和 Save 前结束；不能先
 retryable 和 retry-after 毫秒；不得保留 `BridgeError` 的 message/code、HTTP body、header、URL、
 Prompt、模型正文或 Tool 内容。`TurnOutcome::Failed` 必须携带诊断；NPC 失败时同一诊断进入
 `NpcTurnResult.failure` 和玩家 warning，fatal Narrator 失败进入 `RuntimeError`，TUI 与 headless
-显示同一 correlation ID 和安全字段。Bridge resolve/create 的启动期失败也必须使用该投影，不能
-退化为无类别的 Provider 错误。缺失诊断属于 Loreloom model protocol 错误，不能伪造
-`bridge_unavailable`。
+显示同一 correlation ID 和安全字段。Bridge resolve/create 的启动期失败必须使用第 13 节的
+`ProviderSetupDiagnostic`，并遵守与模型调用诊断相同的 correlation ID 和脱敏边界，不能退化为
+无槽位、无稳定 setup code 的 Provider 错误。缺失模型调用诊断属于 Loreloom model protocol 错误，
+不能伪造 `bridge_unavailable`。
 
 ## 16. 测试与验收门禁
 
@@ -2507,6 +2523,9 @@ CI 使用最新 stable，不执行 MSRV Job，不允许 manifest 出现 `rust-ve
 58. ToolCall 在开始执行前实时显示 Pending，并在结果返回后原位收敛；UI 只接收 call ID、名称、状态
     和脱敏错误码，终态按玩家输入、Tool Activity、Narrator 正文排序，且 Activity 不进入 Transcript、
     Agent Context 或存档。
+59. Provider 启动失败在创建/打开 World 和 Save 前报告 `narrator`/`npc` 槽位、稳定 setup code、
+    安全 Provider 名称与可执行提示；Environment credential 问题可以显示变量名，但任意错误 Display、
+    Debug 与测试输出均不包含 Secret、凭证文件内容或 Armillae 原始错误正文。
 
 ## 18. Active Spec 下的范围化实施门禁
 
