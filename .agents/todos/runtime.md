@@ -114,7 +114,8 @@ OPEN 项、后续 RFC 或 P0 Spike；空 crate 不代表相关协议已经实现
 - [x] 为二进制 Provider 装配增加启动前预检与安全诊断，区分 Narrator/NPC、稳定 setup code、环境
   变量引用和本地修复提示，且不保留 Secret 或 Armillae 原始错误正文；
 - [x] 扫描世界根 `mods/` 的有效 installed package，把主世界、enabled/installed Mod 与 unavailable
-  汇总投影到 `UiSnapshot`，并实现支持独立滚动的 `Alt+M`/`F2` Mods overlay；
+  汇总投影到 `UiSnapshot`，并实现支持独立滚动、以 `Ctrl+O`/`F2` 为可靠入口且兼容 macOS
+  `Option+M` 的 Mods overlay；
 - [x] 完成 Active Spec 第 17 节实施审计：除显式 `UPSTREAM-GATED` 的第 47 条和上述分发许可选择外，
   其余验收均有自动化或可复现证据；当前门禁为 168 tests passed，目录根世界的创建、锁分离、
   Prompt 注入与存档内容锁重开拒绝均有确定性测试。macOS arm64 release 基线仍为 81.2 MiB。

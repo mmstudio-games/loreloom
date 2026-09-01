@@ -2200,8 +2200,10 @@ catalog，不进入 ECS、Agent Context、Transcript 或存档。
 - 输入按 Unicode grapheme cluster 编辑，支持多行、cursor 移动、删除、提交、取消和历史；
 - `Enter` 提交，`Alt+Enter` 或 `Ctrl+J` 插入换行；运行中 `Esc` 产生 Cancel intent，空闲时
   `Esc` 不产生世界行为；`Ctrl+C` 产生 Quit intent；
-- `Alt+M` 或 `F2` 打开/关闭只读 Mods overlay；overlay 打开时 `Esc` 只关闭 overlay，不取消 Runtime，
-  Up/Down、PageUp/PageDown 与鼠标滚轮滚动 catalog，其它字符不进入 editor；
+- `Ctrl+O` 或 `F2` 打开/关闭只读 Mods overlay；继续接受终端实际发送 `ALT` modifier 的 `Alt+M`，
+  并把 macOS 默认 `Option+M` 产生的 `µ` 作为兼容入口。`Command+M` 通常被终端截获，`Ctrl+M` 与
+  Enter 使用同一控制码，二者不作为 TUI 快捷键承诺；overlay 打开时 `Esc` 只关闭 overlay，不取消
+  Runtime，Up/Down、PageUp/PageDown 与鼠标滚轮滚动 catalog，其它字符不进入 editor；
 - TUI 把输入作为数据发送给 Runtime，不自行构造 WorldCommand；
 - `RuntimeClient::submit` 成功把输入加入 command queue 后，TUI 必须立即在 Transcript 末尾投影
   一条 `› ` 前缀的本地 pending 玩家行，再显示 thinking row，并回到最新内容；同步提交失败时不得
@@ -2543,9 +2545,10 @@ CI 使用最新 stable，不执行 MSRV Job，不允许 manifest 出现 `rust-ve
 59. Provider 启动失败在创建/打开 World 和 Save 前报告 `narrator`/`npc` 槽位、稳定 setup code、
     安全 Provider 名称与可执行提示；Environment credential 问题可以显示变量名，但任意错误 Display、
     Debug 与测试输出均不包含 Secret、凭证文件内容或 Armillae 原始错误正文。
-60. `Alt+M`/`F2` 打开只读 Mods overlay，单独显示主世界、enabled ModLock 与通过完整安全校验的
-    installed-but-disabled 目录包；无效 installed candidate 只显示汇总数量，列表不含 hash、路径或
-    内容文本，滚动与关闭不产生 Runtime intent、WorldCommand 或持久化变化。
+60. `Ctrl+O`/`F2` 打开只读 Mods overlay，并兼容终端可区分的 `Alt+M`/macOS `Option+M`；面板单独
+    显示主世界、enabled ModLock 与通过完整安全校验的 installed-but-disabled 目录包；无效 installed
+    candidate 只显示汇总数量，列表不含 hash、路径或内容文本，滚动与关闭不产生 Runtime intent、
+    WorldCommand 或持久化变化。
 
 ## 18. Active Spec 下的范围化实施门禁
 
