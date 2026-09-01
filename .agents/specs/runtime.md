@@ -996,6 +996,11 @@ ToolCall 的顺序向内部 NarratorPlan 追加请求；只有 Narrator Turn 完
 GenerationPolicy 与 AgentProfile 由 Runtime 注入。ToolResult 只能表示请求已进入本轮待处理队列，
 不能在角色提交前返回成功的 ActorId。
 
+`npc_generation` 是单用途 Tool stage，只提供 `submit_npc_draft`。第一个成功的 Draft ToolResult
+直接完成该 stage，Runtime 不再要求或调用模型生成一个随后会被丢弃的自然语言收尾；只有 Draft
+被拒绝时 Agent Loop 才把 ToolResult 交还模型并允许在剩余预算内修正。一个 stage 最多暂存一个
+Draft，成功后的同一响应内剩余 ToolCall 不再执行。
+
 ### 9.4 角色状态、物品与技能 Tool 面
 
 第一阶段使用少量稳定的领域 Tool，不为每一种 Item/Skill 动态注册任意可变 Tool：
@@ -1406,6 +1411,15 @@ Runtime 必须先验证来源 Capability、数量和模型预算；NpcFactory �
 GenerationPolicy 注入；NpcDraft、模型输出和 Mod 文本不能声明或扩大 attribute points、允许的
 Definition、数量、lifetime 或 capability。NpcDraft 只携带请求的领域值，编译器拒绝额外控制字段。
 
+`submit_npc_draft` wire 只包含模型拥有的 `display_name`、`profile`、`base_attributes`、
+`resources`、`conditions`、`inventory`、`skills`、`knowledge` 与 `goals`。它不得包含
+AgentProfile、GenerationPolicy、Scene、Place、controller、lifetime、Capability、Revision 或
+provenance。只有 `display_name`、`profile.summary` 与 `profile.speaking_style` 必填；省略的
+`profile.values`、`profile.narrative_tags` 及其它集合字段确定性地解释为空集合。Tool JSON Schema
+必须完整描述 Knowledge/Goal tagged value 和枚举，且与 Runtime wire parser 使用同一字段集合。
+Runtime 拒绝非法 Draft 时只返回稳定 `invalid_npc_draft`、顶层字段类别和
+`retry_unchanged = false`，不得回显参数、模型正文或底层 serde 错误。
+
 Scene spawn plan 每个 entry 具有只在该 plan 内有效的唯一 local key、一个 CharacterSpawnSpec 和
 有界跨对象引用；local key 不进入长期身份。Factory 第一阶段为规范顺序的全部 entry 分配 ObjectId，
 第二阶段才把 local key/existing ObjectId 解析为类型化关系。成功的 Content/Generated 角色使用同一
@@ -1475,7 +1489,9 @@ Runtime 前验证这些引用。Host 只配置 Provider 与资源上限，不在
 Generated source 由 Runtime 注入当前 Scene/Place 与根世界 GenerationPolicy，再通过现有 Narrator
 Provider 的独立 `npc_generation` stage 调用专用 `submit_npc_draft` Tool；NpcDraft 来自 Provider
 原生 ToolCall 参数，Runtime 不解析该 stage 的自然语言正文。NpcDraft 不选择 AgentProfile；绑定由
-锁定策略决定。该 stage 计为一个 started Agent Turn，并累计到同一 PlayerInput 的
+锁定策略决定，GenerationPolicyId 与 AgentProfile 也不进入该 stage 的模型 payload。第一个成功
+Draft ToolCall 即为该 stage 的终态，不追加自然语言收尾 Model Call；只有被拒绝的 Draft 才继续
+Tool continuation。该 stage 计为一个 started Agent Turn，并累计到同一 PlayerInput 的
 Model/Token/byte/time 预算，不新增 generator Provider 配置。
 
 Preset/Generated 使用统一、质量优先的两阶段编排：

@@ -209,8 +209,11 @@ Loreloom Runtime ───────────────► Persistence
     Draft 使用现有 Narrator Provider 的独立 generation stage，并通过该 stage 提供的原生 Tool 提交，
     不从模型正文解析 JSON；它消费同一整轮编排预算，不增加隐式第三 Provider。默认
     GenerationPolicy 由根世界锁定，Agent mode 的 AgentProfile 由 Preset Character Definition 或
-    GenerationPolicy 解析，Narrator 不提交这些内部 ID。Generated provenance 明确引用触发本次生成
-    的 PlayerInput Transcript 或 WorldEvent。
+    GenerationPolicy 解析，Narrator 不提交这些内部 ID。`npc_generation` 是只提供
+    `submit_npc_draft` 的单用途 Tool stage：第一个成功提交直接结束该 stage，不再为了无用正文追加
+    Model Call；拒绝时只返回字段类别和稳定错误码，模型可在剩余预算内修正。Draft 只要求姓名与
+    Profile 核心文本，省略的集合型角色数据按空集合处理。Generated provenance 明确引用触发本次
+    生成的 PlayerInput Transcript 或 WorldEvent。
 45. Condition Clock 在 periodic 与 expiry 同 tick 时先执行 periodic，再重新校验并执行 expiry；周期
     Effect 作用于 Condition target。诊断不写回 Condition，而使用观察者拥有、以目标 Actor 为 subject、
     Condition Definition 为 value 的 confirmed KnownFact 决定是否投影真实名称。
