@@ -85,7 +85,7 @@ workspace、空 crate、版本工具和 P0 Spike 初始化。实现不得选择�
 
 - 根世界 Manifest、Mod Package manifest、Content Pack、Rule Bundle、Prompt/资源索引和拥有所有权 Schema；
 - Character/Scene/Event、Item/Skill/Attribute/Resource/Condition/Parameter 与 Gameplay Action
-  Definition；
+  Definition，以及玩家创建 preset/UGC 表单 Definition；
 - WorldLock、Mod 依赖图、版本兼容、内容哈希、Definition ID 唯一性、显式 Patch 和跨引用验证；
 - 静态 Definition Registry；
 - Character/Scene Definition 到公共领域 `CharacterSpawnSpec`/Scene spawn plan 的纯编译；
@@ -168,15 +168,17 @@ Runtime 可以依赖 Core、Content、World、Agent 和 Store，是应用策略�
 
 ### 3.7 `loreloom-tui` 与 `loreloom`
 
-TUI 拥有终端初始化/恢复、事件映射、布局、输入编辑、滚动与渲染。它只依赖 Core 暴露的
-View Model 和 Runtime Client，不依赖 Content/World/Agent/Store 实现。
+TUI 拥有终端初始化/恢复、Launcher、玩家创建表单交互、事件映射、布局、输入编辑、滚动与渲染。
+它只依赖 Core 暴露的 View Model 和 Runtime Client；Content 的玩家创建 Schema 必须先由应用装配层
+投影成无执行能力的 Startup View Model，TUI 不依赖 Content/World/Agent/Store 实现。
 
 `loreloom` 二进制拥有根世界路径、配置读取、Secret 解析、Mod Package 来源、Provider Adapter、Store
 Backend、Runtime 与 TUI 装配，以及进程退出顺序。
 
-二进制默认从当前目录 `world.toml` 加载唯一主世界；`--world PATH` 只覆盖游戏根目录路径。
-`--save PATH` 选择 SurrealKV 存档，`--headless INPUT` 执行一个完整 Turn；可重复的 `--mod PATH`
-显式启用目录 Mod。生产运行必须配置 Provider；无 Secret Mock Bridge 只用于确定性测试。
+二进制默认从当前目录 `world.toml` 加载唯一主世界；`--world PATH` 只覆盖游戏根目录路径。交互式运行
+未提供 `--save` 时进入当前世界 Launcher；显式 `--save PATH` 直达已有 SurrealKV 存档，或为不存在
+路径进入新游戏流程。`--headless INPUT` 执行一个完整 Turn 并显式绕过 Launcher；可重复的
+`--mod PATH` 显式启用目录 Mod。生产运行必须配置 Provider；无 Secret Mock Bridge 只用于确定性测试。
 
 ## 4. Rust、Cargo 与依赖策略
 
@@ -1750,7 +1752,45 @@ Extension Mod 不属于第一阶段。若后续采用 WASM Component，必须由
 Capability、Fuel/Memory/Time 配额、确定性、签名、升级和存档恢复；不得回退为不受约束的本机
 动态库加载。
 
-### 10.5 Agent Turn 与 Narrator 编排状态机
+### 10.5 玩家创建与初始角色编译
+
+`WorldManifest` 可选声明一个玩家创建入口；缺省为 `fixed`，以保持不需要角色卡的世界最简：
+
+```text
+fixed
+preset { characters: Vec<ContentDefinitionId> }
+ugc { form_id: ContentDefinitionId }
+```
+
+`fixed` 使用 Initial Scene 中唯一 Player entry 的 Character Definition。`preset` 列表必须非空、无
+重复且全部指向当前候选 Registry 中的 Character Definition；用户选定后只替换该 Player entry 的
+Character template，Scene/Place/controller/lifetime 仍由可信 bootstrap plan 注入。`ugc` 指向
+`PlayerCreationFormDefinition`；Form 必须拥有 display name、说明、基础 Character template 和稳定
+有序字段。World/Mod 可以提供 Form 与 preset Character，但根世界 Manifest 是本次新游戏采用哪种
+入口的唯一事实，Mod 不能在加载后偷偷替换用户流程。
+
+UGC 字段集合固定为：
+
+```text
+text | long_text | integer | number | boolean | single_choice | multi_choice
+```
+
+每个字段拥有稳定 field ID、展示名、可选说明、required/default 与类型边界。Choice option 拥有稳定
+value ID、展示名和受限初始化 Effect。字段 binding 只能是 `display_name`、`profile_summary`、
+`profile_speaking_style`、`profile_value`、`attribute { id }` 或 `parameter { id }`；字段类型与 binding
+必须匹配。Choice option Effect 只允许 grant item/skill/condition、set attribute/parameter 与 add
+narrative tag，并复用当前 Registry 的 Definition/Parameter/SpawnConstraint 校验；不得包含脚本、
+Tool、任意对象路径或动态 Component 名称。
+
+TUI 只产生类型化 `PlayerCreationDraft`。应用装配层把 Draft 与 Form、template、当前 Registry 和
+bootstrap 注入的 Scene/Place 纯编译为 `CharacterSpawnSpec` 及 Parameter 初值，再由既有
+NpcFactory/materialization 校验和创建。任一字段、引用、范围、Effect 或 SpawnConstraint 失败时，
+不得创建 Save 目录或部分 World。成功的 UGC Character 使用
+`EntityOrigin::PlayerCreated { template: ContentOrigin }`；最终只保存现有 Character/Item/Skill/
+Condition/Parameter records，不保存 Form 答案副本或临时 Draft。创建流程不调用 Provider、Agent 或
+Tool，也不接受模型生成的结构化正文。
+
+### 10.6 Agent Turn 与 Narrator 编排状态机
 
 单个 Narrator/NPC Turn 的逻辑状态：
 
@@ -2049,6 +2089,18 @@ Checkpoint、RecordOp、WorldEvent、Transcript 与 ActionCommit 的 JSON payloa
 
 ### 11.3 Save/Load
 
+应用装配层在每个由 Launcher 创建或显式直达后登记的 Save 旁维护一个小型、原子替换的 catalog
+sidecar。它只包含 SaveId、根世界 `world_id`、安全展示名和最近使用时间等定位信息；不包含领域
+records、World/Mod payload、Prompt、玩家输入、模型正文、Tool 数据或 Secret。Sidecar 是可丢弃、
+可重建的 Host 索引，不参与 Save checksum、Revision 或 ECS 权威事实。缺失/损坏 sidecar 不得破坏
+显式 `--save` 打开；Launcher 可以忽略该条目或显示 unavailable，但不得通过同时打开多个 embedded
+Store 来探测，以免绕过当前 SurrealDB 确定性 shutdown 门禁。
+
+Launcher 只列出当前根世界 ID 的条目。Continue 选择 `last_used_at` 最大的可用条目；Load Save 显式
+列出全部兼容条目。最终选中后仍必须执行正常 SaveManifest、WorldLock/ModLock、checksum 和领域
+重建校验，catalog 不能替代 Store 验证。New Game 先完成玩家创建与全部静态校验，再原子创建 Save；
+失败不得留下可被 Launcher 当成有效存档的 sidecar。
+
 Save 必须：
 
 - 写入临时/事务边界，不能把半个 Snapshot 暴露为可加载存档；
@@ -2120,6 +2172,21 @@ checkpoint 是一个普通显式事务中的版本化 Snapshot/compaction record
 承担。
 
 ## 12. TUI 规范
+
+### 12.0 世界 Launcher 与新游戏流程
+
+未显式提供 `--save` 的交互式运行先显示世界级 Launcher，默认焦点按可用性落在 Continue 或 New
+Game。固定入口顺序为 Continue、New Game、Load Save、Mods、Settings、Quit；不可用项必须可辨识且
+不能触发隐式 fallback。Continue/Load Save 选择后离开 Launcher 并按正常流程打开；Quit 在 Provider
+或 Store 创建前退出。Mods 页面显示当前世界启动扫描的 installed/enabled 摘要，但第一阶段不在
+Launcher 中热启停正在运行的 Mod；Settings 页面只显示或编辑明确允许的非敏感产品设置，绝不显示
+credential 值。
+
+New Game 根据第 10.5 节进入 fixed、preset 或 UGC。preset 显示选中角色的安全 Character 预览；UGC
+宽屏采用左侧实时角色摘要、右侧字段，窄屏保持字段和确认操作可达。`Tab`/`Shift+Tab` 切换字段，
+方向键调整选项或数值，`Space` 切换 boolean/multi-choice，文本字段复用 grapheme editor，`Enter`
+进入/确认当前步骤，最终确认前执行完整本地校验。`Esc` 返回上一页且不创建 Save。表单错误必须定位
+到 field ID/安全类别，不回显 Secret，也不启动 Agent 重试。
 
 ### 12.1 布局
 
@@ -2585,6 +2652,12 @@ CI 使用最新 stable，不执行 MSRV Job，不允许 manifest 出现 `rust-ve
     显示顶层 Definition 总数、非零分类、Prompt 与 Patch 数量；无效 installed candidate 只显示汇总
     数量，列表不含 hash、路径、内容文本或字节数，滚动与关闭不产生 Runtime intent、WorldCommand
     或持久化变化。
+61. 未显式提供 `--save` 时先进入当前世界 Launcher；Continue 选择最近兼容存档，Load Save 可选其它
+    兼容条目，New Game 按 fixed/preset/UGC 创建，Quit 在 Provider/Store 创建前退出。显式已有
+    `--save` 直达加载，显式不存在 `--save` 进入该目标的新游戏流程，Headless 可确定性绕过。
+62. UGC 表单的七种字段、固定 binding/effect、跨引用和范围验证均可由外部 World/Mod 内容声明；
+    玩家 Draft 无需 Provider 即可确定性编译为既有 SpawnSpec/records。无效 Draft 不创建 Save，成功
+    UGC 玩家保留 PlayerCreated provenance，存档不包含临时答案 JSON。
 
 ## 18. Active Spec 下的范围化实施门禁
 

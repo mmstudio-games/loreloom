@@ -1,7 +1,7 @@
 # Loreloom 设计索引
 
 > 状态：核心架构已接受；全部 P0 Spike 已完成，MVP 基础协议开始冻结
-> 更新日期：2026-09-01
+> 更新日期：2026-09-02
 > 作用：Loreloom 的权威工程设计入口，不在本文件重复 RFC 或 Spec 的细节
 
 本目录按成熟度区分 `rfcs/` 中的架构提案、`specs/` 中的工程契约和未来 `todos/` 中的实施
@@ -278,6 +278,16 @@ Loreloom Runtime ───────────────► Persistence
     与 `F2` 是可靠入口，继续兼容终端可区分的 `Alt+M` 和 macOS 默认 `Option+M`；`Esc` 只关闭
     overlay，方向键、PageUp/PageDown 与滚轮滚动。安装目录和摘要只在启动时扫描，展示不启用 Mod、
     不修改存档，也不进入 ECS、Agent Context 或 Transcript。
+57. 未显式提供 `--save` 的交互式启动默认进入世界级 Launcher，而不是静默打开固定存档：入口提供
+    Continue、New Game、Load Save、Mods、Settings 与 Quit；Continue 只选择当前 `world_id` 最近使用
+    的可用存档。显式 `--save` 保留自动化/高级用户直达语义，已存在路径直接加载，不存在路径进入该
+    目标的新游戏创建流程；Headless 可以显式绕过 Launcher。新游戏的玩家来源由根世界声明为
+    `fixed | preset | ugc`：fixed 使用初始 Scene 的玩家模板，preset 由用户选择版本化 Character
+    Definition，ugc 使用内容作者声明的确定性表单。UGC 字段只允许 text、long_text、integer、number、
+    boolean、single_choice 与 multi_choice，使用固定 binding/effect 枚举生成既有
+    `CharacterSpawnSpec`、Parameter 初值及最终领域 records；创建过程不调用模型、不解析模型 JSON，
+    临时 Draft 不进入存档。UGC 玩家保存 PlayerCreated provenance；首个公开版本前直接压平进初始
+    v1。Launcher 的存档目录元数据是可重建的 Host 索引，不是 ECS/Store 权威事实，也不得包含 Secret。
 
 项目方已于 2026-08-29 明确确认第 18–23 项的 Mod 子系统方向。该确认把 Content Mod、Rule Mod、
 统一导入路径、类型化参数、结构化 Event Option、通用 Gameplay Tool、ModLock 和 Extension Mod

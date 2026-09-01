@@ -126,6 +126,12 @@ OPEN 项、后续 RFC 或 P0 Spike；空 crate 不代表相关协议已经实现
   `Option+M` 的 Mods overlay；
 - [x] 从启用编译候选和未启用目录检查生成非持久化 `PackageContentView`，在 Mods overlay 展示每个
   Mod 的顶层 Definition 总数/分类以及 Prompt/Patch 数量，并覆盖 enabled 优先合并和滚动边界；
+- [ ] 实现默认世界 Launcher、兼容 Save catalog sidecar、Continue/New Game/Load Save/Mods/Settings/
+  Quit 入口，并保留显式 `--save` 与 Headless 绕过语义；
+- [ ] 实现 fixed/preset/UGC 玩家创建 Content Schema、七类字段、固定 binding/effect、类型化 Draft、
+  CharacterSpawnSpec/Parameter 初值编译、PlayerCreated provenance 与创建前全量校验；
+- [ ] 实现 preset/UGC TUI 选择与表单交互、预览、键盘导航、错误定位，并覆盖无 Provider 创建、失败
+  不留存档、round-trip 和确定性渲染测试；
 - [x] 完成 Active Spec 第 17 节实施审计：除显式 `UPSTREAM-GATED` 的第 47 条和上述分发许可选择外，
   其余验收均有自动化或可复现证据；当前门禁为 174 tests passed，目录根世界的创建、锁分离、
   Prompt 注入与存档内容锁重开拒绝均有确定性测试。macOS arm64 release 基线仍为 81.2 MiB。
