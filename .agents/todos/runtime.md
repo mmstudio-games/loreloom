@@ -103,7 +103,7 @@ OPEN 项、后续 RFC 或 P0 Spike；空 crate 不代表相关协议已经实现
 - [x] 把 Spec 8.2 的 Character/Scene/Transcript 数量与字节上限接入 Narrator/NpcAgent 产品上下文，
   并在裁剪时投影 `truncated` metadata；
 - [x] 用 Runtime phase/status event 驱动 TUI thinking 展示，并移除 Provider 文本 streaming 产品协议；
-- [ ] 在 Tool 执行前后发布安全的当前 Turn Activity，实时更新 TUI pending/终态状态并保持玩家输入、
+- [x] 在 Tool 执行前后发布安全的当前 Turn Activity，实时更新 TUI pending/终态状态并保持玩家输入、
   Tool Activity、Narrator 正文的显示顺序；
 - [x] 完成面向叙事阅读的 TUI 视觉重构；
 - [x] 修复 Transcript 底部锚定、按折行 viewport 约束的 PageUp/PageDown 与鼠标滚轮滚动；
@@ -112,5 +112,5 @@ OPEN 项、后续 RFC 或 P0 Spike；空 crate 不代表相关协议已经实现
 - [x] 保留 Armillae 模型失败的脱敏 category、阶段、安全 Provider 元数据与 `err_` correlation ID，
   贯通启动、AgentRunner、NpcTurnResult、Runtime、TUI notice 和 headless 错误；
 - [x] 完成 Active Spec 第 17 节实施审计：除显式 `UPSTREAM-GATED` 的第 47 条和上述分发许可选择外，
-  其余验收均有自动化或可复现证据；当前门禁为 148 tests passed，目录根世界的创建、锁分离、
+  其余验收均有自动化或可复现证据；当前门禁为 157 tests passed，目录根世界的创建、锁分离、
   Prompt 注入与存档内容锁重开拒绝均有确定性测试。macOS arm64 release 基线仍为 81.2 MiB。

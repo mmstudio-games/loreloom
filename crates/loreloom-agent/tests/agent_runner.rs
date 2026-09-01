@@ -19,8 +19,8 @@ use armillae_tools::{BoxFuture as ToolFuture, ToolContext, ToolExecutionError, T
 use futures_executor::block_on;
 use loreloom_agent::{
     AgentRunner, AgentToolContext, BudgetReason, CancellationToken, ModelFailureCategory,
-    ModelFailureStage, ModelInvocationKind, NarratorPlan, ResourceBudget, TurnFailureStage,
-    TurnInvocation, TurnStatus,
+    ModelFailureStage, ModelInvocationKind, NarratorPlan, ResourceBudget, ToolCallOutcome,
+    ToolCallProgress, TurnFailureStage, TurnInvocation, TurnStatus,
 };
 use loreloom_core::{ActorId, Revision, SessionId};
 use serde_json::json;
@@ -205,12 +205,12 @@ fn product_runner_preserves_tool_order_correlation_and_committed_revision() {
         MockResponse::text("done"),
     ]);
     let cancellation = CancellationToken::new();
+    let mut progress = Vec::new();
 
-    let outcome = block_on(runner.run_turn(invocation(
-        &bridge,
-        &cancellation,
-        ResourceBudget::default(),
-    )));
+    let outcome = block_on(runner.run_turn_with_progress(
+        invocation(&bridge, &cancellation, ResourceBudget::default()),
+        |event| progress.push(event),
+    ));
 
     assert_eq!(outcome.status, TurnStatus::Completed);
     assert_eq!(outcome.final_text.as_deref(), Some("done"));
@@ -224,6 +224,31 @@ fn product_runner_preserves_tool_order_correlation_and_committed_revision() {
     assert_eq!(outcome.tool_results[0].call_id.as_str(), "call-first");
     assert_eq!(outcome.tool_results[1].call_id.as_str(), "call-second");
     assert_eq!(outcome.committed_events.len(), 2);
+    assert_eq!(
+        progress,
+        vec![
+            ToolCallProgress::Started {
+                call_id: "call-first".to_owned(),
+                name: "commit_first".to_owned(),
+            },
+            ToolCallProgress::Finished(ToolCallOutcome {
+                call_id: "call-first".to_owned(),
+                name: "commit_first".to_owned(),
+                is_error: false,
+                error_code: None,
+            }),
+            ToolCallProgress::Started {
+                call_id: "call-second".to_owned(),
+                name: "inspect_after".to_owned(),
+            },
+            ToolCallProgress::Finished(ToolCallOutcome {
+                call_id: "call-second".to_owned(),
+                name: "inspect_after".to_owned(),
+                is_error: false,
+                error_code: None,
+            }),
+        ]
+    );
     assert_eq!(
         outcome.committed_events[1].to_string(),
         "evt_01890f6a-2b41-7d4e-8f90-123456789abc"

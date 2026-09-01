@@ -151,6 +151,12 @@ pub struct ToolActivity {
     pub code: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RuntimeProgressEvent {
+    PhaseChanged(RuntimePhase),
+    ToolActivityChanged(Vec<ToolActivity>),
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NoticeKind {

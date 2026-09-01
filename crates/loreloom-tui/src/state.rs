@@ -1,5 +1,5 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent, MouseEventKind};
-use loreloom_core::{Revision, RuntimePhase, TranscriptSpeaker, UiSnapshot};
+use loreloom_core::{Revision, RuntimePhase, ToolActivity, TranscriptSpeaker, UiSnapshot};
 use thiserror::Error;
 
 use crate::{EditorError, InputEditor};
@@ -23,6 +23,7 @@ impl NarrowPage {
 pub enum RuntimeUiEvent {
     Snapshot(Box<UiSnapshot>),
     PhaseChanged(RuntimePhase),
+    ToolActivityChanged(Vec<ToolActivity>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -57,6 +58,7 @@ pub struct TuiApp {
     pub working_phase: Option<RuntimePhase>,
     pub spinner_frame: u8,
     pending_submission: Option<PendingSubmission>,
+    live_tool_activity: Option<Vec<ToolActivity>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -78,6 +80,7 @@ impl TuiApp {
             working_phase: None,
             spinner_frame: 0,
             pending_submission: None,
+            live_tool_activity: None,
         }
     }
 
@@ -107,6 +110,7 @@ impl TuiApp {
                     self.pending_submission = None;
                 }
                 self.snapshot = *snapshot;
+                self.live_tool_activity = None;
             }
             RuntimeUiEvent::PhaseChanged(phase) => {
                 if matches!(
@@ -120,7 +124,13 @@ impl TuiApp {
                 } else {
                     self.working_phase = Some(phase);
                     self.spinner_frame = 0;
+                    if self.live_tool_activity.is_none() {
+                        self.live_tool_activity = Some(Vec::new());
+                    }
                 }
+            }
+            RuntimeUiEvent::ToolActivityChanged(activity) => {
+                self.live_tool_activity = Some(activity);
             }
         }
     }
@@ -130,6 +140,7 @@ impl TuiApp {
             text: input,
             after_revision: self.snapshot.revision,
         });
+        self.live_tool_activity = Some(Vec::new());
         self.transcript_scroll = 0;
     }
 
@@ -138,6 +149,12 @@ impl TuiApp {
         self.pending_submission
             .as_ref()
             .map(|pending| pending.text.as_str())
+    }
+
+    pub(crate) fn tool_activity(&self) -> &[ToolActivity] {
+        self.live_tool_activity
+            .as_deref()
+            .unwrap_or(&self.snapshot.tool_activity)
     }
 
     pub fn tick_spinner(&mut self) {

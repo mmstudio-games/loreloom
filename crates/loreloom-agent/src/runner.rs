@@ -34,6 +34,12 @@ pub struct ToolCallOutcome {
     pub error_code: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ToolCallProgress {
+    Started { call_id: String, name: String },
+    Finished(ToolCallOutcome),
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct TurnOutcome {
     pub status: TurnStatus,
@@ -87,6 +93,17 @@ impl AgentRunner {
     }
 
     pub async fn run_turn(&self, invocation: TurnInvocation<'_>) -> TurnOutcome {
+        self.run_turn_with_progress(invocation, |_| {}).await
+    }
+
+    pub async fn run_turn_with_progress<F>(
+        &self,
+        invocation: TurnInvocation<'_>,
+        mut on_tool_progress: F,
+    ) -> TurnOutcome
+    where
+        F: FnMut(ToolCallProgress),
+    {
         let TurnInvocation {
             model_invocation,
             bridge,
@@ -261,6 +278,10 @@ impl AgentRunner {
                         usage,
                     );
                 }
+                on_tool_progress(ToolCallProgress::Started {
+                    call_id: call.id.as_str().to_owned(),
+                    name: call.name.clone(),
+                });
                 let context = ToolContext::new().with_extension(tool_context.clone());
                 let result = if offered_tools.contains(call.name.as_str()) {
                     match self.executor.execute(context, call.clone()).await {
@@ -287,12 +308,14 @@ impl AgentRunner {
                     advance_tool_revision(&result, &mut tool_context);
                 }
                 let error_code = result.is_error.then(|| tool_error_code(&result)).flatten();
-                tool_calls.push(ToolCallOutcome {
+                let outcome = ToolCallOutcome {
                     call_id: call.id.as_str().to_owned(),
                     name: call.name,
                     is_error: result.is_error,
                     error_code,
-                });
+                };
+                on_tool_progress(ToolCallProgress::Finished(outcome.clone()));
+                tool_calls.push(outcome);
                 request.messages.push(Message::tool_result(result.clone()));
                 tool_results.push(result);
             }

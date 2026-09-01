@@ -5,11 +5,11 @@
  00:00:42              │
  STATUS                │ Mira says it rang before dawn.
  Alive · Standing ·    │
- Idle                  │ ⠋ Narrator is thinking…
- RESOURCES             │ ◌ observe_scene  running
- Stamina  ━━─────  4/12│ ✓ npc_speak  done
- ATTRIBUTES            │ ! take_crown  rejected · invalid_input
- Resolve  12  base 10  │ × provider_call  failed
+ Idle                  │ ◌ observe_scene  running
+ RESOURCES             │ ✓ npc_speak  done
+ Stamina  ━━─────  4/12│ ! take_crown  rejected · invalid_input
+ ATTRIBUTES            │ × provider_call  failed
+ Resolve  12  base 10  │ ⠋ Narrator is thinking…
  CONDITIONS            │ i Demo ready
  ◇ Unknown condition · │ ╭ Working · Esc to cancel ───────────────────────────╮
  Hands tremble.        │ │› Look closer▏                                      │

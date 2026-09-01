@@ -41,10 +41,11 @@ use loreloom_core::{
     EventStatus, FactSource, FactSubject, FactValue, Fixed, GenerationSource, GoalRecord,
     GoalSource, GoalStatus, IntensityPolicy, ItemRecord, KnowledgeStatus, KnownFactRecord,
     LifeState, LockedMod, LongText, ModId, ModLock, ModSourceKind, ObjectId, ParameterSetRecord,
-    ParameterValue, PlaceRecord, Posture, ResourcePool, Revision, SAVE_FORMAT_V1, SaveId,
-    SaveManifest, SceneRecord, SessionId, ShortText, SkillGrantRecord, SkillSource,
-    SpawnConstraints, StackState, SystemIdGenerator, TranscriptSpeaker, WorldCommand,
-    WorldCommandKind, WorldEventKind, WorldId, WorldLock, WorldStateRecord, WorldTime,
+    ParameterValue, PlaceRecord, Posture, ResourcePool, Revision, RuntimeProgressEvent,
+    SAVE_FORMAT_V1, SaveId, SaveManifest, SceneRecord, SessionId, ShortText, SkillGrantRecord,
+    SkillSource, SpawnConstraints, StackState, SystemIdGenerator, ToolActivityState,
+    TranscriptSpeaker, WorldCommand, WorldCommandKind, WorldEventKind, WorldId, WorldLock,
+    WorldStateRecord, WorldTime,
 };
 use loreloom_runtime::{
     ContextProjectionPolicy, GameRuntime, NpcResourcePolicy, OrchestrationBudget, RuntimeConfig,
@@ -2372,13 +2373,32 @@ async fn player_narrator_npc_and_surreal_store_form_a_durable_vertical_slice() {
         npc.clone(),
     );
 
-    let mut phases = Vec::new();
+    let mut progress = Vec::new();
     let outcome = runtime
-        .handle_player_input_with_phase("Ask Mira to listen to the rain.", |phase| {
-            phases.push(phase);
+        .handle_player_input_with_progress("Ask Mira to listen to the rain.", |event| {
+            progress.push(event);
         })
         .await
         .expect("complete player turn");
+
+    let phases = progress
+        .iter()
+        .filter_map(|event| match event {
+            RuntimeProgressEvent::PhaseChanged(phase) => Some(*phase),
+            RuntimeProgressEvent::ToolActivityChanged(_) => None,
+        })
+        .collect::<Vec<_>>();
+    let mut npc_tool_states = progress
+        .iter()
+        .filter_map(|event| match event {
+            RuntimeProgressEvent::ToolActivityChanged(activity) => activity
+                .iter()
+                .find(|tool| tool.name == "request_npc_turn")
+                .map(|tool| tool.state),
+            RuntimeProgressEvent::PhaseChanged(_) => None,
+        })
+        .collect::<Vec<_>>();
+    npc_tool_states.dedup();
 
     assert_eq!(
         phases.first(),
@@ -2399,6 +2419,17 @@ async fn player_narrator_npc_and_surreal_store_form_a_durable_vertical_slice() {
     assert_eq!(
         phases.last(),
         Some(&loreloom_core::RuntimePhase::UpdatingWorld)
+    );
+    assert_eq!(
+        npc_tool_states,
+        vec![ToolActivityState::Pending, ToolActivityState::Succeeded]
+    );
+    assert_eq!(
+        progress.iter().rev().find_map(|event| match event {
+            RuntimeProgressEvent::ToolActivityChanged(activity) => Some(activity),
+            RuntimeProgressEvent::PhaseChanged(_) => None,
+        }),
+        Some(&outcome.snapshot.tool_activity)
     );
 
     assert_eq!(outcome.snapshot.revision, Revision::new(3));

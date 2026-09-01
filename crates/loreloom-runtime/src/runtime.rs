@@ -11,13 +11,13 @@ use loreloom_agent::{
     ModelFailureDiagnostic, ModelInvocationKind, NarratorDefinition, NarratorNpcDecision,
     NarratorPlan, NpcAgent, NpcAssignment, NpcControllerKind, NpcLifetime, NpcNarrativeAction,
     NpcTarget, NpcTurnRequest, NpcTurnResult, NpcTurnStatus, ResourceUsage, ToolCallOutcome,
-    TurnInvocation, TurnOutcome, TurnStatus,
+    ToolCallProgress, TurnInvocation, TurnOutcome, TurnStatus,
 };
 use loreloom_core::{
     ActorId, CharacterController, CharacterLifetime, ContentDefinitionId, GeneratedOrigin,
-    GenerationId, GenerationSource, LongText, NoticeKind, Revision, RuntimePhase, SessionId,
-    ShortText, ToolActivity, ToolActivityState, TranscriptItemId, TranscriptSpeaker, UiNotice,
-    UiSnapshot, WorldCommandKind,
+    GenerationId, GenerationSource, LongText, NoticeKind, Revision, RuntimePhase,
+    RuntimeProgressEvent, SessionId, ShortText, ToolActivity, ToolActivityState, TranscriptItemId,
+    TranscriptSpeaker, UiNotice, UiSnapshot, WorldCommandKind,
 };
 use serde::Serialize;
 use serde_json::json;
@@ -129,7 +129,7 @@ impl GameRuntime {
         &mut self,
         input: impl Into<String>,
     ) -> impl Future<Output = Result<PlayerTurnOutcome, RuntimeError>> + '_ {
-        self.handle_player_input_with_phase(input, |_| {})
+        self.handle_player_input_with_progress(input, |_| {})
     }
 
     pub fn handle_player_input_with_phase<'a, F>(
@@ -139,6 +139,21 @@ impl GameRuntime {
     ) -> impl Future<Output = Result<PlayerTurnOutcome, RuntimeError>> + 'a
     where
         F: FnMut(RuntimePhase) + 'a,
+    {
+        self.handle_player_input_with_progress(input, move |event| {
+            if let RuntimeProgressEvent::PhaseChanged(phase) = event {
+                on_phase(phase);
+            }
+        })
+    }
+
+    pub fn handle_player_input_with_progress<'a, F>(
+        &'a mut self,
+        input: impl Into<String>,
+        mut on_progress: F,
+    ) -> impl Future<Output = Result<PlayerTurnOutcome, RuntimeError>> + 'a
+    where
+        F: FnMut(RuntimeProgressEvent) + 'a,
     {
         let input = input.into();
         let input = if input.trim().is_empty() {
@@ -151,17 +166,18 @@ impl GameRuntime {
         }
         async move {
             let input = input?;
-            self.handle_valid_player_input(input, &mut on_phase).await
+            self.handle_valid_player_input(input, &mut on_progress)
+                .await
         }
     }
 
     async fn handle_valid_player_input<F>(
         &mut self,
         input: LongText,
-        on_phase: &mut F,
+        on_progress: &mut F,
     ) -> Result<PlayerTurnOutcome, RuntimeError>
     where
-        F: FnMut(RuntimePhase),
+        F: FnMut(RuntimeProgressEvent),
     {
         self.config
             .context_projection
@@ -180,7 +196,7 @@ impl GameRuntime {
             .service
             .observation(self.session_id, input.clone())
             .await?;
-        on_phase(RuntimePhase::PersistingInput);
+        publish_phase(on_progress, RuntimePhase::PersistingInput);
         let player_transcript = self
             .service
             .append_transcript(
@@ -200,7 +216,7 @@ impl GameRuntime {
         let mut settled_materializations = Vec::new();
         let mut generated_attempts = 0_u32;
         loop {
-            on_phase(RuntimePhase::NarratorThinking);
+            publish_phase(on_progress, RuntimePhase::NarratorThinking);
             orchestration.start_round(self.config.orchestration_budget, started)?;
             orchestration.start_turn(self.config.orchestration_budget, started)?;
             let mut observation = self
@@ -227,22 +243,26 @@ impl GameRuntime {
             )?;
             let narrator_turn = self
                 .runner
-                .run_turn(TurnInvocation {
-                    model_invocation: ModelInvocationKind::Narrator,
-                    bridge: self.narrator.as_ref(),
-                    request: narrator_request,
-                    tool_context: AgentToolContext {
-                        actor_id: before.player.actor_id,
-                        revision: self.service.revision().await,
-                        session_id: self.session_id,
-                        capabilities: self.config.narrator_capabilities.clone(),
+                .run_turn_with_progress(
+                    TurnInvocation {
+                        model_invocation: ModelInvocationKind::Narrator,
+                        bridge: self.narrator.as_ref(),
+                        request: narrator_request,
+                        tool_context: AgentToolContext {
+                            actor_id: before.player.actor_id,
+                            revision: self.service.revision().await,
+                            session_id: self.session_id,
+                            capabilities: self.config.narrator_capabilities.clone(),
+                        },
+                        budget: self.config.turn_budget,
+                        max_context_tokens: self.config.context_projection.max_context_tokens,
+                        cancellation: &self.cancellation,
                     },
-                    budget: self.config.turn_budget,
-                    max_context_tokens: self.config.context_projection.max_context_tokens,
-                    cancellation: &self.cancellation,
-                })
+                    |progress| {
+                        publish_tool_progress(&mut tool_activity, progress, on_progress);
+                    },
+                )
                 .await;
-            append_tool_activity(&mut tool_activity, &narrator_turn.tool_calls);
             orchestration.merge(
                 &narrator_turn.usage,
                 self.config.orchestration_budget,
@@ -252,7 +272,7 @@ impl GameRuntime {
             let mut pending_turns = self.executor.take_pending_npc_turns().await;
             let pending_topology = self.executor.take_pending_topology().await;
             let narrator_text = require_text(&narrator_turn)?;
-            on_phase(RuntimePhase::ResolvingOrchestration);
+            publish_phase(on_progress, RuntimePhase::ResolvingOrchestration);
             if let Some(pending_topology) = pending_topology {
                 let context = AgentToolContext {
                     actor_id: before.player.actor_id,
@@ -299,7 +319,7 @@ impl GameRuntime {
                         },
                     ),
                 };
-                on_phase(RuntimePhase::UpdatingWorld);
+                publish_phase(on_progress, RuntimePhase::UpdatingWorld);
                 let result = self.service.execute(&context, command).await;
                 match result {
                     Ok(committed) => {
@@ -353,7 +373,7 @@ impl GameRuntime {
                         &mut tool_activity,
                         &mut notices,
                         started,
-                        on_phase,
+                        on_progress,
                     )
                     .await?;
                 settled_materializations.extend(resolved.iter().filter_map(|result| {
@@ -389,7 +409,7 @@ impl GameRuntime {
                     .filter(|event| event.revision > before.revision)
                     .map(|event| event.id)
                     .collect::<Vec<_>>();
-                on_phase(RuntimePhase::UpdatingWorld);
+                publish_phase(on_progress, RuntimePhase::UpdatingWorld);
                 self.service
                     .append_transcript(
                         before.player.actor_id,
@@ -515,25 +535,29 @@ impl GameRuntime {
                     self.runner.definitions(),
                     &self.narrator_definition.npc_prompts,
                 )?;
-                on_phase(RuntimePhase::NpcThinking);
+                publish_phase(on_progress, RuntimePhase::NpcThinking);
                 let turn = self
                     .runner
-                    .run_turn(TurnInvocation {
-                        model_invocation: ModelInvocationKind::Npc,
-                        bridge: registration.bridge.as_ref(),
-                        request: npc_request,
-                        tool_context: AgentToolContext {
-                            actor_id: request.actor_id,
-                            revision: observed_revision,
-                            session_id: self.session_id,
-                            capabilities: registration.definition.allowed_tools.clone(),
+                    .run_turn_with_progress(
+                        TurnInvocation {
+                            model_invocation: ModelInvocationKind::Npc,
+                            bridge: registration.bridge.as_ref(),
+                            request: npc_request,
+                            tool_context: AgentToolContext {
+                                actor_id: request.actor_id,
+                                revision: observed_revision,
+                                session_id: self.session_id,
+                                capabilities: registration.definition.allowed_tools.clone(),
+                            },
+                            budget: self.config.turn_budget,
+                            max_context_tokens: self.config.context_projection.max_context_tokens,
+                            cancellation: &self.cancellation,
                         },
-                        budget: self.config.turn_budget,
-                        max_context_tokens: self.config.context_projection.max_context_tokens,
-                        cancellation: &self.cancellation,
-                    })
+                        |progress| {
+                            publish_tool_progress(&mut tool_activity, progress, on_progress);
+                        },
+                    )
                     .await;
-                append_tool_activity(&mut tool_activity, &turn.tool_calls);
                 if let Err(reason) = orchestration.merge_reason(
                     &turn.usage,
                     self.config.orchestration_budget,
@@ -587,10 +611,10 @@ impl GameRuntime {
         tool_activity: &mut Vec<ToolActivity>,
         notices: &mut Vec<UiNotice>,
         started: Instant,
-        on_phase: &mut F,
+        on_progress: &mut F,
     ) -> Result<Vec<NpcMaterializationResult>, RuntimeError>
     where
-        F: FnMut(RuntimePhase),
+        F: FnMut(RuntimeProgressEvent),
     {
         let mut outcomes = Vec::with_capacity(pending.len());
         for pending in pending {
@@ -697,7 +721,7 @@ impl GameRuntime {
                         lifetime,
                         required_agent_profile: required_profile.cloned(),
                     };
-                    on_phase(RuntimePhase::UpdatingWorld);
+                    publish_phase(on_progress, RuntimePhase::UpdatingWorld);
                     match self
                         .service
                         .spawn_preset_character(character_id, &materialization)
@@ -807,27 +831,34 @@ impl GameRuntime {
                             .collect(),
                         &self.narrator_definition,
                     )?;
-                    on_phase(RuntimePhase::NarratorThinking);
+                    publish_phase(on_progress, RuntimePhase::NarratorThinking);
                     let generation = self
                         .runner
-                        .run_turn(TurnInvocation {
-                            model_invocation: ModelInvocationKind::NpcGeneration,
-                            bridge: self.narrator.as_ref(),
-                            request: generation_request,
-                            tool_context: AgentToolContext {
-                                actor_id: acting_actor,
-                                revision: self.service.revision().await,
-                                session_id: self.session_id,
-                                capabilities: BTreeSet::from([
-                                    NARRATOR_SUBMIT_NPC_DRAFT_CAPABILITY.to_owned(),
-                                ]),
+                        .run_turn_with_progress(
+                            TurnInvocation {
+                                model_invocation: ModelInvocationKind::NpcGeneration,
+                                bridge: self.narrator.as_ref(),
+                                request: generation_request,
+                                tool_context: AgentToolContext {
+                                    actor_id: acting_actor,
+                                    revision: self.service.revision().await,
+                                    session_id: self.session_id,
+                                    capabilities: BTreeSet::from([
+                                        NARRATOR_SUBMIT_NPC_DRAFT_CAPABILITY.to_owned(),
+                                    ]),
+                                },
+                                budget: self.config.turn_budget,
+                                max_context_tokens: self
+                                    .config
+                                    .context_projection
+                                    .max_context_tokens,
+                                cancellation: &self.cancellation,
                             },
-                            budget: self.config.turn_budget,
-                            max_context_tokens: self.config.context_projection.max_context_tokens,
-                            cancellation: &self.cancellation,
-                        })
+                            |progress| {
+                                publish_tool_progress(tool_activity, progress, on_progress);
+                            },
+                        )
                         .await;
-                    append_tool_activity(tool_activity, &generation.tool_calls);
                     orchestration.merge(
                         &generation.usage,
                         self.config.orchestration_budget,
@@ -898,7 +929,7 @@ impl GameRuntime {
                             transcript_id: source_transcript,
                         },
                     };
-                    on_phase(RuntimePhase::UpdatingWorld);
+                    publish_phase(on_progress, RuntimePhase::UpdatingWorld);
                     match self
                         .service
                         .spawn_generated_character(&draft, &policy, origin, &materialization)
@@ -1254,21 +1285,57 @@ fn model_failure_notice(diagnostic: &ModelFailureDiagnostic) -> Result<UiNotice,
     })
 }
 
-fn append_tool_activity(activity: &mut Vec<ToolActivity>, tools: &[ToolCallOutcome]) {
-    activity.extend(tools.iter().map(|tool| ToolActivity {
-        call_id: tool.call_id.clone(),
-        name: tool.name.clone(),
-        state: if tool.is_error {
-            if tool.error_code.as_deref() == Some("tool_execution_error") {
-                ToolActivityState::Failed
+fn publish_phase<F>(on_progress: &mut F, phase: RuntimePhase)
+where
+    F: FnMut(RuntimeProgressEvent),
+{
+    on_progress(RuntimeProgressEvent::PhaseChanged(phase));
+}
+
+fn publish_tool_progress<F>(
+    activity: &mut Vec<ToolActivity>,
+    progress: ToolCallProgress,
+    on_progress: &mut F,
+) where
+    F: FnMut(RuntimeProgressEvent),
+{
+    match progress {
+        ToolCallProgress::Started { call_id, name } => activity.push(ToolActivity {
+            call_id,
+            name,
+            state: ToolActivityState::Pending,
+            code: None,
+        }),
+        ToolCallProgress::Finished(tool) => {
+            let state = tool_activity_state(&tool);
+            if let Some(pending) = activity.iter_mut().rev().find(|activity| {
+                activity.call_id == tool.call_id
+                    && activity.name == tool.name
+                    && activity.state == ToolActivityState::Pending
+            }) {
+                pending.state = state;
+                pending.code = tool.error_code;
             } else {
-                ToolActivityState::Rejected
+                activity.push(ToolActivity {
+                    call_id: tool.call_id,
+                    name: tool.name,
+                    state,
+                    code: tool.error_code,
+                });
             }
-        } else {
-            ToolActivityState::Succeeded
-        },
-        code: tool.error_code.clone(),
-    }));
+        }
+    }
+    on_progress(RuntimeProgressEvent::ToolActivityChanged(activity.clone()));
+}
+
+fn tool_activity_state(tool: &ToolCallOutcome) -> ToolActivityState {
+    if !tool.is_error {
+        ToolActivityState::Succeeded
+    } else if tool.error_code.as_deref() == Some("tool_execution_error") {
+        ToolActivityState::Failed
+    } else {
+        ToolActivityState::Rejected
+    }
 }
 
 fn elapsed_ms(started: Instant) -> u64 {
@@ -1311,5 +1378,41 @@ mod tests {
         assert_eq!(text(&request.messages[1]), "用克制的中文叙述这个世界。");
         assert_eq!(text(&request.messages[2]), "雨声应当持续存在。");
         assert!(text(&request.messages[3]).contains("\"observation\""));
+    }
+
+    #[test]
+    fn tool_progress_settles_the_matching_pending_activity_in_place() {
+        let mut activity = Vec::new();
+        let mut observed = Vec::new();
+        publish_tool_progress(
+            &mut activity,
+            ToolCallProgress::Started {
+                call_id: "call-1".to_owned(),
+                name: "narrator.create_scene".to_owned(),
+            },
+            &mut |event| observed.push(event),
+        );
+        publish_tool_progress(
+            &mut activity,
+            ToolCallProgress::Finished(ToolCallOutcome {
+                call_id: "call-1".to_owned(),
+                name: "narrator.create_scene".to_owned(),
+                is_error: true,
+                error_code: Some("stale_revision".to_owned()),
+            }),
+            &mut |event| observed.push(event),
+        );
+
+        assert_eq!(activity.len(), 1);
+        assert_eq!(activity[0].state, ToolActivityState::Rejected);
+        assert_eq!(activity[0].code.as_deref(), Some("stale_revision"));
+        assert!(matches!(
+            &observed[..],
+            [
+                RuntimeProgressEvent::ToolActivityChanged(pending),
+                RuntimeProgressEvent::ToolActivityChanged(settled),
+            ] if pending[0].state == ToolActivityState::Pending
+                && settled[0].state == ToolActivityState::Rejected
+        ));
     }
 }

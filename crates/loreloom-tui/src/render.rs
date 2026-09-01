@@ -1,5 +1,5 @@
 use loreloom_core::{
-    ActionState, Fixed, LifeState, NoticeKind, ParameterValue, Posture, RuntimePhase,
+    ActionState, Fixed, LifeState, NoticeKind, ParameterValue, Posture, RuntimePhase, ToolActivity,
     ToolActivityState, TranscriptSpeaker, TranscriptState, UiSnapshot, WorldTime,
 };
 use ratatui::{
@@ -390,7 +390,20 @@ fn render_story(frame: &mut Frame<'_>, app: &mut TuiApp, area: Rect) {
         area.height.saturating_sub(1),
     );
     let mut lines = Vec::new();
-    for item in &app.snapshot.transcript.items {
+    let tool_activity = app.tool_activity();
+    let tool_insert_before = if app.working_phase.is_none() && !tool_activity.is_empty() {
+        app.snapshot
+            .transcript
+            .items
+            .iter()
+            .rposition(|item| matches!(item.speaker, TranscriptSpeaker::Narrator))
+    } else {
+        None
+    };
+    for (index, item) in app.snapshot.transcript.items.iter().enumerate() {
+        if tool_insert_before == Some(index) {
+            push_tool_activity(&mut lines, tool_activity);
+        }
         if !lines.is_empty() {
             lines.push(Line::from(""));
         }
@@ -450,21 +463,17 @@ fn render_story(frame: &mut Frame<'_>, app: &mut TuiApp, area: Rect) {
             lines.push(Line::from(format!("  {continuation}")));
         }
     }
+    if tool_insert_before.is_none() {
+        push_tool_activity(&mut lines, tool_activity);
+    }
     if let Some(phase) = app.working_phase {
-        if !lines.is_empty() {
+        if !lines.is_empty() && tool_activity.is_empty() {
             lines.push(Line::from(""));
         }
         lines.push(Line::from(Span::styled(
             format!("{} {}…", spinner(app.spinner_frame), phase_label(phase)),
             Style::default().fg(ACCENT).add_modifier(Modifier::ITALIC),
         )));
-    }
-    for tool in &app.snapshot.tool_activity {
-        lines.push(tool_line(
-            tool.name.as_str(),
-            tool.state,
-            tool.code.as_deref(),
-        ));
     }
     for notice in &app.snapshot.notices {
         let (symbol, color) = match notice.kind {
@@ -588,6 +597,20 @@ fn render_footer(frame: &mut Frame<'_>, app: &TuiApp, area: Rect, narrow: bool) 
         ]))
         .alignment(Alignment::Center),
         area,
+    );
+}
+
+fn push_tool_activity(lines: &mut Vec<Line<'static>>, activity: &[ToolActivity]) {
+    if activity.is_empty() {
+        return;
+    }
+    if !lines.is_empty() {
+        lines.push(Line::from(""));
+    }
+    lines.extend(
+        activity
+            .iter()
+            .map(|tool| tool_line(tool.name.as_str(), tool.state, tool.code.as_deref())),
     );
 }
 

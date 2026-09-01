@@ -338,6 +338,63 @@ fn accepted_input_is_rendered_before_thinking_and_reconciled_by_snapshot() {
 }
 
 #[test]
+fn tool_activity_updates_immediately_and_settles_before_final_narration() {
+    let mut app = TuiApp::new(snapshot());
+    app.snapshot.tool_activity.clear();
+    app.snapshot.notices.clear();
+    let committed = app.snapshot.transcript.clone();
+
+    app.show_submitted_input("hello".to_owned());
+    app.apply_runtime_event(RuntimeUiEvent::PhaseChanged(RuntimePhase::NarratorThinking));
+    app.apply_runtime_event(RuntimeUiEvent::ToolActivityChanged(vec![tool(
+        "narrator.create_scene",
+        ToolActivityState::Pending,
+    )]));
+
+    assert_eq!(app.snapshot.transcript, committed);
+    let pending = text_snapshot(render(&app, 80, 28).backend().buffer());
+    let input_position = pending.find("› hello").expect("pending player input");
+    let tool_position = pending
+        .find("narrator.create_scene  running")
+        .expect("live tool activity");
+    let thinking_position = pending.find("Narrator is thinking…").expect("thinking row");
+    assert!(input_position < tool_position);
+    assert!(tool_position < thinking_position);
+
+    let settled = tool("narrator.create_scene", ToolActivityState::Succeeded);
+    app.apply_runtime_event(RuntimeUiEvent::ToolActivityChanged(vec![settled.clone()]));
+    let settled_frame = text_snapshot(render(&app, 80, 28).backend().buffer());
+    assert!(settled_frame.contains("narrator.create_scene  done"));
+    assert!(!settled_frame.contains("narrator.create_scene  running"));
+
+    let mut final_snapshot = app.snapshot.clone();
+    final_snapshot.revision = Revision::new(8);
+    final_snapshot.phase = RuntimePhase::Completed;
+    final_snapshot.tool_activity = vec![settled];
+    let mut player = final_snapshot.transcript.items[0].clone();
+    player.id = parse("trn_01890f6a-2b45-7d4e-8f90-123456789abc");
+    player.revision = Some(Revision::new(8));
+    player.text = LongText::new("hello").expect("committed player input");
+    let mut narrator = final_snapshot.transcript.items[1].clone();
+    narrator.id = parse("trn_01890f6a-2b46-7d4e-8f90-123456789abc");
+    narrator.revision = Some(Revision::new(8));
+    narrator.text = LongText::new("Final narration.").expect("final narration");
+    final_snapshot.transcript.items.extend([player, narrator]);
+    app.apply_runtime_event(RuntimeUiEvent::Snapshot(Box::new(final_snapshot)));
+
+    let final_frame = text_snapshot(render(&app, 80, 28).backend().buffer());
+    let input_position = final_frame.find("› hello").expect("committed player input");
+    let tool_position = final_frame
+        .find("narrator.create_scene  done")
+        .expect("settled tool activity");
+    let narration_position = final_frame
+        .find("Final narration.")
+        .expect("final narration");
+    assert!(input_position < tool_position);
+    assert!(tool_position < narration_position);
+}
+
+#[test]
 fn transcript_follows_latest_and_scrolls_by_page_or_mouse_with_wrapped_bounds() {
     let mut app = sample_app();
     app.working_phase = None;
@@ -507,6 +564,13 @@ fn runtime_events_change_only_snapshot_or_ephemeral_thinking_state() {
     let frame = app.spinner_frame;
     app.tick_spinner();
     assert_ne!(app.spinner_frame, frame);
+    app.transcript_scroll = 3;
+    app.apply_runtime_event(RuntimeUiEvent::ToolActivityChanged(vec![tool(
+        "observe_scene",
+        ToolActivityState::Pending,
+    )]));
+    assert_eq!(app.snapshot.transcript, transcript);
+    assert_eq!(app.transcript_scroll, 3);
 
     let editor = app.editor.clone();
     let mut next = snapshot();

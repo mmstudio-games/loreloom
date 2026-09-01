@@ -8,7 +8,9 @@ use std::{
 };
 
 use loreloom_agent::CancellationToken;
-use loreloom_core::{NoticeKind, RuntimePhase, ShortText, UiNotice, UiSnapshot};
+use loreloom_core::{
+    NoticeKind, RuntimePhase, RuntimeProgressEvent, ShortText, UiNotice, UiSnapshot,
+};
 use loreloom_runtime::{GameRuntime, RuntimeError};
 use loreloom_tui::{RuntimeClient, RuntimeUiEvent, UiClientError};
 
@@ -52,11 +54,18 @@ impl RuntimeAdapter {
                 while let Ok(command) = command_rx.recv() {
                     match command {
                         RuntimeCommand::Submit(input) => {
-                            let phase_events = event_tx.clone();
+                            let progress_events = event_tx.clone();
                             let turn =
-                                runtime.handle_player_input_with_phase(input, move |phase| {
-                                    let _ =
-                                        phase_events.send(Ok(RuntimeUiEvent::PhaseChanged(phase)));
+                                runtime.handle_player_input_with_progress(input, move |progress| {
+                                    let event = match progress {
+                                        RuntimeProgressEvent::PhaseChanged(phase) => {
+                                            RuntimeUiEvent::PhaseChanged(phase)
+                                        }
+                                        RuntimeProgressEvent::ToolActivityChanged(activity) => {
+                                            RuntimeUiEvent::ToolActivityChanged(activity)
+                                        }
+                                    };
+                                    let _ = progress_events.send(Ok(event));
                                 });
                             let result = tokio.block_on(turn);
                             let event = match result {
