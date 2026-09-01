@@ -1636,9 +1636,10 @@ prompts/*.md         # optional agent prompt resources
 ```
 
 产品启动时把世界根 `mods/` 的直接子目录作为 installed candidate，按稳定路径顺序使用与启用路径相同
-的 Package resource limit、symlink、Manifest、Engine compatibility、payload group 与 content hash
-校验。只有通过完整 Package 校验的 candidate 才进入只读 installed catalog；无效、不可读或符号链接
-candidate 只累计为 unavailable 数量，不能阻止未启用该包时启动。显式 `--mod` 仍是唯一启用入口；
+的 Package resource limit、symlink、Manifest、Engine compatibility、payload group、content hash
+与 Definition 文档解码/分组校验。只有通过上述独立 Package 校验的 candidate 才进入只读 installed
+catalog；依赖图、跨包引用和 Patch 目标只在显式启用闭包中解析。无效、不可读或符号链接 candidate
+只累计为 unavailable 数量，不能阻止未启用该包时启动。显式 `--mod` 仍是唯一启用入口；
 位于 `mods/` 外但通过 `--mod` 启用的目录包仍进入 enabled 列表。同一 Mod ID 与版本同时出现在目录
 和当前 `ModLock` 时只显示为 enabled；不同版本分别显示。catalog 是启动期 Host 投影，运行中目录
 变化不热更新，重启后重新扫描。
@@ -2191,9 +2192,15 @@ Event Option 在 current Revision 求值 `visible_if`，不可见项不进入列
 第一项 ID，调用方以“严格早于该 ID”请求上一页，没有更旧内容时为 `None`。
 
 `PackageCatalogView` 只包含主世界 ID/版本、按 enabled-first 后 ID/版本稳定排序的 Mod ID/版本、
-`enabled | installed` 状态、依赖数量和 unavailable installed candidate 数量；不得包含完整内容哈希、
-本地绝对路径或包内文本。World/ModLock 仍是 enabled 事实源，安装目录扫描只补充非持久化的 disabled
-catalog，不进入 ECS、Agent Context、Transcript 或存档。
+`enabled | installed` 状态、依赖数量、`PackageContentView` 和 unavailable installed candidate 数量。
+`PackageContentView` 计数 Mod 自己声明的顶层 Definition，并分为 characters、scenes、places、items、
+skills、conditions、events、gameplay actions、rules、parameters 与 support definitions；support 汇总
+Agent Profile、Generation Policy、Tag、Relationship Kind、Attribute、Resource 和 Equipment Slot。
+Narrator/NPC Prompt 文件数和 Patch 声明数独立计数；不递归统计 Event Node、Option、Predicate、
+Effect 或其它嵌套对象。enabled 摘要来自实际编译候选在应用跨包 Patch 前拥有的内容；installed 摘要
+来自启动扫描中通过独立 Package 校验的内容。catalog 不得包含完整内容哈希、本地绝对路径、包内文本
+或字节数。World/ModLock 仍是 enabled 事实源，摘要和 disabled catalog 都是非持久化 Host 投影，
+不进入 ECS、Agent Context、Transcript 或存档。
 
 ### 12.3 输入与 thinking 状态
 
@@ -2546,9 +2553,10 @@ CI 使用最新 stable，不执行 MSRV Job，不允许 manifest 出现 `rust-ve
     安全 Provider 名称与可执行提示；Environment credential 问题可以显示变量名，但任意错误 Display、
     Debug 与测试输出均不包含 Secret、凭证文件内容或 Armillae 原始错误正文。
 60. `Ctrl+O`/`F2` 打开只读 Mods overlay，并兼容终端可区分的 `Alt+M`/macOS `Option+M`；面板单独
-    显示主世界、enabled ModLock 与通过完整安全校验的 installed-but-disabled 目录包；无效 installed
-    candidate 只显示汇总数量，列表不含 hash、路径或内容文本，滚动与关闭不产生 Runtime intent、
-    WorldCommand 或持久化变化。
+    显示主世界、enabled ModLock 与通过独立 Package 校验的 installed-but-disabled 目录包。每个 Mod
+    显示顶层 Definition 总数、非零分类、Prompt 与 Patch 数量；无效 installed candidate 只显示汇总
+    数量，列表不含 hash、路径、内容文本或字节数，滚动与关闭不产生 Runtime intent、WorldCommand
+    或持久化变化。
 
 ## 18. Active Spec 下的范围化实施门禁
 
