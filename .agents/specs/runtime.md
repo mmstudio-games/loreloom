@@ -1040,15 +1040,17 @@ Narrator 可以使用：
 | Orchestration | `request_npc_turn` | 请求 Runtime 为已有 AgentBinding NPC 追加一次 Turn |
 | Query | `list_scene_transitions` | 返回当前 Scene 与当前 Revision 可用的 canonical Scene 切换目标 |
 | Orchestration | `transition_scene` | 暂存目标 Scene，待当前 Narrator Turn 结束后原子停用当前 Scene 并激活目标 Scene |
+| Orchestration | `create_scene` | 暂存显示名、framing 和 entry Place 文本，待 Turn 结束后创建 inactive Scene 与 entry Place |
+| Orchestration | `create_place` | 暂存显示名与描述，待 Turn 结束后在 active Scene 创建并连接玩家当前 Place |
 
 这些 Tool 不允许 Narrator 提供原始 Component、Provider、无限属性、未注册 Definition 或自定义
 Executor。Runtime 只验证和执行 Narrator 通过原生 ToolCall 提交的结构化叙事决定，不从模型正文
 解析控制协议，也不用关键词或硬编码剧情规则改写 Mention/Materialize/NpcTurn 选择。
 
-同一 Narrator Turn 最多接受一个 `transition_scene`，且它不能与待处理的 `create_npc` 或
-`request_npc_turn` 共存；后出现的冲突 ToolCall 返回结构化拒绝。Narrator Turn 结束后 Runtime 才以
-ToolCall 被接受时的 Revision 执行切换；成功、stale 或领域拒绝都形成下一次 Narrator 输入并强制
-重新规划，切换前的 NPC 请求不得在新 Scene 中启动。
+同一 Narrator Turn 最多接受一个世界拓扑请求（`transition_scene`、`create_scene` 或
+`create_place`），且它不能与待处理的 `create_npc` 或 `request_npc_turn` 共存；后出现的冲突
+ToolCall 返回结构化拒绝。Narrator Turn 结束后 Runtime 才以 ToolCall 被接受时的 Revision 执行；
+成功、stale 或领域拒绝都形成下一次 Narrator 输入并强制重新规划，旧投影中的 NPC 请求不得继续。
 
 Narrator 在切换前必须调用 `list_scene_transitions`，并把其中某一项的 `target` 对象原样传给
 `transition_scene`，不得从展示名称、玩家文本或模型记忆猜测 Stable ID。Query 与切换共享
@@ -1372,6 +1374,11 @@ pub enum GenerationSource {
 }
 ```
 
+Character、Scene 与 Place 的来源统一使用 `EntityOrigin = Content | Generated | System` tagged
+provenance；当前产品只从 Content 或 Narrator 生成 Scene/Place。预设 Scene/Place 包装完整
+ContentOrigin，运行时创建保存完整 GeneratedOrigin，不用虚构 Definition ID，也不从 Prompt 或模型
+正文重建。该字段直接属于未发布的 payload v1，不保留旧开发期仅允许 ContentOrigin 的解码分支。
+
 NpcDraft 不是 World Fact，不能直接反序列化为 Component。预设 Character Definition 与运行时
 NpcDraft 必须汇入同一个候选协议：
 
@@ -1411,18 +1418,20 @@ Character Definition 必须引用 AgentProfile。entry local key、Place/Charact
 唯一或有效，并按 local key byte-order 物化。
 
 Content 的 `compile_scene` 纯生成拥有所有权的 `SceneSpawnPlan`，包含带 ContentOrigin 的 Scene/Place
-投影和有序 Character entry，不分配 Stable ID 或访问 World。World 的共享 Character Factory 同时被
+投影、Place Definition edge 和有序 Character entry，不分配 Stable ID 或访问 World。编译器要求
+每条 edge 的两端都属于同一 Scene 且双向声明；World 物化时先为全部 Place 分配 Stable ID，再把
+Definition edge 解析为持久 Place ObjectId。World 的共享 Character Factory 同时被
 正常 `SpawnCharacter` Command 与 bootstrap 使用：Runtime 预先为 Scene、全部 Place、Character 和
 owned child 分配 Stable ID，Factory 用同一 CharacterSpawnSpec、Definition 校验、物品/Condition/
 Skill/Knowledge/Goal 物化逻辑生成 candidate records。全部 records 必须能在 Revision 0 重建并通过
 World 不变量后，才由 Save create 的单个显式事务与精确 ModLock 一起发布；任一 entry 失败不创建
 Save，也不消耗可观察的持久 ID。该初始化事务是第 10.4 节的初始化提交边界，不逐角色发布 Revision。
 
-运行时生成 NPC 在成功提交后保存完整领域状态与 GeneratedOrigin；Load 不调用模型，也不依赖
-原 Prompt 重建角色。Mod/Content version 或内容哈希不匹配时必须迁移或拒绝，不能静默使用不同
-Definition。存档 ModLock 与每个 ContentOrigin 的 mod/pack/definition/content version/hash 必须
-一致；GeneratedOrigin 不替代当前领域 Definition lock，因为生成角色仍可能引用 Attribute、Item、
-Skill 等内容定义。
+运行时生成 NPC/Scene/Place 在成功提交后保存完整领域状态与 GeneratedOrigin；Load 不调用模型，也
+不依赖原 Prompt 重建实例。ContentOrigin 保留物化时的 provenance，但候选 WorldLock/ModLock 不因
+hash 不同而被要求与其逐字相等；Runtime 必须用候选 Registry 重建并验证所有仍参与模拟的
+Definition 引用，成功后原子采用候选 Lock，失败时保持存档及原 Lock 不变。GeneratedOrigin 不替代
+当前领域 Definition lock，因为生成实例仍可能引用 Attribute、Item、Skill 等内容定义。
 
 ### 10.3 NPC 创建、可调度投影与物化生命周期
 
@@ -1532,6 +1541,49 @@ ID，当前 Scene 和重复 Definition 目标不进入结果。这个发现步�
 Scene Definition 第一阶段在单个 World 中采用单实例语义；需要同一模板的多个独立实例属于后续
 Schema 扩展，不能靠重复物化产生无法区分的副本。World 不变量要求恰好一个 Scene 为 active，且
 必须与 `WorldState.active_scene` 一致。
+
+#### 10.3.2 Scene/Place 运行时创建与连接
+
+`SceneRecord` 是持久叙事/生命周期容器，拥有 display name、framing、entry Place、active 状态与
+EntityOrigin；`PlaceRecord` 是该 Scene 内的位置节点，拥有 display name、description、tags、
+EntityOrigin 和 `BTreeSet<ObjectId>` 双向 edges。每个 edge 必须存在、指向 Place、属于同一 Scene、
+不能自连接，并在对端包含反向 edge。Character.location 必须指向 Place；普通 `Move` 还必须要求
+目标位于当前 Place 的 edges 中。Scene transition 直接把玩家放到目标 entry Place，不受普通 edge
+约束。
+
+Narrator Tool wire 固定为：
+
+```text
+create_scene {
+  display_name,
+  framing,
+  entry_place_name,
+  entry_place_description
+}
+
+create_place {
+  display_name,
+  description
+}
+```
+
+模型不能提供 SceneId、PlaceId、edge、origin、Revision 或激活状态。Runtime 从可信 ToolContext 与
+本次 PlayerInput provenance 构造延迟 Command：
+
+- `CreateScene` 在一个 candidate 中分配 Scene 和 entry Place ObjectId，保存同一个
+  GeneratedOrigin，创建 inactive Scene；成功产生 `SceneCreated` Event，不修改 active Scene 或玩家
+  location；
+- `CreatePlace` 读取执行 Revision 的 active Scene 与玩家当前 Place，分配 Place ObjectId，把新 Place
+  与当前 Place 双向连接并在一个 candidate 中保存两条完整 PlaceRecord；成功产生 `PlaceCreated`
+  Event，不移动玩家；
+- 任一校验或 durable commit 失败都不留下 Scene、Place 或半条 edge；成功、stale、拒绝均进入下一次
+  Narrator 输入并强制基于当前 Revision/Observation 重规划；新 Scene 如需进入，必须先从更新后的
+  `list_scene_transitions` 取得其 existing ObjectId，再单独调用 `transition_scene`。
+
+NpcAgent 不获得 `narrator.create_scene` 或 `narrator.create_place` Capability。Generated Scene 不进入
+未物化 Scene Definition 列表，也不参与 Definition 单实例集合；它作为已物化 inactive Scene 进入
+canonical transition targets。Definition 专属的 SceneLeft/SceneEntered Rule trigger 只为
+ContentOrigin Scene 投影；Generated Scene 仍产生通用 WorldEvent trigger。
 
 ### 10.4 Mod 加载、冲突与扩展边界
 
@@ -2429,6 +2481,10 @@ CI 使用最新 stable，不执行 MSRV Job，不允许 manifest 出现 `rust-ve
 54. Scene 切换原子停用当前 Scene 并激活或首次物化目标 Scene；再次进入恢复原状态且不调用 Provider。
 55. Observation 标记可调度的现有 NPC 后，Narrator 只需提交 ActorId 与 assignment；Tool 拒绝时
     AgentRunner、UiSnapshot 与 TUI 保留脱敏错误码，且不持久化完整参数或 ToolResult。
+56. Content Place edge 物化为同 Scene 双向 ObjectId 连接，普通移动不能越过未连接 Place；存档重建
+    后连接等价且未知、跨 Scene、单向或自连接 edge 被拒绝。
+57. Narrator 可延迟创建 inactive Scene + entry Place，或在 active Scene 创建并双向连接 Place；
+    Runtime 分配身份与 GeneratedOrigin，创建不自动切换/移动，提交后强制重规划，NpcAgent 无该权限。
 
 ## 18. Active Spec 下的范围化实施门禁
 

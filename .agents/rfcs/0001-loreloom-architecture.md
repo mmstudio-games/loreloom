@@ -379,6 +379,34 @@ Tool，而是通过稳定的通用 Tool/Command（例如选择事件选项或执
 根目录并经过大小、数量、递归深度和解压上限校验；Content/Rule Mod 默认没有文件、Shell、网络
 或 Secret 能力。
 
+#### 5.3.4 Scene、Place 与运行时世界拓扑
+
+Scene 是可反复进入的持久叙事与生命周期容器；Place 是 Scene 内 Character 实际共处、可见性与
+移动的具体节点。World 恰好一个 Scene 为 active，Character 的 location 指向 Place；普通 Place
+移动与 Scene 激活是不同命令，不能用跨 Scene `move_character` 代替 `transition_scene`。
+
+Place 的可达关系属于存档事实，以同 Scene 的双向连接表达。Content 编译必须把 Place Definition
+edge 解析为运行 ObjectId，并拒绝跨 Scene、缺失或非对称连接；World 加载与每次提交都重新验证。
+`move_character` 只能从角色当前 Place 沿一条连接到达目标 Place。
+
+NarratorAgent 可以通过 Provider 原生 Tool Calling 请求运行时拓扑扩展，但不能提供运行 Stable ID、
+Scene 归属或 edge：
+
+- `create_scene { display_name, framing, entry_place_name, entry_place_description }` 原子创建一个
+  inactive Scene 和必需 entry Place，不自动激活或移动玩家；
+- `create_place { display_name, description }` 在当前 active Scene 创建 Place，并与玩家当前 Place
+  建立双向连接，不自动移动玩家；
+- Runtime 在 Narrator Turn 结束后执行单个创建命令，分配 ID、绑定 active Scene/当前 Place、保存
+  引用 PlayerInput 或 WorldEvent 的 GeneratedOrigin，随后基于新 committed Revision 重新调用
+  Narrator；
+- 创建与 `transition_scene`、`create_npc`、`request_npc_turn` 在同一 Narrator Turn 互斥，避免用
+  切换前的场景投影继续调度；NpcAgent 不获得创建 Scene/Place 或直接编辑 edge 的 Capability。
+
+预设 Scene/Place 继续来自已验证 Content Definition；运行时生成的 Scene/Place 使用同一
+SceneRecord/PlaceRecord、WorldCommand、RecordOp 和持久化重建路径。两者都不因离开 Scene、Prompt
+改变或故事阶段结束而删除。Definition 专属的 Scene trigger 只匹配具有 ContentOrigin 的 Scene；
+Generated Scene 仍产生通用 SceneLeft/SceneEntered WorldEvent，但不伪造 Definition ID。
+
 ### 5.4 LLM 只能经 Tool 影响世界
 
 模型返回的自然语言可以直接成为候选 Transcript 内容，但不能直接修改 Working World。世界
@@ -1032,3 +1060,15 @@ Scene/Persistent lifetime 和 narrated/agent mode，后者只接受 Observation 
 CharacterSpawnSpec 路径和 Narrator 编排所有权，只撤销模型直接构造 `NpcTarget × Action × Lifetime
 × Controller × Assignment` 组合的 wire。纯叙事提及不调用 Tool；Runtime 必须明确投影可调度 NPC，
 并为 TUI 保留脱敏 Tool 拒绝码。
+
+### 16.8 Scene/Place 动态创建确认记录
+
+项目方于 2026-09-01 确认 Scene 是可反复出现的持久容器、Place 是 Scene 内具体地点，并接受由
+Narrator 通过 Tool 创建二者：`create_scene` 原子创建 inactive Scene 与 entry Place，
+`create_place` 在 active Scene 创建 Place 并连接玩家当前 Place；Runtime 负责 Stable ID、归属、
+连接、GeneratedOrigin 与提交，创建后重新规划且不自动切换或移动。NpcAgent 不直接修改世界拓扑，
+静态和动态 Scene/Place 都在离开后保留。
+
+项目方同时确认把该能力与已冻结的 WorldLock/ModLock 候选内容协调一并实施。本节是对既有 Active
+Runtime Spec 的增量确认，不引入通用 Definition migration，也不为公开版本前开发存档增加兼容
+分支。

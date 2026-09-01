@@ -63,7 +63,7 @@ OPEN 项、后续 RFC 或 P0 Spike；空 crate 不代表相关协议已经实现
   World、Agent、Store、TUI 纵向切片；
 - [x] 实现正式目录 Mod package discovery、依赖/Patch/hash lock、统一内置/外部 Registry 加载与
   精确 ModLock 重开门禁；
-- [ ] **DEFERRED**：把当前 WorldLock/ModLock 精确相等门禁替换为候选内容协调；Prompt-only、纯增量
+- [ ] 把当前 WorldLock/ModLock 精确相等门禁替换为候选内容协调；Prompt-only、纯增量
   Definition/Mod 与未被引用内容的移除通过内存重建和领域校验后可原子更新 SaveManifest Lock，缺失
   实际依赖时保持原存档不变并报告稳定 Mod/Definition ID；暂不实现通用 Definition migration；
 - [x] 把根世界/外部 Mod 的初始 Scene 统一编译为 spawn plan，并通过共享 NpcFactory/初始化提交物化，
@@ -90,6 +90,8 @@ OPEN 项、后续 RFC 或 P0 Spike；空 crate 不代表相关协议已经实现
   `promote_npc` 只改变角色的领域归属；
 - [x] 为 Narrator 提供当前 Revision 的 canonical Scene 切换目标查询，拒绝猜测或过期目标，并让
   重复的同目标请求幂等收敛；
+- [ ] 把 Place Definition edge 物化为同 Scene 双向 ObjectId 连接并约束普通移动；实现 Narrator-only
+  延迟 `create_scene`/`create_place`、GeneratedOrigin、原子 Command/Event/RecordOp 与创建后重规划；
 - [x] 实现根级 `world.toml`、外部 Content/Prompt、WorldLock 与只含已启用扩展的 ModLock；
 - [x] 统一根世界与 Mod 的 `[prompts]` Narrator/NPC 全局上下文声明，按根世界、依赖拓扑和列表顺序
   注入 Agent，并覆盖哈希、分流与未声明资源不注入测试；

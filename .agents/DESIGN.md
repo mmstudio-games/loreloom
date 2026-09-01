@@ -246,6 +246,14 @@ Loreloom Runtime ───────────────► Persistence
 53. 首个公开版本发布前，Save Format、领域 payload 和内容 Schema 的破坏性修改直接压平进各自的
     初始 v1；开发期产物直接拒绝并重建，不分配 v2、不注册兼容迁移，也不保留 legacy load 分支。
     连续 migration 基础设施只为首个公开版本之后的已发布数据契约保留。
+54. Scene 是可反复进入且持久保存的叙事/生命周期容器，World 恰好有一个 active Scene；Place 是
+    Scene 内 Character 实际共处和移动的节点，Character.location 只能指向 Place。Place 以持久化、
+    同 Scene、双向 `edges` 表达可达关系，普通 `move_character` 只能沿连接移动，Scene 切换仍通过
+    目标 `entry_place` 完成。Narrator 可以通过原生 Tool Calling 延迟请求 `create_scene` 或
+    `create_place`：前者原子创建 inactive Scene 与必需 entry Place，后者在 active Scene 创建 Place
+    并与玩家当前 Place 建立双向边；Runtime 分配全部 Stable ID、绑定 Scene、保存 GeneratedOrigin，
+    创建后强制重规划且不自动切换或移动。NpcAgent 不拥有改变世界拓扑的 Capability；预设与运行时
+    生成的 Scene/Place 都是存档事实，离开后不删除。
 
 项目方已于 2026-08-29 明确确认第 18–23 项的 Mod 子系统方向。该确认把 Content Mod、Rule Mod、
 统一导入路径、类型化参数、结构化 Event Option、通用 Gameplay Tool、ModLock 和 Extension Mod
