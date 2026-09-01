@@ -7,9 +7,9 @@ use loreloom_content::{
     AgentProfileDefinition, CONTENT_SCHEMA_V1, CharacterDefinition, ContainerDefinition,
     ContentDocument, ContentPackContext, Definition, DefinitionRegistry, EquipmentSlotDefinition,
     InitialCharacterController, InitialCharacterLifetime, InitialItem, InitialResource,
-    InitialSkill, ItemDefinition, ResourceCost, ResourceDefinition, ResourceMaximumPolicy,
-    SceneCharacterDefinition, SceneDefinition, SkillDefinition, SkillKind, SkillTarget,
-    parse_content_hash,
+    InitialSkill, ItemDefinition, PlayerBootstrap, ResourceCost, ResourceDefinition,
+    ResourceMaximumPolicy, SceneCharacterDefinition, SceneDefinition, SkillDefinition, SkillKind,
+    SkillTarget, parse_content_hash,
 };
 use loreloom_core::{
     ActionId, ActionState, ActorId, BaseAttributes, CharacterController, CharacterLifetime,
@@ -958,6 +958,41 @@ fn content_scene_bootstrap_uses_the_shared_factory_and_rebuilds_at_revision_zero
         rebuilt.project_records().expect("project bootstrap"),
         bootstrap.records
     );
+}
+
+#[test]
+fn preset_player_bootstrap_reuses_the_scene_factory_without_creating_an_agent() {
+    let fixture = fixture();
+    let plan = fixture
+        .registry
+        .compile_scene(&definition_id("scene", "harbor"))
+        .expect("compile scene plan");
+    let mut ids = SystemIdGenerator;
+    let bootstrap = GameWorld::bootstrap_with_player(
+        &plan,
+        &PlayerBootstrap::Preset {
+            character_id: definition_id("character", "warden"),
+        },
+        [7; 32],
+        &fixture.registry,
+        fixture.config,
+        &mut ids,
+    )
+    .expect("bootstrap preset player");
+    let player = bootstrap
+        .records
+        .iter()
+        .find_map(|record| match record {
+            DomainRecord::Character(character) if character.id == bootstrap.player_actor => {
+                Some(character)
+            }
+            _ => None,
+        })
+        .expect("player record");
+
+    assert_eq!(player.display_name.as_str(), "Harbor Warden");
+    assert_eq!(player.controller, CharacterController::Player);
+    assert!(player.agent_binding.is_none());
 }
 
 #[test]

@@ -13,8 +13,10 @@ use thiserror::Error;
 use crate::schema::{
     CharacterDefinition, ContentDocument, Definition, EffectDefinition, EventDefinition,
     GenerationPolicy, InitialCharacterController, InitialCharacterLifetime, NpcDraft,
-    ParameterDefinition, ParameterType, PredicateDefinition, SkillKind, SkillTarget,
-    TriggerDefinition,
+    ParameterDefinition, ParameterPersistence, ParameterType, PlayerBootstrap,
+    PlayerCreationBinding, PlayerCreationDraft, PlayerCreationEffect,
+    PlayerCreationFieldDefinition, PlayerCreationFieldType, PlayerCreationFieldValue,
+    PlayerCreationFormDefinition, PredicateDefinition, SkillKind, SkillTarget, TriggerDefinition,
 };
 
 pub const CONTENT_SCHEMA_V1: u32 = 1;
@@ -103,6 +105,12 @@ pub struct DraftCompileRequest {
     pub place_id: loreloom_core::ObjectId,
     pub controller: CharacterController,
     pub lifetime: CharacterLifetime,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompiledPlayerCreation {
+    pub character: CharacterSpawnSpec,
+    pub parameter_overrides: BTreeMap<ContentDefinitionId, loreloom_core::ParameterValue>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -452,6 +460,119 @@ impl DefinitionRegistry {
         })
     }
 
+    pub fn compile_player(
+        &self,
+        default_character_id: &ContentDefinitionId,
+        bootstrap: &PlayerBootstrap,
+        request: CharacterCompileRequest,
+    ) -> Result<CompiledPlayerCreation, ContentError> {
+        let (mut character, parameter_overrides) = match bootstrap {
+            PlayerBootstrap::Fixed => (
+                self.compile_character(default_character_id, request)?,
+                BTreeMap::new(),
+            ),
+            PlayerBootstrap::Preset { character_id } => (
+                self.compile_character(character_id, request)?,
+                BTreeMap::new(),
+            ),
+            PlayerBootstrap::Ugc { draft } => self.compile_player_draft(draft, request)?,
+        };
+        if character.controller != CharacterController::Player || character.agent_binding.is_some()
+        {
+            return Err(ContentError::CompileCharacter {
+                id: default_character_id.clone(),
+                reason: "player bootstrap must produce a player-controlled character",
+            });
+        }
+        character.lifetime = CharacterLifetime::Persistent;
+        Ok(CompiledPlayerCreation {
+            character,
+            parameter_overrides,
+        })
+    }
+
+    fn compile_player_draft(
+        &self,
+        draft: &PlayerCreationDraft,
+        request: CharacterCompileRequest,
+    ) -> Result<
+        (
+            CharacterSpawnSpec,
+            BTreeMap<ContentDefinitionId, loreloom_core::ParameterValue>,
+        ),
+        ContentError,
+    > {
+        let entry =
+            self.definitions
+                .get(&draft.form_id)
+                .ok_or_else(|| ContentError::CompileCharacter {
+                    id: draft.form_id.clone(),
+                    reason: "player creation form is unavailable",
+                })?;
+        let Definition::PlayerCreationForm(form) = &entry.definition else {
+            return Err(ContentError::CompileCharacter {
+                id: draft.form_id.clone(),
+                reason: "player creation definition has the wrong kind",
+            });
+        };
+        if draft
+            .values
+            .keys()
+            .any(|field_id| !form.fields.iter().any(|field| &field.id == field_id))
+        {
+            return Err(player_compile_error(
+                form,
+                "draft contains an unknown field",
+            ));
+        }
+
+        let mut character = self.compile_character(&form.template, request)?;
+        let EntityOrigin::Content { origin: template } = character.origin.clone() else {
+            return Err(player_compile_error(
+                form,
+                "player template origin is invalid",
+            ));
+        };
+        character.origin = EntityOrigin::PlayerCreated { template };
+        let mut parameters = BTreeMap::new();
+        let mut item_keys = character
+            .inventory
+            .iter()
+            .map(|item| item.local_key.clone())
+            .collect::<BTreeSet<_>>();
+        let mut next_item = 0_u32;
+
+        for field in &form.fields {
+            let value = draft
+                .values
+                .get(&field.id)
+                .cloned()
+                .or_else(|| default_player_field_value(&field.value_type));
+            let Some(value) = value else {
+                if field.required {
+                    return Err(player_compile_error(
+                        form,
+                        "required player field is missing",
+                    ));
+                }
+                continue;
+            };
+            validate_player_field_value(form, field, &value)?;
+            apply_player_binding(self, form, field, &value, &mut character, &mut parameters)?;
+            apply_selected_player_effects(
+                self,
+                form,
+                field,
+                &value,
+                &mut character,
+                &mut parameters,
+                &mut item_keys,
+                &mut next_item,
+            )?;
+        }
+        Ok((character, parameters))
+    }
+
     pub fn compile_draft(
         &self,
         draft: &NpcDraft,
@@ -579,6 +700,361 @@ impl DefinitionRegistry {
             trusted_constraints: policy.constraints.clone(),
         })
     }
+}
+
+fn player_compile_error(form: &PlayerCreationFormDefinition, reason: &'static str) -> ContentError {
+    ContentError::CompileCharacter {
+        id: form.id.clone(),
+        reason,
+    }
+}
+
+fn default_player_field_value(
+    value_type: &PlayerCreationFieldType,
+) -> Option<PlayerCreationFieldValue> {
+    match value_type {
+        PlayerCreationFieldType::Text { default, .. } => default
+            .as_ref()
+            .and_then(|value| loreloom_core::LongText::new(value.as_str()).ok())
+            .map(PlayerCreationFieldValue::Text),
+        PlayerCreationFieldType::LongText { default, .. } => {
+            default.clone().map(PlayerCreationFieldValue::Text)
+        }
+        PlayerCreationFieldType::Integer { default, .. } => {
+            default.map(PlayerCreationFieldValue::Integer)
+        }
+        PlayerCreationFieldType::Number { default, .. } => {
+            default.map(PlayerCreationFieldValue::Number)
+        }
+        PlayerCreationFieldType::Boolean { default } => {
+            Some(PlayerCreationFieldValue::Boolean(*default))
+        }
+        PlayerCreationFieldType::SingleChoice { default, .. } => {
+            default.clone().map(PlayerCreationFieldValue::SingleChoice)
+        }
+        PlayerCreationFieldType::MultiChoice { default, .. } => {
+            default.clone().map(PlayerCreationFieldValue::MultiChoice)
+        }
+    }
+}
+
+fn validate_player_field_value(
+    form: &PlayerCreationFormDefinition,
+    field: &PlayerCreationFieldDefinition,
+    value: &PlayerCreationFieldValue,
+) -> Result<(), ContentError> {
+    let valid = match (&field.value_type, value) {
+        (
+            PlayerCreationFieldType::Text {
+                minimum_bytes,
+                maximum_bytes,
+                ..
+            },
+            PlayerCreationFieldValue::Text(value),
+        )
+        | (
+            PlayerCreationFieldType::LongText {
+                minimum_bytes,
+                maximum_bytes,
+                ..
+            },
+            PlayerCreationFieldValue::Text(value),
+        ) => {
+            let length = value.as_str().len();
+            length >= *minimum_bytes as usize && length <= *maximum_bytes as usize
+        }
+        (
+            PlayerCreationFieldType::Integer {
+                minimum, maximum, ..
+            },
+            PlayerCreationFieldValue::Integer(value),
+        ) => value >= minimum && value <= maximum,
+        (
+            PlayerCreationFieldType::Number {
+                minimum, maximum, ..
+            },
+            PlayerCreationFieldValue::Number(value),
+        ) => value >= minimum && value <= maximum,
+        (PlayerCreationFieldType::Boolean { .. }, PlayerCreationFieldValue::Boolean(_)) => true,
+        (
+            PlayerCreationFieldType::SingleChoice { options, .. },
+            PlayerCreationFieldValue::SingleChoice(value),
+        ) => options.iter().any(|option| &option.value == value),
+        (
+            PlayerCreationFieldType::MultiChoice {
+                minimum_selections,
+                maximum_selections,
+                options,
+                ..
+            },
+            PlayerCreationFieldValue::MultiChoice(values),
+        ) => {
+            values.len() >= *minimum_selections as usize
+                && values.len() <= *maximum_selections as usize
+                && values
+                    .iter()
+                    .all(|value| options.iter().any(|option| &option.value == value))
+        }
+        _ => false,
+    };
+    if valid {
+        Ok(())
+    } else {
+        Err(player_compile_error(form, "player field value is invalid"))
+    }
+}
+
+fn apply_player_binding(
+    registry: &DefinitionRegistry,
+    form: &PlayerCreationFormDefinition,
+    field: &PlayerCreationFieldDefinition,
+    value: &PlayerCreationFieldValue,
+    character: &mut CharacterSpawnSpec,
+    parameters: &mut BTreeMap<ContentDefinitionId, loreloom_core::ParameterValue>,
+) -> Result<(), ContentError> {
+    let Some(binding) = &field.binding else {
+        return Ok(());
+    };
+    match (binding, value) {
+        (PlayerCreationBinding::DisplayName, PlayerCreationFieldValue::Text(value)) => {
+            character.display_name = DisplayName::non_empty(value.as_str())
+                .map_err(|_| player_compile_error(form, "display name is invalid"))?;
+        }
+        (PlayerCreationBinding::ProfileSummary, PlayerCreationFieldValue::Text(value)) => {
+            character.profile.summary = ShortText::new(value.as_str())
+                .map_err(|_| player_compile_error(form, "profile summary is invalid"))?;
+        }
+        (PlayerCreationBinding::ProfileSpeakingStyle, PlayerCreationFieldValue::Text(value)) => {
+            character.profile.speaking_style = ShortText::new(value.as_str())
+                .map_err(|_| player_compile_error(form, "speaking style is invalid"))?;
+        }
+        (PlayerCreationBinding::ProfileValue, PlayerCreationFieldValue::Text(value)) => {
+            character.profile.values.push(
+                ShortText::new(value.as_str())
+                    .map_err(|_| player_compile_error(form, "profile value is invalid"))?,
+            );
+        }
+        (
+            PlayerCreationBinding::Attribute { attribute_id },
+            PlayerCreationFieldValue::Integer(value),
+        ) => {
+            let value = Fixed::from_integer(*value)
+                .map_err(|_| player_compile_error(form, "attribute value overflows"))?;
+            set_player_attribute(registry, form, character, attribute_id, value)?;
+        }
+        (
+            PlayerCreationBinding::Attribute { attribute_id },
+            PlayerCreationFieldValue::Number(value),
+        ) => set_player_attribute(registry, form, character, attribute_id, *value)?,
+        (
+            PlayerCreationBinding::Parameter { parameter_id },
+            PlayerCreationFieldValue::Integer(value),
+        ) => set_player_parameter(
+            registry,
+            form,
+            parameters,
+            parameter_id,
+            loreloom_core::ParameterValue::Counter(*value),
+        )?,
+        (
+            PlayerCreationBinding::Parameter { parameter_id },
+            PlayerCreationFieldValue::Number(value),
+        ) => set_player_parameter(
+            registry,
+            form,
+            parameters,
+            parameter_id,
+            loreloom_core::ParameterValue::Fixed(*value),
+        )?,
+        (
+            PlayerCreationBinding::Parameter { parameter_id },
+            PlayerCreationFieldValue::Boolean(value),
+        ) => set_player_parameter(
+            registry,
+            form,
+            parameters,
+            parameter_id,
+            loreloom_core::ParameterValue::Bool(*value),
+        )?,
+        (
+            PlayerCreationBinding::Parameter { parameter_id },
+            PlayerCreationFieldValue::SingleChoice(value),
+        ) => set_player_parameter(
+            registry,
+            form,
+            parameters,
+            parameter_id,
+            loreloom_core::ParameterValue::Enum(value.clone()),
+        )?,
+        (
+            PlayerCreationBinding::Parameter { parameter_id },
+            PlayerCreationFieldValue::MultiChoice(values),
+        ) => set_player_parameter(
+            registry,
+            form,
+            parameters,
+            parameter_id,
+            loreloom_core::ParameterValue::TagSet(values.clone()),
+        )?,
+        _ => {
+            return Err(player_compile_error(
+                form,
+                "player field binding is incompatible",
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn apply_selected_player_effects(
+    registry: &DefinitionRegistry,
+    form: &PlayerCreationFormDefinition,
+    field: &PlayerCreationFieldDefinition,
+    value: &PlayerCreationFieldValue,
+    character: &mut CharacterSpawnSpec,
+    parameters: &mut BTreeMap<ContentDefinitionId, loreloom_core::ParameterValue>,
+    item_keys: &mut BTreeSet<ShortText>,
+    next_item: &mut u32,
+) -> Result<(), ContentError> {
+    let options = match (&field.value_type, value) {
+        (
+            PlayerCreationFieldType::SingleChoice { options, .. },
+            PlayerCreationFieldValue::SingleChoice(selected),
+        ) => options
+            .iter()
+            .filter(|option| &option.value == selected)
+            .collect::<Vec<_>>(),
+        (
+            PlayerCreationFieldType::MultiChoice { options, .. },
+            PlayerCreationFieldValue::MultiChoice(selected),
+        ) => options
+            .iter()
+            .filter(|option| selected.contains(&option.value))
+            .collect::<Vec<_>>(),
+        _ => Vec::new(),
+    };
+    for option in options {
+        for effect in &option.effects {
+            apply_player_effect(
+                registry, form, effect, character, parameters, item_keys, next_item,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn apply_player_effect(
+    registry: &DefinitionRegistry,
+    form: &PlayerCreationFormDefinition,
+    effect: &PlayerCreationEffect,
+    character: &mut CharacterSpawnSpec,
+    parameters: &mut BTreeMap<ContentDefinitionId, loreloom_core::ParameterValue>,
+    item_keys: &mut BTreeSet<ShortText>,
+    next_item: &mut u32,
+) -> Result<(), ContentError> {
+    match effect {
+        PlayerCreationEffect::GrantItem { item_id, quantity } => {
+            require_kind(&registry.definitions, &form.id, item_id, "item")?;
+            let local_key = loop {
+                let candidate = ShortText::new(format!("ugc_item_{}", *next_item))
+                    .map_err(|_| player_compile_error(form, "item key is invalid"))?;
+                *next_item = next_item.saturating_add(1);
+                if item_keys.insert(candidate.clone()) {
+                    break candidate;
+                }
+            };
+            character.inventory.push(ItemGrantInput {
+                local_key,
+                definition_id: item_id.clone(),
+                quantity: *quantity,
+                parent_local_key: None,
+            });
+        }
+        PlayerCreationEffect::GrantSkill {
+            skill_id,
+            rank,
+            proficiency,
+        } => {
+            require_kind(&registry.definitions, &form.id, skill_id, "skill")?;
+            character.skills.push(SkillGrantInput {
+                skill_id: skill_id.clone(),
+                rank: rank.get(),
+                proficiency: *proficiency,
+                enabled: true,
+            });
+        }
+        PlayerCreationEffect::ApplyCondition {
+            condition_id,
+            stacks,
+            intensity,
+        } => {
+            require_kind(&registry.definitions, &form.id, condition_id, "condition")?;
+            character.conditions.push(ConditionGrantInput {
+                condition_id: condition_id.clone(),
+                source: ConditionSource::System {
+                    source_id: form.id.clone(),
+                },
+                stacks: *stacks,
+                intensity: *intensity,
+            });
+        }
+        PlayerCreationEffect::SetAttribute {
+            attribute_id,
+            value,
+        } => set_player_attribute(registry, form, character, attribute_id, *value)?,
+        PlayerCreationEffect::SetParameter {
+            parameter_id,
+            value,
+        } => set_player_parameter(registry, form, parameters, parameter_id, value.clone())?,
+        PlayerCreationEffect::AddNarrativeTag { tag_id } => {
+            require_kind(&registry.definitions, &form.id, tag_id, "tag")?;
+            character.profile.narrative_tags.insert(tag_id.clone());
+        }
+    }
+    Ok(())
+}
+
+fn set_player_attribute(
+    registry: &DefinitionRegistry,
+    form: &PlayerCreationFormDefinition,
+    character: &mut CharacterSpawnSpec,
+    attribute_id: &ContentDefinitionId,
+    value: Fixed,
+) -> Result<(), ContentError> {
+    require_kind(&registry.definitions, &form.id, attribute_id, "attribute")?;
+    character.attributes.0.insert(attribute_id.clone(), value);
+    Ok(())
+}
+
+fn set_player_parameter(
+    registry: &DefinitionRegistry,
+    form: &PlayerCreationFormDefinition,
+    parameters: &mut BTreeMap<ContentDefinitionId, loreloom_core::ParameterValue>,
+    parameter_id: &ContentDefinitionId,
+    value: loreloom_core::ParameterValue,
+) -> Result<(), ContentError> {
+    let Some(Definition::Parameter(parameter)) = registry
+        .definitions
+        .get(parameter_id)
+        .map(|entry| &entry.definition)
+    else {
+        return Err(player_compile_error(
+            form,
+            "player parameter is unavailable",
+        ));
+    };
+    if parameter.persistence != ParameterPersistence::Save
+        || !parameter_value_matches(&parameter.value_type, &value)
+    {
+        return Err(player_compile_error(
+            form,
+            "player parameter value is invalid",
+        ));
+    }
+    parameters.insert(parameter_id.clone(), value);
+    Ok(())
 }
 
 fn validate_draft_references(
@@ -754,6 +1230,9 @@ fn validate_local_values(definition: &Definition) -> Result<(), ContentError> {
         }
         Definition::Skill(value) => validate_skill(value).map_err(invalid),
         Definition::Character(value) => validate_character(value).map_err(invalid),
+        Definition::PlayerCreationForm(value) => {
+            validate_player_creation_form(value).map_err(invalid)
+        }
         Definition::GenerationPolicy(value) if value.allowed_agent_profiles.len() != 1 => {
             Err(invalid("generation_policy.agent_profile"))
         }
@@ -794,7 +1273,18 @@ fn validate_local_values(definition: &Definition) -> Result<(), ContentError> {
 }
 
 fn validate_parameter(value: &ParameterDefinition) -> Result<(), &'static str> {
-    let matches = match (&value.value_type, &value.default) {
+    if parameter_value_matches(&value.value_type, &value.default) {
+        Ok(())
+    } else {
+        Err("parameter.default")
+    }
+}
+
+fn parameter_value_matches(
+    value_type: &ParameterType,
+    value: &loreloom_core::ParameterValue,
+) -> bool {
+    match (value_type, value) {
         (ParameterType::Bool, loreloom_core::ParameterValue::Bool(_)) => true,
         (
             ParameterType::Fixed { minimum, maximum },
@@ -815,12 +1305,122 @@ fn validate_parameter(value: &ParameterDefinition) -> Result<(), &'static str> {
         }
         (ParameterType::ObjectRef { .. }, loreloom_core::ParameterValue::ObjectRef(_)) => true,
         _ => false,
-    };
-    if matches {
-        Ok(())
-    } else {
-        Err("parameter.default")
     }
+}
+
+fn validate_player_creation_form(form: &PlayerCreationFormDefinition) -> Result<(), &'static str> {
+    if form.fields.is_empty() || form.fields.len() > 64 {
+        return Err("player_creation.fields");
+    }
+    let mut field_ids = BTreeSet::new();
+    for field in &form.fields {
+        if field.id.kind().ok() != Some("player_field") || !field_ids.insert(field.id.clone()) {
+            return Err("player_creation.field.id");
+        }
+        let binding_valid = matches!(
+            (&field.value_type, &field.binding),
+            (
+                PlayerCreationFieldType::Text { .. } | PlayerCreationFieldType::LongText { .. },
+                Some(
+                    PlayerCreationBinding::DisplayName
+                        | PlayerCreationBinding::ProfileSummary
+                        | PlayerCreationBinding::ProfileSpeakingStyle
+                        | PlayerCreationBinding::ProfileValue,
+                ),
+            ) | (
+                PlayerCreationFieldType::Integer { .. } | PlayerCreationFieldType::Number { .. },
+                Some(PlayerCreationBinding::Attribute { .. }),
+            ) | (
+                PlayerCreationFieldType::Integer { .. }
+                    | PlayerCreationFieldType::Number { .. }
+                    | PlayerCreationFieldType::Boolean { .. }
+                    | PlayerCreationFieldType::SingleChoice { .. }
+                    | PlayerCreationFieldType::MultiChoice { .. },
+                Some(PlayerCreationBinding::Parameter { .. }),
+            ) | (_, None)
+        );
+        if !binding_valid || !player_field_type_is_valid(&field.value_type) {
+            return Err("player_creation.field.type");
+        }
+    }
+    Ok(())
+}
+
+fn player_field_type_is_valid(value_type: &PlayerCreationFieldType) -> bool {
+    match value_type {
+        PlayerCreationFieldType::Text {
+            minimum_bytes,
+            maximum_bytes,
+            default,
+        } => {
+            minimum_bytes <= maximum_bytes
+                && *maximum_bytes <= 4_096
+                && default.as_ref().is_none_or(|value| {
+                    value.as_str().len() >= *minimum_bytes as usize
+                        && value.as_str().len() <= *maximum_bytes as usize
+                })
+        }
+        PlayerCreationFieldType::LongText {
+            minimum_bytes,
+            maximum_bytes,
+            default,
+        } => {
+            minimum_bytes <= maximum_bytes
+                && *maximum_bytes <= 65_536
+                && default.as_ref().is_none_or(|value| {
+                    value.as_str().len() >= *minimum_bytes as usize
+                        && value.as_str().len() <= *maximum_bytes as usize
+                })
+        }
+        PlayerCreationFieldType::Integer {
+            minimum,
+            maximum,
+            default,
+        } => {
+            minimum <= maximum && default.is_none_or(|value| value >= *minimum && value <= *maximum)
+        }
+        PlayerCreationFieldType::Number {
+            minimum,
+            maximum,
+            default,
+        } => {
+            minimum <= maximum && default.is_none_or(|value| value >= *minimum && value <= *maximum)
+        }
+        PlayerCreationFieldType::Boolean { .. } => true,
+        PlayerCreationFieldType::SingleChoice { options, default } => {
+            valid_player_choices(options)
+                && default
+                    .as_ref()
+                    .is_none_or(|default| options.iter().any(|option| &option.value == default))
+        }
+        PlayerCreationFieldType::MultiChoice {
+            minimum_selections,
+            maximum_selections,
+            options,
+            default,
+        } => {
+            valid_player_choices(options)
+                && minimum_selections <= maximum_selections
+                && *maximum_selections <= options.len() as u32
+                && default.as_ref().is_none_or(|default| {
+                    default.len() >= *minimum_selections as usize
+                        && default.len() <= *maximum_selections as usize
+                        && default
+                            .iter()
+                            .all(|value| options.iter().any(|option| &option.value == value))
+                })
+        }
+    }
+}
+
+fn valid_player_choices(options: &[crate::schema::PlayerCreationChoice]) -> bool {
+    if options.is_empty() || options.len() > 64 {
+        return false;
+    }
+    let mut values = BTreeSet::new();
+    options
+        .iter()
+        .all(|option| values.insert(option.value.clone()) && option.effects.len() <= 32)
 }
 
 fn validate_event(value: &EventDefinition) -> Result<(), &'static str> {
@@ -1017,6 +1617,9 @@ fn validate_references(
             Definition::Character(value) => {
                 validate_character_references(definitions, owner, value)?;
             }
+            Definition::PlayerCreationForm(value) => {
+                validate_player_creation_references(definitions, owner, value)?;
+            }
             Definition::GenerationPolicy(value) => {
                 for profile in &value.allowed_agent_profiles {
                     require_kind(definitions, owner, profile, "agent_profile")?;
@@ -1132,6 +1735,127 @@ fn validate_references(
         }
     }
     validate_rule_cycles(definitions)
+}
+
+fn validate_player_creation_references(
+    definitions: &BTreeMap<ContentDefinitionId, RegisteredDefinition>,
+    owner: &ContentDefinitionId,
+    form: &PlayerCreationFormDefinition,
+) -> Result<(), ContentError> {
+    require_kind(definitions, owner, &form.template, "character")?;
+    for field in &form.fields {
+        match &field.binding {
+            Some(PlayerCreationBinding::Attribute { attribute_id }) => {
+                require_kind(definitions, owner, attribute_id, "attribute")?;
+            }
+            Some(PlayerCreationBinding::Parameter { parameter_id }) => {
+                require_kind(definitions, owner, parameter_id, "parameter")?;
+                let Some(Definition::Parameter(parameter)) =
+                    definitions.get(parameter_id).map(|entry| &entry.definition)
+                else {
+                    return Err(ContentError::InvalidValue {
+                        id: owner.clone(),
+                        field: "player_creation.parameter",
+                    });
+                };
+                if parameter.persistence != ParameterPersistence::Save
+                    || !player_field_matches_parameter(&field.value_type, &parameter.value_type)
+                {
+                    return Err(ContentError::InvalidValue {
+                        id: owner.clone(),
+                        field: "player_creation.parameter",
+                    });
+                }
+            }
+            Some(
+                PlayerCreationBinding::DisplayName
+                | PlayerCreationBinding::ProfileSummary
+                | PlayerCreationBinding::ProfileSpeakingStyle
+                | PlayerCreationBinding::ProfileValue,
+            )
+            | None => {}
+        }
+        for effect in player_field_effects(&field.value_type) {
+            match effect {
+                PlayerCreationEffect::GrantItem { item_id, .. } => {
+                    require_kind(definitions, owner, item_id, "item")?;
+                }
+                PlayerCreationEffect::GrantSkill { skill_id, .. } => {
+                    require_kind(definitions, owner, skill_id, "skill")?;
+                }
+                PlayerCreationEffect::ApplyCondition { condition_id, .. } => {
+                    require_kind(definitions, owner, condition_id, "condition")?;
+                }
+                PlayerCreationEffect::SetAttribute { attribute_id, .. } => {
+                    require_kind(definitions, owner, attribute_id, "attribute")?;
+                }
+                PlayerCreationEffect::SetParameter {
+                    parameter_id,
+                    value,
+                } => {
+                    require_kind(definitions, owner, parameter_id, "parameter")?;
+                    let Some(Definition::Parameter(parameter)) =
+                        definitions.get(parameter_id).map(|entry| &entry.definition)
+                    else {
+                        return Err(ContentError::InvalidValue {
+                            id: owner.clone(),
+                            field: "player_creation.effect.parameter",
+                        });
+                    };
+                    if parameter.persistence != ParameterPersistence::Save
+                        || !parameter_value_matches(&parameter.value_type, value)
+                    {
+                        return Err(ContentError::InvalidValue {
+                            id: owner.clone(),
+                            field: "player_creation.effect.parameter",
+                        });
+                    }
+                }
+                PlayerCreationEffect::AddNarrativeTag { tag_id } => {
+                    require_kind(definitions, owner, tag_id, "tag")?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn player_field_matches_parameter(
+    field: &PlayerCreationFieldType,
+    parameter: &ParameterType,
+) -> bool {
+    match (field, parameter) {
+        (PlayerCreationFieldType::Integer { .. }, ParameterType::Counter { .. })
+        | (PlayerCreationFieldType::Number { .. }, ParameterType::Fixed { .. })
+        | (PlayerCreationFieldType::Boolean { .. }, ParameterType::Bool) => true,
+        (
+            PlayerCreationFieldType::SingleChoice { options, .. },
+            ParameterType::Enum { variants },
+        ) => options
+            .iter()
+            .all(|option| variants.contains(&option.value)),
+        (
+            PlayerCreationFieldType::MultiChoice { options, .. },
+            ParameterType::TagSet { allowed, maximum },
+        ) => {
+            options.iter().all(|option| allowed.contains(&option.value))
+                && options.len() <= *maximum as usize
+        }
+        _ => false,
+    }
+}
+
+fn player_field_effects(
+    field: &PlayerCreationFieldType,
+) -> impl Iterator<Item = &PlayerCreationEffect> {
+    match field {
+        PlayerCreationFieldType::SingleChoice { options, .. }
+        | PlayerCreationFieldType::MultiChoice { options, .. } => Some(options),
+        _ => None,
+    }
+    .into_iter()
+    .flatten()
+    .flat_map(|option| option.effects.iter())
 }
 
 fn validate_rule_cycles(

@@ -13,7 +13,7 @@ use loreloom_agent::{
 };
 use loreloom_content::{
     CharacterCompileRequest, Definition, DefinitionRegistry, DraftCompileRequest, GenerationPolicy,
-    NpcDraft, ParameterVisibility, PredicateDefinition, SceneSpawnPlan,
+    NpcDraft, ParameterVisibility, PlayerBootstrap, PredicateDefinition, SceneSpawnPlan,
 };
 use loreloom_core::{
     ActionId, ActiveEventView, ActorId, AdjacentPlaceView, AttributeAdjustment, AttributeOperation,
@@ -108,8 +108,41 @@ impl WorldService {
         rng_seed: [u8; 32],
         config: WorldConfig,
     ) -> Result<(Arc<Self>, WorldBootstrap), RuntimeError> {
+        Self::create_with_player(
+            path,
+            save_id,
+            world_lock,
+            mod_lock,
+            registry,
+            plan,
+            &PlayerBootstrap::Fixed,
+            rng_seed,
+            config,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn create_with_player(
+        path: impl AsRef<Path>,
+        save_id: SaveId,
+        world_lock: WorldLock,
+        mod_lock: ModLock,
+        registry: DefinitionRegistry,
+        plan: &SceneSpawnPlan,
+        player_bootstrap: &PlayerBootstrap,
+        rng_seed: [u8; 32],
+        config: WorldConfig,
+    ) -> Result<(Arc<Self>, WorldBootstrap), RuntimeError> {
         let mut ids = SystemIdGenerator;
-        let bootstrap = GameWorld::bootstrap(plan, rng_seed, &registry, config.clone(), &mut ids)?;
+        let bootstrap = GameWorld::bootstrap_with_player(
+            plan,
+            player_bootstrap,
+            rng_seed,
+            &registry,
+            config.clone(),
+            &mut ids,
+        )?;
         let store = SaveStore::create(
             path,
             SaveManifest {

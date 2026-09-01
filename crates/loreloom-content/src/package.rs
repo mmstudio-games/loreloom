@@ -848,6 +848,7 @@ fn package_content_view(
             Definition::Parameter(_) => &mut content.parameters,
             Definition::AgentProfile(_)
             | Definition::GenerationPolicy(_)
+            | Definition::PlayerCreationForm(_)
             | Definition::Tag(_)
             | Definition::RelationshipKind(_)
             | Definition::Attribute(_)

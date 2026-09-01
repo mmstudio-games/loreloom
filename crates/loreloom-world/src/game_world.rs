@@ -6,7 +6,7 @@ use std::{
 use bevy_ecs::{entity::Entity, prelude::Resource, world::World};
 use loreloom_content::{
     CharacterCompileRequest, Definition, DefinitionRegistry, DurationPolicy, EffectDefinition,
-    InitialCharacterLifetime, ItemDefinition, ParameterPersistence, ParameterType,
+    InitialCharacterLifetime, ItemDefinition, ParameterPersistence, ParameterType, PlayerBootstrap,
     PredicateDefinition, ScenePlaceSpawnPlan, SceneSpawnPlan, SkillKind, SkillTarget, StackPolicy,
     TriggerDefinition,
 };
@@ -82,6 +82,24 @@ pub struct GameWorld {
 impl GameWorld {
     pub fn bootstrap(
         plan: &SceneSpawnPlan,
+        rng_seed: [u8; 32],
+        registry: &DefinitionRegistry,
+        config: WorldConfig,
+        ids: &mut impl IdGenerator,
+    ) -> Result<WorldBootstrap, WorldError> {
+        Self::bootstrap_with_player(
+            plan,
+            &PlayerBootstrap::Fixed,
+            rng_seed,
+            registry,
+            config,
+            ids,
+        )
+    }
+
+    pub fn bootstrap_with_player(
+        plan: &SceneSpawnPlan,
+        player_bootstrap: &PlayerBootstrap,
         rng_seed: [u8; 32],
         registry: &DefinitionRegistry,
         config: WorldConfig,
@@ -165,6 +183,7 @@ impl GameWorld {
                 },
             }));
         }
+        let mut player_parameter_overrides = BTreeMap::new();
         for entry in entries {
             let place_id =
                 place_ids
@@ -177,15 +196,20 @@ impl GameWorld {
                 InitialCharacterLifetime::Scene => CharacterLifetime::Scene { scene_id },
                 InitialCharacterLifetime::Persistent => CharacterLifetime::Persistent,
             };
-            let spec = registry.compile_character(
-                &entry.character_id,
-                CharacterCompileRequest {
-                    scene_id,
-                    place_id,
-                    controller: entry.controller,
-                    lifetime,
-                },
-            )?;
+            let request = CharacterCompileRequest {
+                scene_id,
+                place_id,
+                controller: entry.controller,
+                lifetime,
+            };
+            let spec = if entry.controller == CharacterController::Player {
+                let compiled =
+                    registry.compile_player(&entry.character_id, player_bootstrap, request)?;
+                player_parameter_overrides = compiled.parameter_overrides;
+                compiled.character
+            } else {
+                registry.compile_character(&entry.character_id, request)?
+            };
             records.extend(materialize_character_records(
                 spec,
                 characters[&entry.local_key],
@@ -203,10 +227,14 @@ impl GameWorld {
                 Definition::Parameter(parameter)
                     if parameter.persistence == ParameterPersistence::Save =>
                 {
+                    let initial = player_parameter_overrides
+                        .get(&parameter.id)
+                        .cloned()
+                        .unwrap_or_else(|| parameter.default.clone());
                     parameter_sets
                         .entry(registered.origin.pack_id.clone())
                         .or_default()
-                        .insert(parameter.id.clone(), parameter.default.clone());
+                        .insert(parameter.id.clone(), initial);
                 }
                 Definition::Rule(rule) => rule_ids.push(rule.id.clone()),
                 _ => {}
@@ -567,7 +595,9 @@ impl GameWorld {
                     {
                         return invariant("scene.definition_single_instance");
                     }
-                    EntityOrigin::System { .. } => return invariant("scene.origin"),
+                    EntityOrigin::PlayerCreated { .. } | EntityOrigin::System { .. } => {
+                        return invariant("scene.origin");
+                    }
                     EntityOrigin::Content { .. } | EntityOrigin::Generated { .. } => {}
                 }
                 if scene.0.active {
@@ -2317,6 +2347,9 @@ fn materialize_character_records(
         let source = match &spec.origin {
             EntityOrigin::Content { origin } => SkillSource::CharacterDefinition {
                 definition_id: origin.definition_id.clone(),
+            },
+            EntityOrigin::PlayerCreated { template } => SkillSource::CharacterDefinition {
+                definition_id: template.definition_id.clone(),
             },
             EntityOrigin::Generated { .. } | EntityOrigin::System { .. } => SkillSource::Rule {
                 rule_id: config.spawn_system_definition.clone(),

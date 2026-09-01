@@ -101,6 +101,7 @@ pub enum GenerationSource {
 pub enum EntityOrigin {
     Content { origin: ContentOrigin },
     Generated { origin: GeneratedOrigin },
+    PlayerCreated { template: ContentOrigin },
     System { source: ContentDefinitionId },
 }
 
@@ -109,6 +110,7 @@ impl EntityOrigin {
     pub const fn content(&self) -> Option<&ContentOrigin> {
         match self {
             Self::Content { origin } => Some(origin),
+            Self::PlayerCreated { template } => Some(template),
             Self::Generated { .. } | Self::System { .. } => None,
         }
     }

@@ -32,12 +32,27 @@ pub struct WorldManifest {
     pub inventory_root_definition: ContentDefinitionId,
     pub spawn_system_definition: ContentDefinitionId,
     pub npc_generation_policy: ContentDefinitionId,
+    #[serde(default)]
+    pub player_creation: PlayerCreationMode,
     pub content: Vec<String>,
     #[serde(default)]
     pub rules: Vec<String>,
     #[serde(default)]
     pub resources: Vec<String>,
     pub prompts: PromptManifest,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum PlayerCreationMode {
+    #[default]
+    Fixed,
+    Preset {
+        characters: Vec<ContentDefinitionId>,
+    },
+    Ugc {
+        form_id: ContentDefinitionId,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -211,6 +226,26 @@ fn validate_manifest(manifest: &WorldManifest) -> Result<(), WorldProjectError> 
         {
             return invalid_manifest(field);
         }
+    }
+    match &manifest.player_creation {
+        PlayerCreationMode::Fixed => {}
+        PlayerCreationMode::Preset { characters } => {
+            let unique = characters.iter().collect::<BTreeSet<_>>();
+            if characters.is_empty()
+                || unique.len() != characters.len()
+                || characters
+                    .iter()
+                    .any(|id| id.kind().ok() != Some("character"))
+            {
+                return invalid_manifest("player_creation.characters");
+            }
+        }
+        PlayerCreationMode::Ugc { form_id }
+            if form_id.kind().ok() != Some("player_creation_form") =>
+        {
+            return invalid_manifest("player_creation.form_id");
+        }
+        PlayerCreationMode::Ugc { .. } => {}
     }
     for path in &manifest.content {
         if !path.starts_with("content/") || !path.ends_with(".json") {

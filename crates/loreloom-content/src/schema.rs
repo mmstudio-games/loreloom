@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     num::{NonZeroU32, NonZeroU64},
 };
 
@@ -31,6 +31,7 @@ pub enum Definition {
     Item(ItemDefinition),
     Skill(SkillDefinition),
     Character(CharacterDefinition),
+    PlayerCreationForm(PlayerCreationFormDefinition),
     Place(PlaceDefinition),
     Scene(SceneDefinition),
     Parameter(ParameterDefinition),
@@ -54,6 +55,7 @@ impl Definition {
             Self::Item(value) => &value.id,
             Self::Skill(value) => &value.id,
             Self::Character(value) => &value.id,
+            Self::PlayerCreationForm(value) => &value.id,
             Self::Place(value) => &value.id,
             Self::Scene(value) => &value.id,
             Self::Parameter(value) => &value.id,
@@ -77,6 +79,7 @@ impl Definition {
             Self::Item(_) => "item",
             Self::Skill(_) => "skill",
             Self::Character(_) => "character",
+            Self::PlayerCreationForm(_) => "player_creation_form",
             Self::Place(_) => "place",
             Self::Scene(_) => "scene",
             Self::Parameter(_) => "parameter",
@@ -538,6 +541,155 @@ pub struct CharacterDefinition {
     pub knowledge: Vec<InitialFact>,
     pub goals: Vec<InitialGoal>,
     pub spawn_constraints: SpawnConstraints,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PlayerCreationFormDefinition {
+    pub id: ContentDefinitionId,
+    pub display_name: DisplayName,
+    pub description: ShortText,
+    pub template: ContentDefinitionId,
+    pub fields: Vec<PlayerCreationFieldDefinition>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PlayerCreationFieldDefinition {
+    pub id: ContentDefinitionId,
+    pub display_name: DisplayName,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<ShortText>,
+    pub required: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub binding: Option<PlayerCreationBinding>,
+    pub value_type: PlayerCreationFieldType,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum PlayerCreationFieldType {
+    Text {
+        minimum_bytes: u32,
+        maximum_bytes: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        default: Option<ShortText>,
+    },
+    LongText {
+        minimum_bytes: u32,
+        maximum_bytes: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        default: Option<loreloom_core::LongText>,
+    },
+    Integer {
+        minimum: i64,
+        maximum: i64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        default: Option<i64>,
+    },
+    Number {
+        minimum: Fixed,
+        maximum: Fixed,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        default: Option<Fixed>,
+    },
+    Boolean {
+        default: bool,
+    },
+    SingleChoice {
+        options: Vec<PlayerCreationChoice>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        default: Option<ContentDefinitionId>,
+    },
+    MultiChoice {
+        minimum_selections: u32,
+        maximum_selections: u32,
+        options: Vec<PlayerCreationChoice>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        default: Option<BTreeSet<ContentDefinitionId>>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum PlayerCreationBinding {
+    DisplayName,
+    ProfileSummary,
+    ProfileSpeakingStyle,
+    ProfileValue,
+    Attribute { attribute_id: ContentDefinitionId },
+    Parameter { parameter_id: ContentDefinitionId },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PlayerCreationChoice {
+    pub value: ContentDefinitionId,
+    pub display_name: DisplayName,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<ShortText>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub effects: Vec<PlayerCreationEffect>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum PlayerCreationEffect {
+    GrantItem {
+        item_id: ContentDefinitionId,
+        quantity: NonZeroU32,
+    },
+    GrantSkill {
+        skill_id: ContentDefinitionId,
+        rank: NonZeroU32,
+        proficiency: u32,
+    },
+    ApplyCondition {
+        condition_id: ContentDefinitionId,
+        stacks: NonZeroU32,
+        intensity: Fixed,
+    },
+    SetAttribute {
+        attribute_id: ContentDefinitionId,
+        value: Fixed,
+    },
+    SetParameter {
+        parameter_id: ContentDefinitionId,
+        value: ParameterValue,
+    },
+    AddNarrativeTag {
+        tag_id: ContentDefinitionId,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(
+    tag = "type",
+    content = "value",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
+pub enum PlayerCreationFieldValue {
+    Text(loreloom_core::LongText),
+    Integer(i64),
+    Number(Fixed),
+    Boolean(bool),
+    SingleChoice(ContentDefinitionId),
+    MultiChoice(BTreeSet<ContentDefinitionId>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PlayerCreationDraft {
+    pub form_id: ContentDefinitionId,
+    pub values: BTreeMap<ContentDefinitionId, PlayerCreationFieldValue>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PlayerBootstrap {
+    Fixed,
+    Preset { character_id: ContentDefinitionId },
+    Ugc { draft: PlayerCreationDraft },
 }
 
 /// Untrusted model output for a generated NPC. Agent binding, capability, and constraints always

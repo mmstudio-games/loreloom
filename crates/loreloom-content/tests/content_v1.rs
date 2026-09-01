@@ -1,4 +1,7 @@
-use std::{collections::BTreeSet, num::NonZeroU32};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    num::NonZeroU32,
+};
 
 use loreloom_content::{
     AgentProfileDefinition, AttributeDefinition, CONTENT_SCHEMA_V1, CharacterCompileRequest,
@@ -6,16 +9,18 @@ use loreloom_content::{
     DefinitionRegistry, DraftCompileRequest, EffectDefinition, GameplayActionDefinition,
     GenerationPolicy, InitialCharacterController, InitialCharacterLifetime, InitialFact,
     InitialItem, InitialResource, ItemDefinition, NpcDraft, ParameterDefinition,
-    ParameterPersistence, ParameterType, ParameterVisibility, PlaceDefinition, PredicateDefinition,
-    ResourceCost, ResourceDefinition, ResourceMaximumPolicy, RuleDefinition,
-    SceneCharacterDefinition, SceneDefinition, SkillDefinition, SkillKind, SkillTarget,
-    TagDefinition, TriggerDefinition, parse_content_hash,
+    ParameterPersistence, ParameterType, ParameterVisibility, PlaceDefinition, PlayerBootstrap,
+    PlayerCreationBinding, PlayerCreationChoice, PlayerCreationDraft, PlayerCreationEffect,
+    PlayerCreationFieldDefinition, PlayerCreationFieldType, PlayerCreationFieldValue,
+    PlayerCreationFormDefinition, PredicateDefinition, ResourceCost, ResourceDefinition,
+    ResourceMaximumPolicy, RuleDefinition, SceneCharacterDefinition, SceneDefinition,
+    SkillDefinition, SkillKind, SkillTarget, TagDefinition, TriggerDefinition, parse_content_hash,
 };
 use loreloom_core::{
     AttributeOperation, AutonomyMode, BaseAttributes, CharacterController, CharacterLifetime,
     CharacterProfile, ContentDefinitionId, DisplayName, EventId, FactSubject, FactValue, Fixed,
-    GeneratedOrigin, GenerationId, GenerationSource, ModId, ObjectId, ParameterValue, ShortText,
-    SpawnConstraints,
+    GeneratedOrigin, GenerationId, GenerationSource, LongText, ModId, ObjectId, ParameterValue,
+    ShortText, SpawnConstraints,
 };
 use semver::Version;
 
@@ -217,6 +222,205 @@ fn content_v1_builds_deterministic_registry_and_compiles_spawn_spec() {
         .map(|(id, _)| id.clone())
         .collect::<Vec<_>>();
     assert!(ids.windows(2).all(|pair| pair[0] < pair[1]));
+}
+
+#[test]
+fn ugc_player_form_compiles_typed_fields_without_a_model_payload() {
+    let mut document = fixture_document();
+    let attribute_id = id("attribute", "resolve");
+    let parameter_id = id("parameter", "accepts_risk");
+    let form_id = id("player_creation_form", "traveler");
+    let option_id = id("player_option", "witness");
+    let multi_id = id("player_option", "patient");
+    let fields = vec![
+        PlayerCreationFieldDefinition {
+            id: id("player_field", "name"),
+            display_name: name("Name"),
+            description: None,
+            required: true,
+            binding: Some(PlayerCreationBinding::DisplayName),
+            value_type: PlayerCreationFieldType::Text {
+                minimum_bytes: 1,
+                maximum_bytes: 256,
+                default: None,
+            },
+        },
+        PlayerCreationFieldDefinition {
+            id: id("player_field", "story"),
+            display_name: name("Story"),
+            description: None,
+            required: true,
+            binding: Some(PlayerCreationBinding::ProfileSummary),
+            value_type: PlayerCreationFieldType::LongText {
+                minimum_bytes: 1,
+                maximum_bytes: 4_096,
+                default: None,
+            },
+        },
+        PlayerCreationFieldDefinition {
+            id: id("player_field", "years"),
+            display_name: name("Years"),
+            description: None,
+            required: true,
+            binding: None,
+            value_type: PlayerCreationFieldType::Integer {
+                minimum: 0,
+                maximum: 100,
+                default: Some(5),
+            },
+        },
+        PlayerCreationFieldDefinition {
+            id: id("player_field", "resolve"),
+            display_name: name("Resolve"),
+            description: None,
+            required: true,
+            binding: Some(PlayerCreationBinding::Attribute {
+                attribute_id: attribute_id.clone(),
+            }),
+            value_type: PlayerCreationFieldType::Number {
+                minimum: Fixed::ZERO,
+                maximum: Fixed::from_integer(20).expect("fixed"),
+                default: Some(Fixed::from_integer(5).expect("fixed")),
+            },
+        },
+        PlayerCreationFieldDefinition {
+            id: id("player_field", "risk"),
+            display_name: name("Accept risk"),
+            description: None,
+            required: true,
+            binding: Some(PlayerCreationBinding::Parameter {
+                parameter_id: parameter_id.clone(),
+            }),
+            value_type: PlayerCreationFieldType::Boolean { default: false },
+        },
+        PlayerCreationFieldDefinition {
+            id: id("player_field", "calling"),
+            display_name: name("Calling"),
+            description: None,
+            required: true,
+            binding: None,
+            value_type: PlayerCreationFieldType::SingleChoice {
+                options: vec![PlayerCreationChoice {
+                    value: option_id.clone(),
+                    display_name: name("Witness"),
+                    description: None,
+                    effects: vec![PlayerCreationEffect::AddNarrativeTag {
+                        tag_id: id("tag", "witnessed_rain"),
+                    }],
+                }],
+                default: Some(option_id.clone()),
+            },
+        },
+        PlayerCreationFieldDefinition {
+            id: id("player_field", "traits"),
+            display_name: name("Traits"),
+            description: None,
+            required: false,
+            binding: None,
+            value_type: PlayerCreationFieldType::MultiChoice {
+                minimum_selections: 0,
+                maximum_selections: 1,
+                options: vec![PlayerCreationChoice {
+                    value: multi_id.clone(),
+                    display_name: name("Patient"),
+                    description: None,
+                    effects: Vec::new(),
+                }],
+                default: Some(BTreeSet::new()),
+            },
+        },
+    ];
+    document
+        .definitions
+        .push(Definition::Parameter(ParameterDefinition {
+            id: parameter_id.clone(),
+            display_name: name("Accepts risk"),
+            value_type: ParameterType::Bool,
+            default: ParameterValue::Bool(false),
+            visibility: ParameterVisibility::Public,
+            persistence: ParameterPersistence::Save,
+        }));
+    document.definitions.push(Definition::PlayerCreationForm(
+        PlayerCreationFormDefinition {
+            id: form_id.clone(),
+            display_name: name("Create a traveler"),
+            description: text("Choose who enters the harbor."),
+            template: id("character", "mara"),
+            fields,
+        },
+    ));
+    let registry = DefinitionRegistry::build(context(), [document]).expect("build registry");
+    let scene_id: ObjectId = "obj_01890f6a-2b3c-7d4e-8f90-123456789abc"
+        .parse()
+        .expect("scene id");
+    let place_id: ObjectId = "obj_01890f6a-2b3d-7d4e-8f90-123456789abc"
+        .parse()
+        .expect("place id");
+    let draft = PlayerCreationDraft {
+        form_id,
+        values: BTreeMap::from([
+            (
+                id("player_field", "name"),
+                PlayerCreationFieldValue::Text(LongText::new("Lin").expect("text")),
+            ),
+            (
+                id("player_field", "story"),
+                PlayerCreationFieldValue::Text(
+                    LongText::new("A traveler following the rain.").expect("text"),
+                ),
+            ),
+            (
+                id("player_field", "years"),
+                PlayerCreationFieldValue::Integer(8),
+            ),
+            (
+                id("player_field", "resolve"),
+                PlayerCreationFieldValue::Number(Fixed::from_integer(7).expect("fixed")),
+            ),
+            (
+                id("player_field", "risk"),
+                PlayerCreationFieldValue::Boolean(true),
+            ),
+            (
+                id("player_field", "calling"),
+                PlayerCreationFieldValue::SingleChoice(option_id),
+            ),
+            (
+                id("player_field", "traits"),
+                PlayerCreationFieldValue::MultiChoice(BTreeSet::from([multi_id])),
+            ),
+        ]),
+    };
+    let compiled = registry
+        .compile_player(
+            &id("character", "mara"),
+            &PlayerBootstrap::Ugc { draft },
+            CharacterCompileRequest {
+                scene_id,
+                place_id,
+                controller: CharacterController::Player,
+                lifetime: CharacterLifetime::Persistent,
+            },
+        )
+        .expect("compile player");
+
+    assert_eq!(compiled.character.display_name.as_str(), "Lin");
+    assert_eq!(
+        compiled.character.profile.summary.as_str(),
+        "A traveler following the rain."
+    );
+    assert_eq!(
+        compiled.character.attributes.0[&attribute_id],
+        Fixed::from_integer(7).expect("fixed")
+    );
+    assert_eq!(
+        compiled.parameter_overrides[&parameter_id],
+        ParameterValue::Bool(true)
+    );
+    assert!(matches!(
+        compiled.character.origin,
+        loreloom_core::EntityOrigin::PlayerCreated { .. }
+    ));
 }
 
 #[test]

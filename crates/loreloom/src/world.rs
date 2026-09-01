@@ -8,7 +8,7 @@ use loreloom_agent::NarratorDefinition;
 use loreloom_content::{
     CONTENT_SCHEMA_V1, ContentDocument, Definition, LORELOOM_ENGINE_VERSION,
     MOD_MANIFEST_SCHEMA_V1, ModCapability, ModManifestDraft, PackageCompiler, PackagePayload,
-    PackageSource, TagDefinition, VirtualPackage, WorldProjectSource,
+    PackageSource, PlayerBootstrap, TagDefinition, VirtualPackage, WorldProjectSource,
 };
 use loreloom_core::{
     ContentDefinitionId, DIAGNOSED_CONDITION_PREDICATE_ID, DisplayName, ModId, ModPackageStatus,
@@ -34,7 +34,24 @@ pub async fn build_world_with(
     world_root: &Path,
     save_path: &Path,
     mod_paths: &[PathBuf],
+    configured: ConfiguredProviders,
+) -> Result<WorldSetup, AppError> {
+    build_world_with_player(
+        world_root,
+        save_path,
+        mod_paths,
+        configured,
+        &PlayerBootstrap::Fixed,
+    )
+    .await
+}
+
+pub async fn build_world_with_player(
+    world_root: &Path,
+    save_path: &Path,
+    mod_paths: &[PathBuf],
     mut configured: ConfiguredProviders,
+    player_bootstrap: &PlayerBootstrap,
 ) -> Result<WorldSetup, AppError> {
     let world_source = WorldProjectSource::load(world_root)?;
     let core_id = ModId::parse("games.loreloom.core")?;
@@ -113,13 +130,14 @@ pub async fn build_world_with(
         )
         .await?
     } else {
-        WorldService::create(
+        WorldService::create_with_player(
             save_path,
             SaveId::generate_with(&mut ids)?,
             world_lock,
             mod_lock,
             registry,
             &plan,
+            player_bootstrap,
             [11; 32],
             world_config,
         )
