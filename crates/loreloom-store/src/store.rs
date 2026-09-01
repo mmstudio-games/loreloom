@@ -4,9 +4,9 @@ use std::{
 };
 
 use loreloom_core::{
-    ActionId, DomainRecord, EventId, RecordEnvelope, Revision, SaveManifest, TranscriptItemId,
-    TranscriptItemRecord, VersionedRecordOp, WorldCommand, WorldEvent, decode_domain_records,
-    rebuild_records,
+    ActionId, DomainRecord, EventId, ModLock, RecordEnvelope, Revision, SaveManifest,
+    TranscriptItemId, TranscriptItemRecord, VersionedRecordOp, WorldCommand, WorldEvent, WorldLock,
+    decode_domain_records, rebuild_records,
 };
 use serde::Serialize;
 use serde_json::{Value as JsonValue, json};
@@ -159,6 +159,57 @@ impl SaveStore {
     #[must_use]
     pub const fn revision(&self) -> Revision {
         self.revision
+    }
+
+    pub async fn adopt_content_locks(
+        &mut self,
+        world_lock: WorldLock,
+        mod_lock: ModLock,
+    ) -> Result<(), StoreError> {
+        let mut candidate = self.manifest.clone();
+        candidate.world_lock = world_lock;
+        candidate.mod_lock = mod_lock;
+        candidate.validate()?;
+
+        let manifest_json = to_json(&candidate, "encode adopted save manifest")?;
+        let checksum = head_checksum(self.revision, &manifest_json)?;
+        let mut tx = self
+            .db
+            .transaction()
+            .await
+            .map_err(|error| StoreError::backend("begin content lock adoption", error))?;
+        let mut head = SaveHeadRow::get_by_save_id(&mut tx, self.manifest.save_id.to_string())
+            .await
+            .map_err(|error| {
+                StoreError::backend("read save head for content lock adoption", error)
+            })?;
+        let (durable_manifest, durable_revision) = validate_head_row(&head)?;
+        if durable_manifest != self.manifest || durable_revision != self.revision {
+            tx.rollback().await.map_err(|error| {
+                StoreError::backend("rollback stale content lock adoption", error)
+            })?;
+            return Err(StoreError::InvalidCommit {
+                field: "content_lock_adoption_head",
+            });
+        }
+        if candidate == self.manifest {
+            tx.rollback().await.map_err(|error| {
+                StoreError::backend("rollback unchanged content lock adoption", error)
+            })?;
+            return Ok(());
+        }
+
+        head.update()
+            .manifest(manifest_json)
+            .checksum(checksum)
+            .exec(&mut tx)
+            .await
+            .map_err(|error| StoreError::backend("write adopted content locks", error))?;
+        tx.commit()
+            .await
+            .map_err(|error| StoreError::backend("commit content lock adoption", error))?;
+        self.manifest = candidate;
+        Ok(())
     }
 
     pub async fn commit(&mut self, request: &CommitRequest) -> Result<CommitResult, StoreError> {

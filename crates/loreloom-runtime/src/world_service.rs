@@ -130,14 +130,19 @@ impl WorldService {
         candidate_mod_lock: &ModLock,
         config: WorldConfig,
     ) -> Result<Arc<Self>, RuntimeError> {
-        if &store.manifest().world_lock != candidate_world_lock
-            || &store.manifest().mod_lock != candidate_mod_lock
+        let durable_world_lock = &store.manifest().world_lock;
+        if durable_world_lock.world_id != candidate_world_lock.world_id
+            || durable_world_lock.manifest_schema != candidate_world_lock.manifest_schema
+            || durable_world_lock.content_schema != candidate_world_lock.content_schema
         {
             return Err(RuntimeError::ContentLockMismatch);
         }
         let loaded = store.load().await?;
         let world =
             GameWorld::from_records(loaded.revision, loaded.records, config.clone(), &registry)?;
+        store
+            .adopt_content_locks(candidate_world_lock.clone(), candidate_mod_lock.clone())
+            .await?;
         Ok(Arc::new(Self {
             inner: Mutex::new(RuntimeWorld {
                 world,

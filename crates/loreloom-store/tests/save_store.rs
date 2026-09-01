@@ -1,8 +1,9 @@
 use loreloom_core::{
-    ActionId, ActorId, ContentHash, DomainRecord, EventId, ExecutionChangeSet, LongText, ModLock,
-    Revision, SAVE_FORMAT_V1, SaveId, SaveManifest, SessionId, ShortText, TranscriptItemId,
-    TranscriptItemRecord, TranscriptSpeaker, TranscriptState, WorldCommand, WorldCommandKind,
-    WorldEvent, WorldEventKind, WorldId, WorldLock, WorldStateRecord, WorldTime,
+    ActionId, ActorId, ContentHash, DomainRecord, EventId, ExecutionChangeSet, LockedMod, LongText,
+    ModId, ModLock, ModSourceKind, Revision, SAVE_FORMAT_V1, SaveId, SaveManifest, SessionId,
+    ShortText, TranscriptItemId, TranscriptItemRecord, TranscriptSpeaker, TranscriptState,
+    WorldCommand, WorldCommandKind, WorldEvent, WorldEventKind, WorldId, WorldLock,
+    WorldStateRecord, WorldTime,
 };
 use loreloom_store::{ActionResolution, CommitRequest, CommitResult, CommittedAction, SaveStore};
 use tempfile::TempDir;
@@ -79,6 +80,66 @@ fn request(
         safe_summary: ShortText::new("clock advanced").expect("summary"),
     };
     CommitRequest::from_execution(command, changes).expect("valid commit request")
+}
+
+fn candidate_content_locks(manifest: &SaveManifest) -> (WorldLock, ModLock) {
+    let mut world_lock = manifest.world_lock.clone();
+    world_lock.version = "1.1.0".parse().expect("candidate world version");
+    world_lock.content_hash = ContentHash::parse("c".repeat(64)).expect("candidate world hash");
+    let mod_id = ModId::parse("games.loreloom.extension").expect("candidate Mod ID");
+    let mod_lock = ModLock {
+        mods: vec![LockedMod {
+            mod_id,
+            version: "2.0.0".parse().expect("candidate Mod version"),
+            content_hash: ContentHash::parse("d".repeat(64)).expect("candidate Mod hash"),
+            manifest_schema: 1,
+            content_schema: 1,
+            source_kind: ModSourceKind::Directory,
+            dependencies: Vec::new(),
+            applied_patches: Vec::new(),
+        }],
+    };
+    (world_lock, mod_lock)
+}
+
+#[tokio::test]
+async fn content_locks_are_adopted_atomically_without_advancing_revision() {
+    let directory = TempDir::new().expect("temporary save parent");
+    let path = directory.path().join("save");
+    let (manifest, initial, _) = fixture();
+    let mut first = SaveStore::create(&path, manifest.clone(), vec![initial])
+        .await
+        .expect("create save");
+    let mut stale = first.connect().await.expect("stale connection");
+    let (world_lock, mod_lock) = candidate_content_locks(&manifest);
+
+    first
+        .adopt_content_locks(world_lock.clone(), mod_lock.clone())
+        .await
+        .expect("adopt candidate content locks");
+    assert_eq!(first.revision(), Revision::ZERO);
+    assert_eq!(&first.manifest().world_lock, &world_lock);
+    assert_eq!(&first.manifest().mod_lock, &mod_lock);
+    let loaded = first.load().await.expect("load adopted manifest");
+    assert_eq!(loaded.revision, Revision::ZERO);
+    assert_eq!(loaded.manifest, *first.manifest());
+
+    let mut rejected_world = world_lock;
+    rejected_world.content_hash =
+        ContentHash::parse("e".repeat(64)).expect("rejected candidate hash");
+    assert!(matches!(
+        stale
+            .adopt_content_locks(rejected_world, ModLock::default())
+            .await,
+        Err(loreloom_store::StoreError::InvalidCommit {
+            field: "content_lock_adoption_head"
+        })
+    ));
+    assert_eq!(stale.manifest(), &manifest);
+
+    let connected = first.connect().await.expect("reopen adopted save");
+    assert_eq!(connected.revision(), Revision::ZERO);
+    assert_eq!(connected.manifest(), first.manifest());
 }
 
 #[tokio::test]

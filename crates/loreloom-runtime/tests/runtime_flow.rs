@@ -1622,7 +1622,7 @@ fn generation_policy(
 }
 
 #[tokio::test]
-async fn world_service_rejects_a_candidate_mod_lock_before_world_materialization() {
+async fn world_service_adopts_a_compatible_candidate_mod_lock() {
     let directory = TempDir::new().expect("temporary save parent");
     let fixture = fixture();
     let candidate_world = fixture.manifest.world_lock.clone();
@@ -1646,26 +1646,52 @@ async fn world_service_rejects_a_candidate_mod_lock_before_world_materialization
         }],
     };
 
-    assert!(matches!(
-        WorldService::open(
-            store,
-            fixture.registry,
-            &candidate_world,
-            &candidate,
-            fixture.world_config
-        )
-        .await,
-        Err(RuntimeError::ContentLockMismatch)
-    ));
+    let service = WorldService::open(
+        store,
+        fixture.registry,
+        &candidate_world,
+        &candidate,
+        fixture.world_config,
+    )
+    .await
+    .expect("compatible candidate Mod lock");
+    assert_eq!(service.revision().await, Revision::ZERO);
 }
 
 #[tokio::test]
-async fn world_service_rejects_a_candidate_world_lock_before_world_materialization() {
+async fn world_service_adopts_a_compatible_candidate_world_lock() {
     let directory = TempDir::new().expect("temporary save parent");
     let fixture = fixture();
     let mut candidate_world = fixture.manifest.world_lock.clone();
     candidate_world.content_hash =
         parse_content_hash("e".repeat(64)).expect("different world content hash");
+    let candidate_mods = fixture.manifest.mod_lock.clone();
+    let store = SaveStore::create(
+        directory.path().join("save"),
+        fixture.manifest,
+        fixture.records,
+    )
+    .await
+    .expect("create save");
+
+    let service = WorldService::open(
+        store,
+        fixture.registry,
+        &candidate_world,
+        &candidate_mods,
+        fixture.world_config,
+    )
+    .await
+    .expect("compatible candidate World lock");
+    assert_eq!(service.revision().await, Revision::ZERO);
+}
+
+#[tokio::test]
+async fn world_service_rejects_a_different_world_identity() {
+    let directory = TempDir::new().expect("temporary save parent");
+    let fixture = fixture();
+    let mut candidate_world = fixture.manifest.world_lock.clone();
+    candidate_world.world_id = ModId::parse("games.loreloom.different").expect("different world");
     let candidate_mods = fixture.manifest.mod_lock.clone();
     let store = SaveStore::create(
         directory.path().join("save"),
@@ -1686,6 +1712,50 @@ async fn world_service_rejects_a_candidate_world_lock_before_world_materializati
         .await,
         Err(RuntimeError::ContentLockMismatch)
     ));
+}
+
+#[tokio::test]
+async fn failed_candidate_rebuild_preserves_the_durable_content_locks() {
+    let directory = TempDir::new().expect("temporary save parent");
+    let fixture = fixture();
+    let original_manifest = fixture.manifest.clone();
+    let missing_definition = definition_id("attribute", "removed");
+    let mut records = fixture.records;
+    let player = records
+        .iter_mut()
+        .find_map(|record| match record {
+            DomainRecord::Character(character) if character.id == fixture.player => Some(character),
+            _ => None,
+        })
+        .expect("player record");
+    player
+        .base_attributes
+        .0
+        .insert(missing_definition.clone(), Fixed::ONE);
+    let mut candidate_world = original_manifest.world_lock.clone();
+    candidate_world.content_hash =
+        parse_content_hash("e".repeat(64)).expect("different world content hash");
+    let path = directory.path().join("save");
+    let store = SaveStore::create(&path, original_manifest.clone(), records)
+        .await
+        .expect("create save");
+    let mut observer = store.connect().await.expect("observer connection");
+
+    assert!(matches!(
+        WorldService::open(
+            store,
+            fixture.registry,
+            &candidate_world,
+            &original_manifest.mod_lock,
+            fixture.world_config
+        )
+        .await,
+        Err(RuntimeError::World(
+            loreloom_world::WorldError::DefinitionNotFound { id }
+        )) if id == missing_definition
+    ));
+    let loaded = observer.load().await.expect("load unchanged manifest");
+    assert_eq!(loaded.manifest, original_manifest);
 }
 
 #[tokio::test]
