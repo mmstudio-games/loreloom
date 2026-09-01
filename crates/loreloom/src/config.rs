@@ -649,6 +649,22 @@ event_poll_ms = 25
     #[test]
     fn checked_in_example_is_a_valid_non_secret_configuration() {
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../loreloom.example.toml");
-        ProductConfig::load(&path).expect("example config");
+        let config = ProductConfig::load(&path).expect("example config");
+        let turn = ResourceBudget::default();
+        let orchestration = OrchestrationBudget::default();
+
+        assert_eq!(config.turn_budget, turn);
+        assert_eq!(
+            config.orchestration_budget.max_started_agent_turns,
+            orchestration.max_started_agent_turns
+        );
+        assert_eq!(
+            config.orchestration_budget.max_orchestration_rounds,
+            orchestration.max_orchestration_rounds
+        );
+        assert_eq!(
+            config.orchestration_budget.resources,
+            orchestration.resources
+        );
     }
 }

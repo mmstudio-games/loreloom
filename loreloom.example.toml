@@ -27,27 +27,27 @@ type = "environment"
 name = "OPENAI_API_KEY"
 
 [turn_budget]
-max_model_calls = 8
-max_tool_calls = 16
-max_input_tokens = 131072
-max_output_tokens = 16384
-max_total_tokens = 147456
-max_model_output_bytes = 262144
-max_elapsed_ms = 180000
+max_model_calls = 16
+max_tool_calls = 64
+max_input_tokens = 524288
+max_output_tokens = 32768
+max_total_tokens = 557056
+max_model_output_bytes = 1048576
+max_elapsed_ms = 600000
 require_reported_tokens = false
 
 [orchestration_budget]
-max_started_agent_turns = 24
-max_orchestration_rounds = 4
+max_started_agent_turns = 48
+max_orchestration_rounds = 8
 
 [orchestration_budget.resources]
-max_model_calls = 64
-max_tool_calls = 128
-max_input_tokens = 1048576
-max_output_tokens = 131072
-max_total_tokens = 1179648
-max_model_output_bytes = 2097152
-max_elapsed_ms = 900000
+max_model_calls = 128
+max_tool_calls = 512
+max_input_tokens = 4194304
+max_output_tokens = 524288
+max_total_tokens = 4718592
+max_model_output_bytes = 8388608
+max_elapsed_ms = 1800000
 require_reported_tokens = false
 
 [npc_resources]

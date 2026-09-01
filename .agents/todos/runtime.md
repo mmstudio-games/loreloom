@@ -72,7 +72,7 @@ OPEN 项、后续 RFC 或 P0 Spike；空 crate 不代表相关协议已经实现
   Save/Session Parameter 语义和通用 Tool；
 - [x] 实现外部 Provider、严格非敏感 TOML、Environment/File Secret source、endpoint allowlist 与
   Runtime/Rule/TUI budget；生产二进制要求 Provider 配置，Mock Bridge 只存在于测试；
-- [ ] 提高单 Agent Turn 与完整 PlayerInput 编排的默认 Model/Tool/Token/时间预算，保证默认档支持
+- [x] 提高单 Agent Turn 与完整 PlayerInput 编排的默认 Model/Tool/Token/时间预算，保证默认档支持
   多次 Tool continuation 和多轮 Narrator/NPC 调度，并让 Rust 默认值与示例配置保持一致；
 - [x] 实现 Condition periodic/expiry scheduler、同 tick periodic-first、target Effect 与原子 Rule
   cascade；
@@ -121,5 +121,5 @@ OPEN 项、后续 RFC 或 P0 Spike；空 crate 不代表相关协议已经实现
 - [x] 从启用编译候选和未启用目录检查生成非持久化 `PackageContentView`，在 Mods overlay 展示每个
   Mod 的顶层 Definition 总数/分类以及 Prompt/Patch 数量，并覆盖 enabled 优先合并和滚动边界；
 - [x] 完成 Active Spec 第 17 节实施审计：除显式 `UPSTREAM-GATED` 的第 47 条和上述分发许可选择外，
-  其余验收均有自动化或可复现证据；当前门禁为 170 tests passed，目录根世界的创建、锁分离、
+  其余验收均有自动化或可复现证据；当前门禁为 171 tests passed，目录根世界的创建、锁分离、
   Prompt 注入与存档内容锁重开拒绝均有确定性测试。macOS arm64 release 基线仍为 81.2 MiB。

@@ -92,18 +92,46 @@ impl Default for OrchestrationBudget {
     fn default() -> Self {
         Self {
             resources: ResourceBudget {
-                max_model_calls: 64,
-                max_tool_calls: 128,
-                max_input_tokens: 1_048_576,
-                max_output_tokens: 131_072,
-                max_total_tokens: 1_179_648,
-                max_model_output_bytes: 2_097_152,
-                max_elapsed_ms: 900_000,
+                max_model_calls: 128,
+                max_tool_calls: 512,
+                max_input_tokens: 4_194_304,
+                max_output_tokens: 524_288,
+                max_total_tokens: 4_718_592,
+                max_model_output_bytes: 8_388_608,
+                max_elapsed_ms: 1_800_000,
                 require_reported_tokens: false,
             },
-            max_started_agent_turns: 24,
-            max_orchestration_rounds: 4,
+            max_started_agent_turns: 48,
+            max_orchestration_rounds: 8,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_budgets_allow_repeated_tool_continuations_and_orchestration() {
+        let turn = ResourceBudget::default();
+        assert_eq!(turn.max_model_calls, 16);
+        assert_eq!(turn.max_tool_calls, 64);
+        assert_eq!(turn.max_input_tokens, 524_288);
+        assert_eq!(turn.max_output_tokens, 32_768);
+        assert_eq!(turn.max_total_tokens, 557_056);
+        assert_eq!(turn.max_model_output_bytes, 1_048_576);
+        assert_eq!(turn.max_elapsed_ms, 600_000);
+
+        let orchestration = OrchestrationBudget::default();
+        assert_eq!(orchestration.max_started_agent_turns, 48);
+        assert_eq!(orchestration.max_orchestration_rounds, 8);
+        assert_eq!(orchestration.resources.max_model_calls, 128);
+        assert_eq!(orchestration.resources.max_tool_calls, 512);
+        assert_eq!(orchestration.resources.max_input_tokens, 4_194_304);
+        assert_eq!(orchestration.resources.max_output_tokens, 524_288);
+        assert_eq!(orchestration.resources.max_total_tokens, 4_718_592);
+        assert_eq!(orchestration.resources.max_model_output_bytes, 8_388_608);
+        assert_eq!(orchestration.resources.max_elapsed_ms, 1_800_000);
     }
 }
 

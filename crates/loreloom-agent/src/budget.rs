@@ -32,13 +32,13 @@ pub struct ResourceBudget {
 impl Default for ResourceBudget {
     fn default() -> Self {
         Self {
-            max_model_calls: 8,
-            max_tool_calls: 16,
-            max_input_tokens: 131_072,
-            max_output_tokens: 16_384,
-            max_total_tokens: 147_456,
-            max_model_output_bytes: 262_144,
-            max_elapsed_ms: 180_000,
+            max_model_calls: 16,
+            max_tool_calls: 64,
+            max_input_tokens: 524_288,
+            max_output_tokens: 32_768,
+            max_total_tokens: 557_056,
+            max_model_output_bytes: 1_048_576,
+            max_elapsed_ms: 600_000,
             require_reported_tokens: false,
         }
     }
