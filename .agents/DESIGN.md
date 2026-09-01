@@ -264,6 +264,10 @@ Loreloom Runtime ───────────────► Persistence
     setup code 标识缺失、空或不可读取的 credential reference、endpoint policy、Provider 支持与
     Bridge 创建失败，并给出不含 Secret 的本地修复提示。环境变量名可以作为安全配置引用显示；
     Secret 值、凭证文件内容和 Armillae 原始错误正文不得进入 Display、Debug、日志或测试输出。
+56. TUI 提供只读 Mods overlay，分别显示唯一主世界、当前 `ModLock` 中已启用的扩展，以及世界根
+    `mods/` 下通过完整 Package 安全校验但未启用的目录包；内置 engine package 不作为 Mod 展示。
+    `Alt+M` 打开/关闭，`F2` 作为兼容入口，`Esc` 只关闭 overlay，方向键、PageUp/PageDown 与滚轮
+    滚动。安装目录只在启动时扫描，展示不启用 Mod、不修改存档，也不进入 ECS 或 Agent Context。
 
 项目方已于 2026-08-29 明确确认第 18–23 项的 Mod 子系统方向。该确认把 Content Mod、Rule Mod、
 统一导入路径、类型化参数、结构化 Event Option、通用 Gameplay Tool、ModLock 和 Extension Mod

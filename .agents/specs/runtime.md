@@ -1635,6 +1635,14 @@ assets/**            # optional bounded opaque resources
 prompts/*.md         # optional agent prompt resources
 ```
 
+产品启动时把世界根 `mods/` 的直接子目录作为 installed candidate，按稳定路径顺序使用与启用路径相同
+的 Package resource limit、symlink、Manifest、Engine compatibility、payload group 与 content hash
+校验。只有通过完整 Package 校验的 candidate 才进入只读 installed catalog；无效、不可读或符号链接
+candidate 只累计为 unavailable 数量，不能阻止未启用该包时启动。显式 `--mod` 仍是唯一启用入口；
+位于 `mods/` 外但通过 `--mod` 启用的目录包仍进入 enabled 列表。同一 Mod ID 与版本同时出现在目录
+和当前 `ModLock` 时只显示为 enabled；不同版本分别显示。catalog 是启动期 Host 投影，运行中目录
+变化不热更新，重启后重新扫描。
+
 `mod.toml` 是 UTF-8 TOML，Manifest Schema v1 至少声明 reverse-DNS lowercase Mod ID、SemVer
 version、属于该 Mod 且 kind 为 `pack` 的 Pack ID、Engine SemVer requirement、Content Schema
 version、required/optional dependencies、`content | rules` capability、64-byte lowercase hex payload
@@ -2170,6 +2178,7 @@ pub struct UiSnapshot {
     pub scene: SceneContext,
     pub parameters: Vec<ParameterSetView>,
     pub active_events: Vec<ActiveEventView>,
+    pub packages: PackageCatalogView,
     pub transcript: TranscriptWindow,
     // Runtime phase, submit/cancel/wait flags, Tool activity, notices and supporting Event IDs.
 }
@@ -2181,11 +2190,18 @@ Event Option 在 current Revision 求值 `visible_if`，不可见项不进入列
 `enabled_if` 求值。`TranscriptWindow` 默认最多 64 项；存在更旧内容时 `before_cursor` 等于当前窗口
 第一项 ID，调用方以“严格早于该 ID”请求上一页，没有更旧内容时为 `None`。
 
+`PackageCatalogView` 只包含主世界 ID/版本、按 enabled-first 后 ID/版本稳定排序的 Mod ID/版本、
+`enabled | installed` 状态、依赖数量和 unavailable installed candidate 数量；不得包含完整内容哈希、
+本地绝对路径或包内文本。World/ModLock 仍是 enabled 事实源，安装目录扫描只补充非持久化的 disabled
+catalog，不进入 ECS、Agent Context、Transcript 或存档。
+
 ### 12.3 输入与 thinking 状态
 
 - 输入按 Unicode grapheme cluster 编辑，支持多行、cursor 移动、删除、提交、取消和历史；
 - `Enter` 提交，`Alt+Enter` 或 `Ctrl+J` 插入换行；运行中 `Esc` 产生 Cancel intent，空闲时
   `Esc` 不产生世界行为；`Ctrl+C` 产生 Quit intent；
+- `Alt+M` 或 `F2` 打开/关闭只读 Mods overlay；overlay 打开时 `Esc` 只关闭 overlay，不取消 Runtime，
+  Up/Down、PageUp/PageDown 与鼠标滚轮滚动 catalog，其它字符不进入 editor；
 - TUI 把输入作为数据发送给 Runtime，不自行构造 WorldCommand；
 - `RuntimeClient::submit` 成功把输入加入 command queue 后，TUI 必须立即在 Transcript 末尾投影
   一条 `› ` 前缀的本地 pending 玩家行，再显示 thinking row，并回到最新内容；同步提交失败时不得
@@ -2244,9 +2260,10 @@ TUI crate 不依赖 Runtime/World/Store/Provider。`UiClientError` 只暴露稳�
 `runtime_snapshot_failed` 或 `runtime_disconnected`。这里的 shutdown 只定义 UI command/event adapter
 生命周期，不解除第 11 节对 Store 确定性关闭、物理备份、恢复和存档切换的 driver 门禁。
 
-`TuiApp` 拥有 `UiSnapshot`、grapheme editor、输入历史、窄屏页面、距最新内容的 transcript scroll、
+`TuiApp` 拥有 `UiSnapshot`、grapheme editor、输入历史、窄屏页面、只读 Mods overlay、距最新内容的 transcript scroll、
 当前折行 viewport 指标、至多一条已入队但尚未由 Snapshot 确认的 pending 玩家输入、当前 working
-phase、本地 spinner frame 与当前 Turn 的 live Tool Activity。Snapshot 更新不得覆盖 editor/scroll
+phase、本地 spinner frame 与当前 Turn 的 live Tool Activity。Mods overlay 拥有独立的有界滚动状态；
+Snapshot 更新不得覆盖 editor/scroll
 等本地交互字段；终态 Snapshot 清除 working phase/live Activity 并与 pending 输入对账，resize 只
 重新 render。Editor 最大 UTF-8 bytes
 固定为 `LongText` 的 65,536 bytes，单次插入 all-or-reject。`TuiConfig.state_width_percent` 默认 30，
@@ -2526,6 +2543,9 @@ CI 使用最新 stable，不执行 MSRV Job，不允许 manifest 出现 `rust-ve
 59. Provider 启动失败在创建/打开 World 和 Save 前报告 `narrator`/`npc` 槽位、稳定 setup code、
     安全 Provider 名称与可执行提示；Environment credential 问题可以显示变量名，但任意错误 Display、
     Debug 与测试输出均不包含 Secret、凭证文件内容或 Armillae 原始错误正文。
+60. `Alt+M`/`F2` 打开只读 Mods overlay，单独显示主世界、enabled ModLock 与通过完整安全校验的
+    installed-but-disabled 目录包；无效 installed candidate 只显示汇总数量，列表不含 hash、路径或
+    内容文本，滚动与关闭不产生 Runtime intent、WorldCommand 或持久化变化。
 
 ## 18. Active Spec 下的范围化实施门禁
 
