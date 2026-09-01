@@ -2,6 +2,10 @@
 name = "loreloom-world"
 version = "0.1.0"
 edition = "2024"
+description = "Authoritative Bevy ECS world and gameplay systems for Loreloom"
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
 
 [dependencies]
 bevy_ecs = { version = "=0.19.1", default-features = false, features = ["std"] }

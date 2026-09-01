@@ -16,6 +16,8 @@ OPEN 项、后续 RFC 或 P0 Spike；空 crate 不代表相关协议已经实现
 - [x] 使用 Rust 2024 edition、stable channel，且不声明 `rust-version`；
 - [x] 初始化 Semifold Rust resolver、`.changes/` 和八个 workspace package；
 - [x] 配置与 base branch `main` 不同的 Semifold `release` branch；
+- [x] 将全部 workspace package 切换到 Semifold `alpha` 预发布通道，并建立 GitHub Actions
+  质量、安全、发布计划与 version/publish 工作流；
 - [x] 创建 `mods/` 与共享测试数据目录 `tests/data/`；
 - [x] 通过 fmt、Cargo metadata/check/test、Clippy 和 Semifold 状态检查。
 
@@ -56,9 +58,8 @@ OPEN 项、后续 RFC 或 P0 Spike；空 crate 不代表相关协议已经实现
 - [ ] **UPSTREAM-GATED**：SurrealDB SDK 暴露可等待、幂等的 embedded shutdown 后接入，移除物理
   关闭/备份对 sleep/retry 的依赖；上游已确认当前 SDK 无法等待 local router/datastore 退出；
 - [ ] **UPSTREAM-GATED**：实现关闭后物理备份、恢复与存档切换的产品 API；
-- [ ] **RELEASE-GATED**：在实际分发前确认 Loreloom 采用与 `toasty-driver-surreal`
-  `AGPL-3.0-only` 兼容的分发许可，或为该依赖取得兼容的重新许可；该选择不改变当前 Runtime、
-  Store Schema 或存档格式；
+- [x] 采用与 `toasty-driver-surreal` 兼容的 `AGPL-3.0-only` 分发许可，并为全部 workspace package
+  配置 Cargo 发布元数据；该选择不改变 Runtime、Store Schema 或存档格式；
 - [x] 实现 Runtime Client/Event loop、确定性 TUI 产品层与目录根世界装配，完成最小可玩 Runtime、
   World、Agent、Store、TUI 纵向切片；
 - [x] 实现正式目录 Mod package discovery、依赖/Patch/hash lock、统一内置/外部 Registry 加载与

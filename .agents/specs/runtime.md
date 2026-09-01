@@ -185,14 +185,17 @@ Backend、Runtime 与 TUI 装配，以及进程退出顺序。
 - 每个成员 Manifest 必须显式声明自己的 `package.version`，禁止 `version.workspace`；初始版本为
   `0.1.0`。
 - Semifold 使用 Rust workspace resolver 与根级 `.changes/` 变更集管理成员版本；base branch 为
-  `main`，release branch 为非 `main` 的 `release`。Semifold 必须直接更新各成员 Manifest 中的
-  版本。
+  `main`，release branch 为非 `main` 的 `release`。全部 workspace package 使用 `alpha` 预发布
+  通道，首次进入通道时保留当前稳定版本基线。Semifold 必须直接更新各成员 Manifest 中的版本。
 - 根世界文件位于仓库根级 `world.toml`、`content/`、`rules/` 与 `prompts/`；`mods/` 只放扩展，
   跨 crate 共享测试数据位于 `tests/data/`。
 - Rust edition 固定为当前可用的 `2024`。
 - 工具链 channel 为 `stable`，不固定 `1.x.y` 数字。
 - 所有 Loreloom package 都不得设置 `package.rust-version`。
 - CI 不建立 MSRV Job；每次运行使用当时最新 stable。
+- GitHub Actions 必须在 pull request 和 `main` push 上执行格式、检查、Clippy、测试、文档与
+  依赖/Secret 安全门禁；pull request 由 Semifold 报告发布计划，`main` push 由 Semifold 独占
+  version/release branch 更新与 crates.io 发布。
 - 二进制 workspace 提交 `Cargo.lock` 并在常规验证中使用 `--locked`。
 - 新增 package 使用 `cargo new`，新增依赖使用 `cargo add -p`，移除使用 `cargo remove -p`。
 - 依赖默认使用实现时最新且相互兼容的稳定版本；安全或兼容问题必须更新 lockfile 并验证。
@@ -1894,6 +1897,8 @@ Clock 暂停，不随墙钟时间隐式推进；世界只通过显式 WorldComma
 `0a7c87408e0daae0d6f5ed9f2b9d1ebf01d08549`。crates.io 的 `0.1.0-alpha.0` 发布包早于上述能力，
 仍缺少显式事务、SurrealKV、原生 JSON 和 migration tracking，不能作为替代。该 driver 为
 `AGPL-3.0-only`；Loreloom 的分发方式必须与该许可证兼容，或在发布前取得兼容的重新许可。
+项目方于 2026-09-02 确认 Loreloom 全部 workspace package 采用 `AGPL-3.0-only`，并在仓库根级
+维护许可证文本与 Cargo 发布元数据。
 
 上述 revision 的 `drop(Db)` 会触发连接任务和 SurrealDB local router 的异步退出，但 Toasty/driver
 没有“等待 SurrealKV flusher、router 与文件句柄全部关闭”的产品 API；上游已确认当前 SurrealDB
@@ -2588,8 +2593,8 @@ RFC 0001 已于 2026-08-30 被项目方接受。以下事项继续阻塞对应�
 
 - Stable ID 编码、record envelope 与 Command/Event/RecordOp 重建权威关系已冻结；首个公开版本前
   只有当前 v1 codec，不存在已激活的领域兼容 migration；
-- Store driver 的 AGPL 兼容分发方式在发布前确认；后端、公开依赖 revision 与
-  commit/failure 协议已由 P0 Spike 冻结；物理 backup/restore/switch 仍受 SurrealDB shutdown
+- Store driver 的 AGPL 兼容分发方式已通过 Loreloom 采用 `AGPL-3.0-only` 确认；后端、公开依赖
+  revision 与 commit/failure 协议已由 P0 Spike 冻结；物理 backup/restore/switch 仍受 SurrealDB shutdown
   上游能力门禁；
 - 第一阶段 PlayerInput 不做代码层说话/行动关键词分类，原文只进入 Narrator；`create_npc` 的
   source/lifetime/mode、`request_npc_turn` 的最小参数、内部物化状态、可配置数量 policy、promotion

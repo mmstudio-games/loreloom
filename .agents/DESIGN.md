@@ -169,7 +169,8 @@ Loreloom Runtime ───────────────► Persistence
     library crate 和 `loreloom` binary crate；
 32. 每个 crate 在自己的 Manifest 中显式声明版本，禁止使用 `version.workspace`；项目不声明
     `rust-version`，使用 Semifold 的 Rust resolver 和 `.changes/` 变更集管理各 crate 版本；
-    Semifold base branch 为 `main`，release branch 为非 `main` 的 `release`；
+    Semifold base branch 为 `main`，release branch 为非 `main` 的 `release`，全部 workspace package
+    使用 `alpha` 预发布通道；
 33. 仓库根目录的 `world.toml`、`content/`、`rules/` 与 `prompts/` 属于唯一主世界；`mods/` 只放
     主世界扩展，共享测试数据位于 `tests/data/`；
 34. 第一阶段 WorldCommand 先在唯一世界槽中把 ECS 从 committed Revision N 修改为隔离的
@@ -284,7 +285,8 @@ Loreloom Runtime ───────────────► Persistence
 
 项目方于 2026-08-30 同意把第 24–25 项记录为持久化候选上下文，并随后明确第一阶段使用
 SurrealKV。Store/Armillae P0 Spike 完成后，第 24、34、35 项已同步为 Active Spec 约束；生产
-Store Schema、领域迁移和 AGPL 兼容分发方式仍按各自门禁处理。
+Store Schema 与领域迁移仍按各自门禁处理；项目方于 2026-09-02 确认 Loreloom 全部 workspace
+package 使用 `AGPL-3.0-only` 分发，许可证门禁已解除。
 
 项目方同日确认第 26 项的第一阶段串行 Agent 调度边界。该次确认当时尚未冻结调度触发源、
 语义顺序、数量和预算，也未决定等待 Provider 时世界是否继续推进；这些问题随后由第 27–30
@@ -314,8 +316,7 @@ workspace、版本管理和仓库目录约定。尚未冻结的精确协议转�
 - `create_npc`/`request_npc_turn` 的简化 Narrator Tool 面、内部 NPC 物化状态、持久 Scene 激活语义、
   Agent 化资源门禁和角色 promotion 规则已冻结；Generated Draft 复用 Narrator Provider 的独立预算
   阶段，具体预算值是 Host 配置，不进入模型/Mod wire；
-- Store 各领域 payload Schema，以及最终 AGPL 兼容分发方式；record envelope、重建事实源、
-  migration 顺序与未知字段策略已冻结；
+- Store 各领域 payload Schema；record envelope、重建事实源、migration 顺序与未知字段策略已冻结；
 - 一个玩家输入、Agent Step、ToolCall、WorldCommand 和世界提交之间的原子性；
 - ToolCall 构造的内部 `NarratorPlan`、`NpcTurnRequest`、自然语言 `NpcTurnResult`，以及整轮/单
   Turn 预算字段、配置层级、默认值和最大编排轮数；模型正文不承担这些结构化协议；

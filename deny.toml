@@ -1,0 +1,57 @@
+[graph]
+all-features = true
+targets = [
+  "aarch64-apple-darwin",
+  "x86_64-unknown-linux-gnu",
+]
+
+[advisories]
+yanked = "warn"
+ignore = [
+  # bincode is flagged as unmaintained rather than vulnerable. It is pulled
+  # transitively by SurrealDB and currently has no safe upgrade path.
+  "RUSTSEC-2025-0141",
+]
+
+[licenses]
+confidence-threshold = 0.8
+private = { ignore = true }
+allow = [
+  "AGPL-3.0-only",
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "ISC",
+  "MIT",
+  "MIT-0",
+  "MPL-2.0",
+  "Unicode-3.0",
+  "Zlib",
+]
+exceptions = [
+  # SurrealDB and its support crates are source-available under BUSL-1.1.
+  { allow = ["BUSL-1.1"], crate = "surrealdb" },
+  { allow = ["BUSL-1.1"], crate = "surrealdb-collections" },
+  { allow = ["BUSL-1.1"], crate = "surrealdb-core" },
+  { allow = ["BUSL-1.1"], crate = "surrealdb-protocol" },
+  { allow = ["BUSL-1.1"], crate = "surrealdb-strand" },
+  { allow = ["BUSL-1.1"], crate = "surrealdb-types" },
+  { allow = ["BUSL-1.1"], crate = "surrealdb-types-derive" },
+  # Keep permissive uncommon licenses scoped to their transitive crates.
+  { allow = ["Unlicense"], crate = "ext-sort" },
+  { allow = ["BSL-1.0"], crate = "xxhash-rust" },
+]
+
+[bans]
+multiple-versions = "warn"
+wildcards = "allow"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = [
+  "https://github.com/mmstudio-games/armillae",
+  "https://github.com/noctisynth/toasty-driver-surreal",
+]

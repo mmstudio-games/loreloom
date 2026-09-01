@@ -2,6 +2,10 @@
 name = "loreloom-content"
 version = "0.1.0"
 edition = "2024"
+description = "Versioned world content, mod packages, and definition compilation for Loreloom"
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
 
 [dependencies]
 loreloom-core = { version = "0.1.0", path = "../loreloom-core" }

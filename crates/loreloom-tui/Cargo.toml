@@ -2,6 +2,10 @@
 name = "loreloom-tui"
 version = "0.1.0"
 edition = "2024"
+description = "Deterministic terminal user interface for Loreloom"
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
 
 [dependencies]
 crossterm = "0.29.0"

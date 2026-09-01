@@ -2,6 +2,10 @@
 name = "loreloom-core"
 version = "0.1.0"
 edition = "2024"
+description = "Backend-neutral domain protocols and stable identities for Loreloom"
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
 
 [dependencies]
 semver = { version = "1.0.28", features = ["serde"] }

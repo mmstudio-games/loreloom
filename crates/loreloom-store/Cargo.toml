@@ -2,6 +2,10 @@
 name = "loreloom-store"
 version = "0.1.0"
 edition = "2024"
+description = "Versioned durable world storage and recovery for Loreloom"
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
 
 [dependencies]
 loreloom-core = { version = "0.1.0", path = "../loreloom-core" }
