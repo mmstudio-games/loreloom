@@ -11,7 +11,7 @@ use loreloom_agent::{
     ModelFailureDiagnostic, ModelInvocationKind, NarratorDefinition, NarratorNpcDecision,
     NarratorPlan, NpcAgent, NpcAssignment, NpcControllerKind, NpcLifetime, NpcNarrativeAction,
     NpcTarget, NpcTurnRequest, NpcTurnResult, NpcTurnStatus, ResourceUsage, ToolCallOutcome,
-    ToolCallProgress, TurnCompletion, TurnInvocation, TurnOutcome, TurnStatus,
+    ToolCallProgress, TurnInvocation, TurnOutcome, TurnStatus,
 };
 use loreloom_core::{
     ActorId, CharacterController, CharacterLifetime, ContentDefinitionId, GeneratedOrigin,
@@ -281,7 +281,6 @@ impl GameRuntime {
                         budget: self.config.turn_budget,
                         max_context_tokens: self.config.context_projection.max_context_tokens,
                         cancellation: &self.cancellation,
-                        completion: TurnCompletion::FinalResponse,
                     },
                     |progress| {
                         publish_tool_progress(&mut tool_activity, progress, on_progress);
@@ -296,7 +295,7 @@ impl GameRuntime {
             let pending = self.executor.take_pending_npc_decisions().await;
             let mut pending_turns = self.executor.take_pending_npc_turns().await;
             let pending_topology = self.executor.take_pending_topology().await;
-            let narrator_text = require_text(&narrator_turn)?;
+            require_completed(&narrator_turn)?;
             publish_phase(on_progress, RuntimePhase::ResolvingOrchestration);
             if let Some(pending_topology) = pending_topology {
                 let context = AgentToolContext {
@@ -377,14 +376,6 @@ impl GameRuntime {
                 pending_turns.clear();
                 continue;
             }
-            let requires_replanning = pending.iter().any(|pending| {
-                pending.decision.requires_materialization()
-                    && !settled_materializations.iter().any(
-                        |(decision, _): &(NarratorNpcDecision, ActorId)| {
-                            decision == &pending.decision
-                        },
-                    )
-            });
             if !pending.is_empty() {
                 let resolved = self
                     .resolve_npc_decisions(
@@ -408,12 +399,11 @@ impl GameRuntime {
                         .map(|actor_id| (result.decision.clone(), actor_id))
                 }));
                 materialization_results.extend(resolved);
-            }
-            if requires_replanning {
                 pending_turns.clear();
                 continue;
             }
 
+            let narrator_text = require_text(&narrator_turn)?;
             let plan_revision = self.service.revision().await;
             for request in &mut pending_turns {
                 request.based_on_revision = plan_revision;
@@ -578,7 +568,6 @@ impl GameRuntime {
                             budget: self.config.turn_budget,
                             max_context_tokens: self.config.context_projection.max_context_tokens,
                             cancellation: &self.cancellation,
-                            completion: TurnCompletion::FinalResponse,
                         },
                         |progress| {
                             publish_tool_progress(&mut tool_activity, progress, on_progress);
@@ -876,7 +865,6 @@ impl GameRuntime {
                                     .context_projection
                                     .max_context_tokens,
                                 cancellation: &self.cancellation,
-                                completion: TurnCompletion::AfterSuccessfulTool,
                             },
                             |progress| {
                                 publish_tool_progress(tool_activity, progress, on_progress);
@@ -1270,7 +1258,7 @@ fn narrator_request(
     let mut messages = vec![Message::new(
         Role::System,
         vec![ContentPart::text(
-            "Player input goes only to the narrator. Use native tools for every structured decision or world change. request_npc_turn accepts only an actor_id marked npc_turn_available in the current observation plus a natural-language assignment; scene and revision are supplied by the runtime. create_npc accepts only source, lifetime and mode; after creation the runtime replans with the committed actor before any NPC turn. Pure narrative mentions need no tool. When scene transition tools are offered, call list_scene_transitions first and copy one returned target exactly; never invent a scene ID, retry an unchanged rejection, or narrate arrival before a committed transition result. If no scene target matches, explain that the destination is unavailable in current world content. When submit_npc_draft is offered, that tool is the entire task: submit one NPC, omit empty optional collections, and do not add prose or control fields. Return only natural-language prose in other response bodies; never return JSON or a structured control envelope. Never expose tool failures or internal orchestration in player-facing prose. NPC claims are not committed facts; only committed events are world facts.",
+            "Player input goes only to the narrator. Use native tools for every structured decision or world change. request_npc_turn accepts only an actor_id marked npc_turn_available in the current observation plus a natural-language assignment; scene and revision are supplied by the runtime. create_npc accepts only source, lifetime and mode; an accepted call ends the current turn immediately, so do not place later tool calls or prose after it. The runtime then materializes and replans with the committed actor before any NPC turn. Pure narrative mentions need no tool. When scene transition tools are offered, call list_scene_transitions first and copy one returned target exactly; never invent a scene ID, retry an unchanged rejection, or narrate arrival before a committed transition result. If no scene target matches, explain that the destination is unavailable in current world content. When submit_npc_draft is offered, that tool is the entire task: submit one NPC, omit empty optional collections, and do not add prose or control fields. Return only natural-language prose in other response bodies; never return JSON or a structured control envelope. Never expose tool failures or internal orchestration in player-facing prose. NPC claims are not committed facts; only committed events are world facts.",
         )],
     )];
     messages.extend(

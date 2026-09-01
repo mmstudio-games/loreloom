@@ -26,12 +26,6 @@ pub enum TurnStatus {
     Failed(TurnFailureStage),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TurnCompletion {
-    FinalResponse,
-    AfterSuccessfulTool,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolCallOutcome {
     pub call_id: String,
@@ -73,7 +67,6 @@ pub struct TurnInvocation<'a> {
     pub budget: ResourceBudget,
     pub max_context_tokens: u64,
     pub cancellation: &'a CancellationToken,
-    pub completion: TurnCompletion,
 }
 
 pub struct AgentRunner {
@@ -119,7 +112,6 @@ impl AgentRunner {
             budget,
             max_context_tokens,
             cancellation,
-            completion,
         } = invocation;
         let offered_tools = request
             .tools
@@ -312,6 +304,7 @@ impl AgentRunner {
                     }
                 };
                 let successful = !result.is_error;
+                let turn_barrier = successful && tool_result_is_turn_barrier(&result);
                 if successful {
                     collect_events(&result, &mut committed_events);
                     advance_tool_revision(&result, &mut tool_context);
@@ -327,7 +320,7 @@ impl AgentRunner {
                 tool_calls.push(call_outcome);
                 request.messages.push(Message::tool_result(result.clone()));
                 tool_results.push(result);
-                if completion == TurnCompletion::AfterSuccessfulTool && successful {
+                if turn_barrier {
                     return outcome(
                         TurnStatus::Completed,
                         None,
@@ -368,6 +361,18 @@ fn tool_error_code(result: &ToolResult) -> Option<String> {
             })
             .map(str::to_owned),
         _ => None,
+    })
+}
+
+fn tool_result_is_turn_barrier(result: &ToolResult) -> bool {
+    result.content.iter().any(|content| match content {
+        ToolResultContent::Json { value } => {
+            value
+                .get("turn_barrier")
+                .and_then(serde_json::Value::as_bool)
+                == Some(true)
+        }
+        _ => false,
     })
 }
 

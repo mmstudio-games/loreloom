@@ -1350,7 +1350,7 @@ impl ToolExecutor for RuntimeToolExecutor {
             },
             ToolDefinition {
                 name: "create_npc".to_owned(),
-                description: "Create a preset or generated NPC in the current place after this narrator turn. Planning restarts with the committed actor; request its turn separately only after it appears in observation.".to_owned(),
+                description: "Create a preset or generated NPC in the current place. An accepted call ends this narrator turn so the runtime can materialize immediately; planning restarts with the committed actor, and its turn may be requested only after it appears in observation.".to_owned(),
                 input_schema: json!({
                     "type": "object",
                     "required": ["source", "lifetime", "mode"],
@@ -1684,7 +1684,7 @@ impl ToolExecutor for RuntimeToolExecutor {
                             Ok::<JsonValue, RuntimeError>(json!({
                                 "status": "accepted_pending",
                                 "revision": runtime.revision,
-                                "requires_replanning_after_materialization": true
+                                "turn_barrier": true
                             }))
                         }
                         .await
@@ -1793,7 +1793,8 @@ impl ToolExecutor for RuntimeToolExecutor {
                                     *pending = Some(draft);
                                     Ok(json!({
                                         "status": "accepted_pending",
-                                        "revision": runtime.revision
+                                        "revision": runtime.revision,
+                                        "turn_barrier": true
                                     }))
                                 } else {
                                     Err(RuntimeError::InvalidNpcDraft {

@@ -20,7 +20,7 @@ use futures_executor::block_on;
 use loreloom_agent::{
     AgentRunner, AgentToolContext, BudgetReason, CancellationToken, ModelFailureCategory,
     ModelFailureStage, ModelInvocationKind, NarratorPlan, ResourceBudget, ToolCallOutcome,
-    ToolCallProgress, TurnCompletion, TurnFailureStage, TurnInvocation, TurnStatus,
+    ToolCallProgress, TurnFailureStage, TurnInvocation, TurnStatus,
 };
 use loreloom_core::{ActorId, Revision, SessionId};
 use serde_json::json;
@@ -52,7 +52,7 @@ fn tool_response(calls: Vec<ToolCall>) -> CompletionResponse {
 }
 
 fn tool_definitions() -> Vec<ToolDefinition> {
-    ["commit_first", "inspect_after"]
+    ["commit_first", "inspect_after", "finish_stage"]
         .into_iter()
         .map(|name| ToolDefinition {
             name: name.to_owned(),
@@ -107,6 +107,7 @@ impl ToolExecutor for RecordingExecutor {
                     ]
                 }),
                 "inspect_after" => json!({ "observed_revision": runtime.revision }),
+                "finish_stage" => json!({ "turn_barrier": true }),
                 _ => {
                     return Err(ToolExecutionError::UnknownTool {
                         name: call.name.clone(),
@@ -144,7 +145,6 @@ fn invocation<'a>(
         budget,
         max_context_tokens: u64::MAX,
         cancellation,
-        completion: TurnCompletion::FinalResponse,
     }
 }
 
@@ -272,41 +272,45 @@ fn product_runner_preserves_tool_order_correlation_and_committed_revision() {
 }
 
 #[test]
-fn product_runner_can_finish_on_the_first_successful_tool_without_a_follow_up_model_call() {
+fn product_runner_stops_at_a_successful_tool_result_barrier() {
     let executor = Arc::new(RecordingExecutor::default());
     let runner = AgentRunner::new(executor.clone());
     let bridge = MockBridge::scripted([MockResponse::completion(tool_response(vec![
-        call("accepted-draft", "commit_first"),
+        call("accepted-draft", "finish_stage"),
         call("unneeded-second-draft", "inspect_after"),
     ]))]);
     let cancellation = CancellationToken::new();
-    let mut invocation = invocation(&bridge, &cancellation, ResourceBudget::default());
-    invocation.completion = TurnCompletion::AfterSuccessfulTool;
 
-    let outcome = block_on(runner.run_turn(invocation));
+    let outcome = block_on(runner.run_turn(invocation(
+        &bridge,
+        &cancellation,
+        ResourceBudget::default(),
+    )));
 
     assert_eq!(outcome.status, TurnStatus::Completed);
     assert_eq!(outcome.final_text, None);
     assert_eq!(outcome.tool_calls.len(), 1);
     assert_eq!(
         executor.calls(),
-        vec![("commit_first".to_owned(), Revision::new(1))]
+        vec![("finish_stage".to_owned(), Revision::new(1))]
     );
     assert_eq!(bridge.requests().expect("request log").len(), 1);
 }
 
 #[test]
-fn successful_tool_completion_keeps_retrying_after_a_rejected_call() {
+fn tool_result_barrier_keeps_retrying_after_a_rejected_call() {
     let executor = Arc::new(RecordingExecutor::default());
     let runner = AgentRunner::new(executor.clone());
     let bridge = MockBridge::scripted([
         MockResponse::completion(tool_response(vec![call("rejected-draft", "inspect_after")])),
-        MockResponse::completion(tool_response(vec![call("corrected-draft", "commit_first")])),
+        MockResponse::completion(tool_response(vec![call("corrected-draft", "finish_stage")])),
     ]);
     let cancellation = CancellationToken::new();
     let mut invocation = invocation(&bridge, &cancellation, ResourceBudget::default());
-    invocation.request.tools.truncate(1);
-    invocation.completion = TurnCompletion::AfterSuccessfulTool;
+    invocation
+        .request
+        .tools
+        .retain(|definition| definition.name == "finish_stage");
 
     let outcome = block_on(runner.run_turn(invocation));
 
@@ -316,7 +320,7 @@ fn successful_tool_completion_keeps_retrying_after_a_rejected_call() {
     assert!(!outcome.tool_calls[1].is_error);
     assert_eq!(
         executor.calls(),
-        vec![("commit_first".to_owned(), Revision::new(1))]
+        vec![("finish_stage".to_owned(), Revision::new(1))]
     );
     assert_eq!(bridge.requests().expect("request log").len(), 2);
 }

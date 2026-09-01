@@ -86,7 +86,7 @@ OPEN 项、后续 RFC 或 P0 Spike；空 crate 不代表相关协议已经实现
 - [x] 收敛 `npc_generation` 为首次成功 `submit_npc_draft` 即结束的单用途 Tool stage，移除 Draft
   wire 和模型 payload 中的 AgentProfile/GenerationPolicyId，允许省略空集合，并以不回显参数的
   字段类别诊断替代笼统 `invalid_input`；
-- [ ] 把成功的 `create_npc` 收敛为 Narrator Turn barrier，跳过无用自然语言 continuation 与同一
+- [x] 把成功的 `create_npc` 收敛为 Narrator Turn barrier，跳过无用自然语言 continuation 与同一
   响应内后续 ToolCall，释放执行槽后立即物化并基于 committed Observation 重规划；
 - [x] 把 `request_npc_turn` 压平为 ActorId + assignment，在 Observation 投影
   `npc_turn_available`，并让 AgentRunner/UiSnapshot/TUI 保留脱敏 Tool 拒绝码；

@@ -1159,8 +1159,7 @@ impl LlmBridge for GeneratedNarratorBridge {
                     arguments: serde_json::to_value(self.creation_request())
                         .expect("materialization arguments"),
                 })),
-                1 => Ok(text_response("The witness request is queued.")),
-                2 => {
+                1 => {
                     let payload = request
                         .messages
                         .iter()
@@ -1201,7 +1200,7 @@ impl LlmBridge for GeneratedNarratorBridge {
                         arguments: serde_json::to_value(self.draft()).expect("generated draft"),
                     }))
                 }
-                3 => {
+                2 => {
                     let payload = request
                         .messages
                         .iter()
@@ -1252,7 +1251,7 @@ impl LlmBridge for GeneratedNarratorBridge {
                         Ok(self.npc_turn_response(actor_id))
                     }
                 }
-                4 => {
+                3 => {
                     if self.repeat_materialization {
                         let (actor_id, _) = self
                             .materialized_actor
@@ -1263,10 +1262,10 @@ impl LlmBridge for GeneratedNarratorBridge {
                     }
                     Ok(text_response("The generated NPC turn is queued."))
                 }
-                5 if self.repeat_materialization => {
+                4 if self.repeat_materialization => {
                     Ok(text_response("The generated NPC turn is queued."))
                 }
-                5 | 6 => Ok(text_response(
+                4 | 5 => Ok(text_response(
                     "Ilya answers only after becoming part of the world.",
                 )),
                 _ => Err(BridgeError::InvalidRequest {
@@ -1332,8 +1331,7 @@ impl LlmBridge for PresetNarratorBridge {
                     })
                     .expect("preset decision"),
                 })),
-                1 => Ok(text_response("The preset character request is queued.")),
-                2 => {
+                1 => {
                     let payload = request
                         .messages
                         .iter()
@@ -1373,8 +1371,8 @@ impl LlmBridge for PresetNarratorBridge {
                         }),
                     }))
                 }
-                3 => Ok(text_response("The preset NPC turn is queued.")),
-                4 => Ok(text_response(
+                2 => Ok(text_response("The preset NPC turn is queued.")),
+                3 => Ok(text_response(
                     "Orin joins the conversation from the prepared cast.",
                 )),
                 _ => Err(BridgeError::InvalidRequest {
@@ -1452,16 +1450,7 @@ impl LlmBridge for RejectedGenerationBridge {
                         .expect("generation request"),
                 }));
             }
-            if call == 1 {
-                return Ok(text_response(
-                    serde_json::to_string(&NarratorPlan {
-                        based_on_revision: Revision::new(1),
-                        npc_turns: Vec::new(),
-                    })
-                    .expect("provisional rejection plan"),
-                ));
-            }
-            if matches!(self.mode, GenerationRejectionMode::ProviderFailure) && call == 2 {
+            if matches!(self.mode, GenerationRejectionMode::ProviderFailure) && call == 1 {
                 return Err(BridgeError::ProviderRejected {
                     code: Some("must-not-escape".to_owned()),
                     message: "injected generation failure must-not-escape".to_owned(),
@@ -1471,8 +1460,8 @@ impl LlmBridge for RejectedGenerationBridge {
                 });
             }
             let replanning_call = match self.mode {
-                GenerationRejectionMode::ResourceLimit => 2,
-                GenerationRejectionMode::ProviderFailure => 3,
+                GenerationRejectionMode::ResourceLimit => 1,
+                GenerationRejectionMode::ProviderFailure => 2,
             };
             if call == replanning_call {
                 let payload = request
@@ -1574,14 +1563,7 @@ impl LlmBridge for CancellableGenerationBridge {
                     arguments: serde_json::to_value(&self.request)
                         .expect("cancelled generation request"),
                 })),
-                1 => Ok(text_response(
-                    serde_json::to_string(&NarratorPlan {
-                        based_on_revision: Revision::new(1),
-                        npc_turns: Vec::new(),
-                    })
-                    .expect("cancel provisional plan"),
-                )),
-                2 => {
+                1 => {
                     self.entered_generation.notify_one();
                     std::future::pending::<Result<CompletionResponse, BridgeError>>().await
                 }
@@ -2650,7 +2632,7 @@ async fn generated_npc_is_committed_before_narrator_replans_and_dispatches_it() 
             .saw_simplified_draft_contract
             .load(Ordering::SeqCst)
     );
-    assert_eq!(narrator.calls.load(Ordering::SeqCst), 6);
+    assert_eq!(narrator.calls.load(Ordering::SeqCst), 5);
     assert_eq!(npc.requests().expect("NPC request log").len(), 1);
     assert_eq!(outcome.npc_results.len(), 1);
     assert_eq!(outcome.npc_results[0].status, NpcTurnStatus::Completed);
@@ -2742,7 +2724,7 @@ async fn repeated_materialization_request_does_not_generate_a_second_character()
         .await
         .expect("complete deduplicated NPC turn");
 
-    assert_eq!(narrator.calls.load(Ordering::SeqCst), 7);
+    assert_eq!(narrator.calls.load(Ordering::SeqCst), 6);
     assert_eq!(npc.requests().expect("NPC requests").len(), 1);
     let loaded = observer.load().await.expect("load deduplicated save");
     assert_eq!(
@@ -2801,7 +2783,7 @@ async fn preset_npc_uses_the_same_spawn_event_and_post_commit_replanning_barrier
         .expect("complete preset NPC turn");
 
     assert!(narrator.saw_materialized_profile.load(Ordering::SeqCst));
-    assert_eq!(narrator.calls.load(Ordering::SeqCst), 5);
+    assert_eq!(narrator.calls.load(Ordering::SeqCst), 4);
     assert_eq!(npc.requests().expect("preset NPC requests").len(), 1);
     assert_eq!(outcome.npc_results.len(), 1);
     assert_eq!(
@@ -3044,7 +3026,7 @@ async fn npc_generation_consumes_the_shared_started_agent_turn_budget() {
         error,
         RuntimeError::Budget(loreloom_agent::BudgetReason::AgentTurns)
     ));
-    assert_eq!(narrator.calls.load(Ordering::SeqCst), 2);
+    assert_eq!(narrator.calls.load(Ordering::SeqCst), 1);
     let loaded = observer.load().await.expect("load budget-limited save");
     assert!(!loaded.records.iter().any(|record| {
         matches!(
@@ -3803,7 +3785,6 @@ async fn mock_agent_continuation_splits_stack_then_uses_skill_at_advanced_revisi
             budget: ResourceBudget::default(),
             max_context_tokens: u64::MAX,
             cancellation: &cancellation,
-            completion: loreloom_agent::TurnCompletion::FinalResponse,
         })
         .await;
     assert_eq!(outcome.status, TurnStatus::Completed);
