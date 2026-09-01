@@ -13,7 +13,7 @@ use loreloom_world::RuleLimits;
 use serde::Deserialize;
 use url::Url;
 
-use crate::error::AppError;
+use crate::error::{AppError, ProviderSetupDiagnostic, ProviderSetupIssue, ProviderSlot};
 
 const CONFIG_SCHEMA_V1: u32 = 1;
 
@@ -165,11 +165,10 @@ impl ProductConfig {
             hosts: self.allowed_endpoint_hosts,
         };
         let context = BridgeResolveContext::new().endpoint_policy(&endpoint_policy);
-        let narrator = self.narrator.resolve_with(context).await?;
-        let npc = self.npc.resolve_with(context).await?;
         let factory = RigBridgeFactory;
-        let narrator = factory.create(narrator).await?;
-        let npc = factory.create(npc).await?;
+        let narrator =
+            resolve_provider(self.narrator, ProviderSlot::Narrator, context, &factory).await?;
+        let npc = resolve_provider(self.npc, ProviderSlot::Npc, context, &factory).await?;
         Ok(ResolvedProductConfig {
             providers: ConfiguredProviders {
                 narrator,
@@ -201,14 +200,12 @@ impl ProductConfig {
         if self.schema_version != CONFIG_SCHEMA_V1 {
             return Err(AppError::ConfigPolicy("unsupported config schema"));
         }
-        validate_bridge_credential(&self.narrator)?;
-        validate_bridge_credential(&self.npc)?;
         validate_hosts(&self.allowed_endpoint_hosts)?;
         let policy = AllowedEndpointPolicy {
             hosts: self.allowed_endpoint_hosts.clone(),
         };
-        self.narrator.validate(Some(&policy))?;
-        self.npc.validate(Some(&policy))?;
+        validate_bridge_setup(&self.narrator, ProviderSlot::Narrator, &policy)?;
+        validate_bridge_setup(&self.npc, ProviderSlot::Npc, &policy)?;
         self.context_projection
             .validate()
             .map_err(AppError::ConfigPolicy)?;
@@ -228,16 +225,168 @@ impl ProductConfig {
     }
 }
 
-fn validate_bridge_credential(config: &BridgeConfig) -> Result<(), AppError> {
-    if matches!(
-        config.credential.as_ref(),
-        Some(CredentialRef::Resolver { .. })
-    ) {
-        return Err(AppError::ConfigPolicy(
-            "resolver credentials are not installed",
+const SUPPORTED_PROVIDERS: [&str; 7] = [
+    "anthropic",
+    "deepseek",
+    "minimax",
+    "moonshot",
+    "ollama",
+    "openai",
+    "openai-compatible",
+];
+
+async fn resolve_provider(
+    config: BridgeConfig,
+    slot: ProviderSlot,
+    context: BridgeResolveContext<'_>,
+    factory: &RigBridgeFactory,
+) -> Result<Arc<dyn LlmBridge>, AppError> {
+    validate_credential_availability(&config, slot)?;
+    let resolved = config.resolve_with(context).await.map_err(|error| {
+        let issue = match &error {
+            armillae_llm::BridgeError::InvalidConfiguration { .. } => {
+                ProviderSetupIssue::CredentialResolutionFailed
+            }
+            _ => ProviderSetupIssue::BridgeCreationFailed,
+        };
+        setup_error(&config, slot, issue)
+    })?;
+    factory.create(resolved).await.map_err(|error| {
+        let issue = match &error {
+            armillae_llm::BridgeError::InvalidConfiguration { .. } => {
+                ProviderSetupIssue::ProviderConfigurationRejected
+            }
+            _ => ProviderSetupIssue::BridgeCreationFailed,
+        };
+        setup_error(&config, slot, issue)
+    })
+}
+
+fn validate_bridge_setup(
+    config: &BridgeConfig,
+    slot: ProviderSlot,
+    endpoint_policy: &AllowedEndpointPolicy,
+) -> Result<(), AppError> {
+    config
+        .validate(None)
+        .map_err(|_| setup_error(config, slot, ProviderSetupIssue::InvalidBridgeConfiguration))?;
+    if !SUPPORTED_PROVIDERS.contains(&config.provider.as_str()) {
+        return Err(setup_error(
+            config,
+            slot,
+            ProviderSetupIssue::UnsupportedProvider,
         ));
     }
+    if config.provider != "ollama" && config.credential.is_none() {
+        return Err(setup_error(
+            config,
+            slot,
+            ProviderSetupIssue::CredentialReferenceMissing,
+        ));
+    }
+    if matches!(config.credential, Some(CredentialRef::Resolver { .. })) {
+        return Err(setup_error(
+            config,
+            slot,
+            ProviderSetupIssue::CredentialResolverUnsupported,
+        ));
+    }
+    if let Some(endpoint) = &config.endpoint {
+        endpoint_policy
+            .validate(endpoint)
+            .map_err(|_| setup_error(config, slot, ProviderSetupIssue::EndpointNotAllowed))?;
+    }
     Ok(())
+}
+
+fn validate_credential_availability(
+    config: &BridgeConfig,
+    slot: ProviderSlot,
+) -> Result<(), AppError> {
+    validate_credential_availability_with(
+        config,
+        slot,
+        |name: &str| std::env::var(name),
+        |path| std::fs::read_to_string(path),
+    )
+}
+
+fn validate_credential_availability_with<E, F>(
+    config: &BridgeConfig,
+    slot: ProviderSlot,
+    read_environment: E,
+    read_file: F,
+) -> Result<(), AppError>
+where
+    E: FnOnce(&str) -> Result<String, std::env::VarError>,
+    F: FnOnce(&Path) -> Result<String, std::io::Error>,
+{
+    match config.credential.as_ref() {
+        None if config.provider == "ollama" => Ok(()),
+        None => Err(setup_error(
+            config,
+            slot,
+            ProviderSetupIssue::CredentialReferenceMissing,
+        )),
+        Some(CredentialRef::Environment { name }) => match read_environment(name) {
+            Ok(value) if value.is_empty() => Err(setup_environment_error(
+                config,
+                slot,
+                ProviderSetupIssue::CredentialEnvironmentEmpty,
+                name,
+            )),
+            Ok(_) => Ok(()),
+            Err(std::env::VarError::NotPresent) => Err(setup_environment_error(
+                config,
+                slot,
+                ProviderSetupIssue::CredentialEnvironmentMissing,
+                name,
+            )),
+            Err(std::env::VarError::NotUnicode(_)) => Err(setup_environment_error(
+                config,
+                slot,
+                ProviderSetupIssue::CredentialEnvironmentInvalid,
+                name,
+            )),
+        },
+        Some(CredentialRef::File { path }) => match read_file(path) {
+            Ok(value) if credential_file_value_is_empty(&value) => Err(setup_error(
+                config,
+                slot,
+                ProviderSetupIssue::CredentialFileEmpty,
+            )),
+            Ok(_) => Ok(()),
+            Err(_) => Err(setup_error(
+                config,
+                slot,
+                ProviderSetupIssue::CredentialFileUnreadable,
+            )),
+        },
+        Some(CredentialRef::Resolver { .. }) => Err(setup_error(
+            config,
+            slot,
+            ProviderSetupIssue::CredentialResolverUnsupported,
+        )),
+    }
+}
+
+fn credential_file_value_is_empty(value: &str) -> bool {
+    matches!(value, "" | "\n" | "\r\n")
+}
+
+fn setup_error(config: &BridgeConfig, slot: ProviderSlot, issue: ProviderSetupIssue) -> AppError {
+    AppError::ProviderSetup(ProviderSetupDiagnostic::new(slot, &config.provider, issue))
+}
+
+fn setup_environment_error(
+    config: &BridgeConfig,
+    slot: ProviderSlot,
+    issue: ProviderSetupIssue,
+    name: &str,
+) -> AppError {
+    AppError::ProviderSetup(
+        ProviderSetupDiagnostic::new(slot, &config.provider, issue).environment(name),
+    )
 }
 
 fn validate_hosts(hosts: &BTreeSet<String>) -> Result<(), AppError> {
@@ -298,6 +447,13 @@ fn invalid_endpoint(message: &'static str) -> armillae_llm::BridgeError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn credential_config(credential: CredentialRef) -> BridgeConfig {
+        BridgeConfig::builder("deepseek", "test")
+            .credential(credential)
+            .build()
+            .expect("credential fixture")
+    }
 
     fn config(endpoint: &str, hosts: &str) -> String {
         format!(
@@ -404,6 +560,90 @@ event_poll_ms = 25
         };
         assert!(!error.to_string().contains(marker));
         assert!(!format!("{error:?}").contains(marker));
+    }
+
+    #[test]
+    fn credential_preflight_distinguishes_missing_and_empty_environment_values() {
+        let config = credential_config(CredentialRef::Environment {
+            name: "DEEPSEEK_API_KEY".to_owned(),
+        });
+        let missing = validate_credential_availability_with(
+            &config,
+            ProviderSlot::Npc,
+            |_| Err(std::env::VarError::NotPresent),
+            |_| unreachable!("environment credential must not read a file"),
+        )
+        .expect_err("missing environment must fail");
+        let empty = validate_credential_availability_with(
+            &config,
+            ProviderSlot::Narrator,
+            |_| Ok(String::new()),
+            |_| unreachable!("environment credential must not read a file"),
+        )
+        .expect_err("empty environment must fail");
+
+        let AppError::ProviderSetup(missing) = missing else {
+            panic!("missing environment must use setup diagnostics");
+        };
+        let AppError::ProviderSetup(empty) = empty else {
+            panic!("empty environment must use setup diagnostics");
+        };
+        assert_eq!(missing.slot(), ProviderSlot::Npc);
+        assert_eq!(
+            missing.issue(),
+            ProviderSetupIssue::CredentialEnvironmentMissing
+        );
+        assert_eq!(empty.slot(), ProviderSlot::Narrator);
+        assert_eq!(
+            empty.issue(),
+            ProviderSetupIssue::CredentialEnvironmentEmpty
+        );
+        assert!(missing.to_string().contains("environment DEEPSEEK_API_KEY"));
+    }
+
+    #[test]
+    fn credential_file_failure_does_not_retain_path_content_or_io_error() {
+        let config = credential_config(CredentialRef::File {
+            path: "/private/credential/must-not-escape".into(),
+        });
+        let error = validate_credential_availability_with(
+            &config,
+            ProviderSlot::Narrator,
+            |_| unreachable!("file credential must not read the environment"),
+            |_| {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "secret-io-detail-must-not-escape",
+                ))
+            },
+        )
+        .expect_err("unreadable credential file must fail");
+        let rendered = format!("{error:?} {error}");
+
+        assert!(rendered.contains("credential_file_unreadable"));
+        assert!(!rendered.contains("/private/credential"));
+        assert!(!rendered.contains("secret-io-detail"));
+    }
+
+    #[test]
+    fn endpoint_policy_failure_has_a_stable_setup_code_and_slot() {
+        let directory = tempfile::tempdir().expect("config directory");
+        let path = directory.path().join("endpoint.toml");
+        std::fs::write(
+            &path,
+            config("https://gateway.example.com", "\"other.example.com\""),
+        )
+        .expect("write config");
+        let error = match ProductConfig::load(&path) {
+            Ok(_) => panic!("disallowed endpoint must fail"),
+            Err(error) => error,
+        };
+        let AppError::ProviderSetup(diagnostic) = error else {
+            panic!("endpoint failure must use setup diagnostics");
+        };
+
+        assert_eq!(diagnostic.slot(), ProviderSlot::Narrator);
+        assert_eq!(diagnostic.issue(), ProviderSetupIssue::EndpointNotAllowed);
     }
 
     #[test]

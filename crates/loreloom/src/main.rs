@@ -119,7 +119,67 @@ name = "LORELOOM_TEST_MISSING_NPC_SECRET_A70B67F1"
             OsString::from("hello"),
         ])
         .expect_err("missing Secret must fail");
-        assert!(matches!(error, AppError::Provider(_)));
+        let diagnostic = match &error {
+            AppError::ProviderSetup(diagnostic) => diagnostic,
+            _ => panic!("missing Secret must be a Provider setup failure"),
+        };
+        assert_eq!(diagnostic.slot(), error::ProviderSlot::Narrator);
+        assert_eq!(
+            diagnostic.issue(),
+            error::ProviderSetupIssue::CredentialEnvironmentMissing
+        );
+        let rendered = format!("{error:?} {error}");
+        assert!(rendered.contains("environment LORELOOM_TEST_MISSING_NARRATOR_SECRET_5E7615A4"));
+        assert!(rendered.contains("export this variable"));
+        assert!(!save_path.exists());
+    }
+
+    #[test]
+    fn npc_provider_setup_failure_identifies_its_slot_before_save_creation() {
+        let directory = tempfile::tempdir().expect("application directory");
+        let config_path = directory.path().join("loreloom.toml");
+        let save_path = directory.path().join("save");
+        std::fs::write(
+            &config_path,
+            r#"
+schema_version = 1
+
+[narrator]
+api_version = "armillae.llm/v1alpha1"
+provider = "ollama"
+model = "test"
+
+[npc]
+api_version = "armillae.llm/v1alpha1"
+provider = "deepseek"
+model = "test"
+
+[npc.credential]
+type = "environment"
+name = "LORELOOM_TEST_MISSING_NPC_SECRET_D3C511BE"
+"#,
+        )
+        .expect("write config");
+        let error = run_application_with([
+            OsString::from("loreloom"),
+            OsString::from("--config"),
+            config_path.into_os_string(),
+            OsString::from("--save"),
+            save_path.clone().into_os_string(),
+            OsString::from("--headless"),
+            OsString::from("hello"),
+        ])
+        .expect_err("missing NPC Secret must fail");
+
+        let diagnostic = match &error {
+            AppError::ProviderSetup(diagnostic) => diagnostic,
+            _ => panic!("missing Secret must be a Provider setup failure"),
+        };
+        assert_eq!(diagnostic.slot(), error::ProviderSlot::Npc);
+        assert_eq!(
+            diagnostic.issue(),
+            error::ProviderSetupIssue::CredentialEnvironmentMissing
+        );
         assert!(!save_path.exists());
     }
 }

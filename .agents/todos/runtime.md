@@ -111,8 +111,8 @@ OPEN 项、后续 RFC 或 P0 Spike；空 crate 不代表相关协议已经实现
   确定性替换或清除；
 - [x] 保留 Armillae 模型失败的脱敏 category、阶段、安全 Provider 元数据与 `err_` correlation ID，
   贯通启动、AgentRunner、NpcTurnResult、Runtime、TUI notice 和 headless 错误；
-- [ ] 为二进制 Provider 装配增加启动前预检与安全诊断，区分 Narrator/NPC、稳定 setup code、环境
+- [x] 为二进制 Provider 装配增加启动前预检与安全诊断，区分 Narrator/NPC、稳定 setup code、环境
   变量引用和本地修复提示，且不保留 Secret 或 Armillae 原始错误正文；
 - [x] 完成 Active Spec 第 17 节实施审计：除显式 `UPSTREAM-GATED` 的第 47 条和上述分发许可选择外，
-  其余验收均有自动化或可复现证据；当前门禁为 157 tests passed，目录根世界的创建、锁分离、
+  其余验收均有自动化或可复现证据；当前门禁为 163 tests passed，目录根世界的创建、锁分离、
   Prompt 注入与存档内容锁重开拒绝均有确定性测试。macOS arm64 release 基线仍为 81.2 MiB。
