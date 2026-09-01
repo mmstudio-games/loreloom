@@ -569,9 +569,9 @@ fn render_footer(frame: &mut Frame<'_>, app: &TuiApp, area: Rect, narrow: bool) 
     let help = if narrow {
         " · Tab · F2 Mods · PgUp/PgDn · ^C"
     } else if app.can_cancel() {
-        " · Alt+M Mods · Esc cancel · PgUp/PgDn · ^C quit"
+        " · Ctrl+O Mods · Esc cancel · PgUp/PgDn · ^C quit"
     } else {
-        " · Alt+M Mods · Enter send · Alt+Enter newline · ^C quit"
+        " · Ctrl+O Mods · Enter send · Alt+Enter newline · ^C quit"
     };
     frame.render_widget(
         Paragraph::new(Line::from(vec![
@@ -601,7 +601,7 @@ fn render_mods_overlay(frame: &mut Frame<'_>, app: &mut TuiApp, area: Rect) {
     let overlay = centered_overlay(area, 76, 30);
     let block = Block::default()
         .title(Span::styled(
-            " MODS · Alt+M / F2 / Esc close · ↑/↓ scroll ",
+            " MODS · Ctrl+O / F2 / Esc close · ↑/↓ scroll ",
             Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
         ))
         .borders(Borders::ALL)

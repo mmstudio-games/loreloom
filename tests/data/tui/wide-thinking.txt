@@ -15,4 +15,4 @@
  Hands tremble.        │ │› Look closer▏                                      │
                        │ │                                                    │
                        │ ╰────────────────────────────────────────────────────╯
-      Narrator is thinking · Alt+M Mods · Esc cancel · PgUp/PgDn · ^C quit
+      Narrator is thinking · Ctrl+O Mods · Esc cancel · PgUp/PgDn · ^C quit

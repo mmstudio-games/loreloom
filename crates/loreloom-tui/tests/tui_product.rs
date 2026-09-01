@@ -586,13 +586,13 @@ fn mods_overlay_is_read_only_scrollable_and_does_not_steal_plain_input() {
     assert_eq!(
         handle_key(
             &mut app,
-            KeyEvent::new(KeyCode::Char('m'), KeyModifiers::ALT)
+            KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL)
         ),
         None
     );
     assert_eq!(app.overlay, Some(TuiOverlay::Mods));
     let overlay = text_snapshot(render_mut(&mut app, 80, 22).backend().buffer());
-    assert!(overlay.contains("MODS · Alt+M / F2 / Esc close"));
+    assert!(overlay.contains("MODS · Ctrl+O / F2 / Esc close"));
     assert!(overlay.contains("games.loreloom.demo"));
     assert!(overlay.contains("ENABLED (1)"));
     assert!(overlay.contains("games.loreloom.weather"));
@@ -621,9 +621,25 @@ fn mods_overlay_is_read_only_scrollable_and_does_not_steal_plain_input() {
 
     handle_key(
         &mut app,
+        KeyEvent::new(KeyCode::Char('m'), KeyModifiers::ALT),
+    );
+    assert_eq!(app.overlay, Some(TuiOverlay::Mods));
+    handle_key(
+        &mut app,
+        KeyEvent::new(KeyCode::Char('µ'), KeyModifiers::NONE),
+    );
+    assert_eq!(app.overlay, None);
+
+    handle_key(
+        &mut app,
         KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE),
     );
     assert!(app.editor.text().ends_with('m'));
+    handle_key(
+        &mut app,
+        KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE),
+    );
+    assert!(app.editor.text().ends_with("mo"));
 }
 
 #[test]

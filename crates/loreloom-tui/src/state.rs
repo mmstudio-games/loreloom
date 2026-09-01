@@ -261,11 +261,11 @@ pub fn handle_key(app: &mut TuiApp, key: KeyEvent) -> Option<UiIntent> {
         return Some(UiIntent::Quit);
     }
     if app.overlay == Some(TuiOverlay::Mods) {
+        if matches!(key.code, KeyCode::Esc) || is_mods_shortcut(&key) {
+            app.close_overlay();
+            return None;
+        }
         match (key.code, key.modifiers) {
-            (KeyCode::Esc | KeyCode::F(2), _) => app.close_overlay(),
-            (KeyCode::Char('m' | 'M'), modifiers) if modifiers.contains(KeyModifiers::ALT) => {
-                app.close_overlay();
-            }
             (KeyCode::Up, _) => app.scroll_mods_up_lines(1),
             (KeyCode::Down, _) => app.scroll_mods_down_lines(1),
             (KeyCode::PageUp, _) => {
@@ -278,15 +278,11 @@ pub fn handle_key(app: &mut TuiApp, key: KeyEvent) -> Option<UiIntent> {
         }
         return None;
     }
+    if is_mods_shortcut(&key) {
+        app.toggle_mods_overlay();
+        return None;
+    }
     match (key.code, key.modifiers) {
-        (KeyCode::F(2), _) => {
-            app.toggle_mods_overlay();
-            None
-        }
-        (KeyCode::Char('m' | 'M'), modifiers) if modifiers.contains(KeyModifiers::ALT) => {
-            app.toggle_mods_overlay();
-            None
-        }
         (KeyCode::Enter, modifiers) if modifiers.contains(KeyModifiers::ALT) => {
             let _ = app.editor.insert("\n");
             None
@@ -359,6 +355,16 @@ pub fn handle_key(app: &mut TuiApp, key: KeyEvent) -> Option<UiIntent> {
         }
         _ => None,
     }
+}
+
+fn is_mods_shortcut(key: &KeyEvent) -> bool {
+    matches!(key.code, KeyCode::F(2))
+        || matches!(key.code, KeyCode::Char('o' | 'O'))
+            && key.modifiers.contains(KeyModifiers::CONTROL)
+        || matches!(key.code, KeyCode::Char('m' | 'M'))
+            && key.modifiers.contains(KeyModifiers::ALT)
+        // The default macOS Option-key mapping emits this character instead of an ALT modifier.
+        || matches!(key.code, KeyCode::Char('µ'))
 }
 
 pub fn handle_mouse(app: &mut TuiApp, mouse: MouseEvent) {
