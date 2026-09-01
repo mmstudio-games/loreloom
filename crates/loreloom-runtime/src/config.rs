@@ -1,11 +1,10 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
 use loreloom_agent::ResourceBudget;
 use loreloom_content::GenerationPolicy;
-use loreloom_core::ContentDefinitionId;
 use serde::{Deserialize, Serialize};
 
-pub const NARRATOR_MATERIALIZE_NPC_CAPABILITY: &str = "narrator.materialize_npc";
+pub const NARRATOR_CREATE_NPC_CAPABILITY: &str = "narrator.create_npc";
 pub const NARRATOR_REQUEST_NPC_TURN_CAPABILITY: &str = "narrator.request_npc_turn";
 pub const NARRATOR_SUBMIT_NPC_DRAFT_CAPABILITY: &str = "narrator.submit_npc_draft";
 pub const NARRATOR_TRANSITION_SCENE_CAPABILITY: &str = "narrator.transition_scene";
@@ -129,7 +128,7 @@ pub struct RuntimeConfig {
     pub orchestration_budget: OrchestrationBudget,
     pub narrator_capabilities: BTreeSet<String>,
     pub npc_resources: NpcResourcePolicy,
-    pub generation_policies: BTreeMap<ContentDefinitionId, GenerationPolicy>,
+    pub generation_policy: Option<GenerationPolicy>,
     pub context_projection: ContextProjectionPolicy,
 }
 
@@ -139,12 +138,12 @@ impl Default for RuntimeConfig {
             turn_budget: ResourceBudget::default(),
             orchestration_budget: OrchestrationBudget::default(),
             narrator_capabilities: BTreeSet::from([
-                NARRATOR_MATERIALIZE_NPC_CAPABILITY.to_owned(),
+                NARRATOR_CREATE_NPC_CAPABILITY.to_owned(),
                 NARRATOR_REQUEST_NPC_TURN_CAPABILITY.to_owned(),
                 NARRATOR_TRANSITION_SCENE_CAPABILITY.to_owned(),
             ]),
             npc_resources: NpcResourcePolicy::default(),
-            generation_policies: BTreeMap::new(),
+            generation_policy: None,
             context_projection: ContextProjectionPolicy::default(),
         }
     }

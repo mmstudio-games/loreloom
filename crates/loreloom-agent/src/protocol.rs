@@ -69,6 +69,28 @@ pub enum NarrativeImportance {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum NpcCreationSource {
+    Preset { character_id: ContentDefinitionId },
+    Generated { role: ShortText, purpose: LongText },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NpcCreationMode {
+    Narrated,
+    Agent,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CreateNpcRequest {
+    pub source: NpcCreationSource,
+    pub lifetime: NpcLifetime,
+    pub mode: NpcCreationMode,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum NpcTarget {
     Existing {
         actor_id: ActorId,
@@ -98,7 +120,6 @@ pub enum NpcNarrativeAction {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NpcLifetime {
-    Beat,
     Scene,
     Persistent,
 }
@@ -129,11 +150,6 @@ pub struct NarratorNpcDecision {
 
 impl NarratorNpcDecision {
     pub fn validate(&self) -> Result<(), AgentError> {
-        if self.lifetime == NpcLifetime::Beat && self.action != NpcNarrativeAction::MentionOnly {
-            return Err(AgentError::InvalidNpcDecision {
-                field: "beat_requires_mention_only",
-            });
-        }
         if matches!(self.target, NpcTarget::Mentioned { .. })
             && self.action != NpcNarrativeAction::MentionOnly
         {
@@ -413,11 +429,13 @@ mod tests {
         };
         assert!(lightweight_agent.validate().is_err());
 
-        let beat_entity = NarratorNpcDecision {
+        let mentioned_entity = NarratorNpcDecision {
+            target: NpcTarget::Mentioned {
+                display_name: DisplayName::new("keeper").expect("display name"),
+            },
             controller: NpcControllerKind::NarratorProxy,
-            lifetime: NpcLifetime::Beat,
             ..lightweight_agent
         };
-        assert!(beat_entity.validate().is_err());
+        assert!(mentioned_entity.validate().is_err());
     }
 }

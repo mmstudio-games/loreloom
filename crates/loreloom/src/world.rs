@@ -30,7 +30,7 @@ pub async fn build_world_with(
     world_root: &Path,
     save_path: &Path,
     mod_paths: &[PathBuf],
-    configured: ConfiguredProviders,
+    mut configured: ConfiguredProviders,
 ) -> Result<WorldSetup, AppError> {
     let world_source = WorldProjectSource::load(world_root)?;
     let core_id = ModId::parse("games.loreloom.core")?;
@@ -48,6 +48,16 @@ pub async fn build_world_with(
     #[cfg(test)]
     let test_mod_lock = mod_lock.clone();
     let manifest = world_source.manifest();
+    let generation_policy = registry
+        .get(&manifest.npc_generation_policy)
+        .and_then(|entry| match &entry.definition {
+            Definition::GenerationPolicy(policy) => Some(policy.clone()),
+            _ => None,
+        })
+        .ok_or(AppError::WorldPolicy(
+            "default NPC generation policy is unavailable",
+        ))?;
+    configured.runtime.generation_policy = Some(generation_policy);
     let plan = registry.compile_scene(&manifest.initial_scene)?;
     let world_config = WorldConfig {
         inventory_root_definition: manifest.inventory_root_definition.clone(),

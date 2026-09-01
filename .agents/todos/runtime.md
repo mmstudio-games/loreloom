@@ -74,6 +74,12 @@ OPEN 项、后续 RFC 或 P0 Spike；空 crate 不代表相关协议已经实现
 - [x] 实现 confirmed KnownFact 驱动的 Condition 诊断投影，未诊断视图不得包含真实名称；
 - [x] 实现 Existing/Preset/Generated/Mentioned NpcTarget、Narrator generation stage、统一物化路径，
   并在 Preset/Generated 提交后于同一玩家输入内使用完整角色投影重新规划；
+- [x] 用 `create_npc { source, lifetime, mode }` 取代模型侧 NarratorNpcDecision 交叉组合，保持内部
+  Preset/Generated 两阶段物化与重规划；
+- [x] 把默认 GenerationPolicy 与生成用 AgentProfile 移入根世界锁定内容，由 Runtime 注入当前
+  Scene/Place，移除产品 Provider 配置中的世界生成策略；
+- [x] 把 `request_npc_turn` 压平为 ActorId + assignment，在 Observation 投影
+  `npc_turn_available`，并让 AgentRunner/UiSnapshot/TUI 保留脱敏 Tool 拒绝码；
 - [x] 暴露有界 Stable ID 游标分页的 `list_inventory`/`inspect_item` 与
   `list_available_skills`/`inspect_skill` Query Tool，并把 `transfer_item`、`equip_item`、
   `split_stack`、`use_skill` 接到已冻结的 WorldCommand；

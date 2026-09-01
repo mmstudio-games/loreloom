@@ -990,10 +990,11 @@ Orchestration Tool 只构造当前 Agent 编排的 Runtime 临时请求，不形
 ToolCall 的顺序向内部 NarratorPlan 追加请求；只有 Narrator Turn 完成并释放执行槽后，Runtime
 才能按 Plan 顺序启动对应 NpcAgent。
 
-`materialize_npc` 同样是 Orchestration Tool，而不是在 Narrator Turn 内同步生成角色的 Command
-Tool。它只校验并暂存 `NarratorNpcDecision`；Preset 编译、`npc_generation` Agent Turn 与最终
-`SpawnCharacter` Command 都必须等当前 Narrator Turn 完成并释放唯一执行槽后开始。ToolResult 只能
-表示请求已进入本轮待处理队列，不能在角色提交前返回成功的 ActorId。
+`create_npc` 同样是 Orchestration Tool，而不是在 Narrator Turn 内同步生成角色的 Command Tool。
+它只校验并暂存模型提供的 source/lifetime/mode；Preset 编译、`npc_generation` Agent Turn 与最终
+`SpawnCharacter` Command 都必须等当前 Narrator Turn 完成并释放唯一执行槽后开始。Scene、Place、
+GenerationPolicy 与 AgentProfile 由 Runtime 注入。ToolResult 只能表示请求已进入本轮待处理队列，
+不能在角色提交前返回成功的 ActorId。
 
 ### 9.4 角色状态、物品与技能 Tool 面
 
@@ -1034,7 +1035,7 @@ Narrator 可以使用：
 
 | 分类 | Tool 候选 | 责任 |
 |---|---|---|
-| Orchestration | `materialize_npc` | 暂存受约束 NarratorNpcDecision/NpcGenerationRequest，待当前 Narrator Turn 结束后物化 |
+| Orchestration | `create_npc` | 暂存 Preset/Generated source、Scene/Persistent lifetime 与 narrated/agent mode，待当前 Narrator Turn 结束后物化 |
 | Command | `promote_npc` | 请求把已有 Scene-owned NPC 提升为世界级角色 |
 | Orchestration | `request_npc_turn` | 请求 Runtime 为已有 AgentBinding NPC 追加一次 Turn |
 | Query | `list_scene_transitions` | 返回当前 Scene 与当前 Revision 可用的 canonical Scene 切换目标 |
@@ -1044,7 +1045,7 @@ Narrator 可以使用：
 Executor。Runtime 只验证和执行 Narrator 通过原生 ToolCall 提交的结构化叙事决定，不从模型正文
 解析控制协议，也不用关键词或硬编码剧情规则改写 Mention/Materialize/NpcTurn 选择。
 
-同一 Narrator Turn 最多接受一个 `transition_scene`，且它不能与待处理的 `materialize_npc` 或
+同一 Narrator Turn 最多接受一个 `transition_scene`，且它不能与待处理的 `create_npc` 或
 `request_npc_turn` 共存；后出现的冲突 ToolCall 返回结构化拒绝。Narrator Turn 结束后 Runtime 才以
 ToolCall 被接受时的 Revision 执行切换；成功、stale 或领域拒绝都形成下一次 Narrator 输入并强制
 重新规划，切换前的 NPC 请求不得在新 Scene 中启动。
@@ -1232,12 +1233,13 @@ request ID 必须唯一。
   Narrator、NpcAgent 或 generation stage 的正文调用 JSON/Schema 反序列化来取得控制数据；
 - Narrator 只能通过该 Model Call 的 Provider 原生 ToolCall 请求结构化编排或世界修改，不能在
   Tool Handler 内同步递归调用 NpcAgent；
-- `request_npc_turn` 的模型参数只表达领域请求；request ID、ToolContext Revision 与队列位置由
+- `request_npc_turn` 的模型参数只包含 committed ActorId 与 assignment；Scene、request ID、
+  ToolContext Revision 与队列位置由
   Runtime 注入。已接受 ToolCall 的顺序就是 `NarratorPlan.npc_turns` 的语义执行顺序，Request 不携带
   `priority`，Runtime 不重新计算叙事优先级或公平性；
-- 内部 NarratorPlan 只能引用 ToolCall 开始前已经提交的 ActorId；未物化的
-  Preset/Generated/Mentioned target 不进入 `NpcTurnRequest`；
-- Runtime 必须验证请求中的 Actor、Scene membership、Revision 和 Capability，并在独立预算配置
+- 内部 NarratorPlan 只能引用 ToolCall 开始前已经提交且在该 Observation 中标记为
+  `npc_turn_available` 的 ActorId；尚未物化的 Preset/Generated source 不进入 `NpcTurnRequest`；
+- Runtime 必须从 World 注入 Scene，验证 Actor、Scene membership、Revision 和 Capability，并在独立预算配置
   下确认仍有资源后才排队；模型或 Mod 不能通过 Request 扩大预算；
 - `based_on_revision` 记录 Narrator 制定计划时的 provenance，不是后续世界写入可沿用的
   `expected_revision`；每个请求开始时必须针对当前 committed Revision 重新校验 Actor、Scene 和
@@ -1422,121 +1424,85 @@ Definition。存档 ModLock 与每个 ContentOrigin 的 mod/pack/definition/cont
 一致；GeneratedOrigin 不替代当前领域 Definition lock，因为生成角色仍可能引用 Attribute、Item、
 Skill 等内容定义。
 
-### 10.3 NarratorNpcDecision 与物化生命周期
+### 10.3 NPC 创建、可调度投影与物化生命周期
 
-NarratorAgent 根据自然语言、SceneContext 和玩家意图拥有叙事分级决定：
+NarratorAgent 根据自然语言、SceneContext 和玩家意图拥有叙事决定，但模型侧只使用两个正交 Tool。
+`create_npc` 的 wire 固定为：
 
 ```rust
-pub struct NarratorNpcDecision {
-    pub target: NpcTarget,
-    pub action: NpcNarrativeAction,
+pub struct CreateNpcRequest {
+    pub source: NpcCreationSource,
     pub lifetime: NpcLifetime,
-    pub controller: NpcControllerKind,
-    pub assignment: Option<NpcAssignment>,
+    pub mode: NpcCreationMode,
 }
 
-pub enum NpcTarget {
-    Existing {
-        actor_id: ActorId,
-    },
-    Preset {
-        character_id: ContentDefinitionId,
-        place_id: ObjectId,
-    },
-    Generated {
-        generation_policy_id: ContentDefinitionId,
-        place_id: ObjectId,
-        request: NpcGenerationRequest,
-    },
-    Mentioned {
-        display_name: DisplayName,
-    },
-}
-
-pub enum NpcNarrativeAction {
-    MentionOnly,
-    MaterializeLightweight,
-    RequestNpcTurn,
+pub enum NpcCreationSource {
+    Preset { character_id: ContentDefinitionId },
+    Generated { role: ShortText, purpose: LongText },
 }
 
 pub enum NpcLifetime {
-    Beat,
     Scene,
     Persistent,
 }
 
-pub enum NpcControllerKind {
-    NarratorProxy,
-    Rules,
-    Agent(AgentProfileId),
+pub enum NpcCreationMode {
+    Narrated,
+    Agent,
 }
 ```
 
-Narrator 可以在玩家明确交互时选择 NarratorProxy 或独立 NpcAgent；Runtime 不用关键词、固定
-对话轮数或硬编码“重要性”替 Narrator 做语义判断。
+纯叙事提及不调用 Tool，也不创建 Entity。`Narrated` 创建没有 AgentBinding、由 Narrator 叙述的完整
+Character；`Agent` 创建带 enabled AgentBinding 的完整 Character。两种 mode 使用相同领域 record，
+不存在丢字段的轻量持久格式。模型不得在 `create_npc` 中提交 SceneId、PlaceId、Revision、
+GenerationPolicyId、AgentProfileId、controller 或 assignment。
 
-`Existing` 只引用当前 committed Actor；`Preset` 从当前 ModLock 的 Character Definition 编译；
-`Generated` 先用 Host 已授权的 GenerationPolicy 约束请求，再通过现有 Narrator Provider 的独立
-`npc_generation` stage 调用专用 `submit_npc_draft` Tool；NpcDraft 来自 Provider 原生 ToolCall 参数，
-Runtime 不解析该 stage 的自然语言正文。该 stage 计为一个 started Agent Turn，并累计到同一
-PlayerInput 的 Model/Token/byte/time 预算，不新增 generator Provider 配置。`Mentioned` 只可与
-MentionOnly 组合。Preset/Generated 的 place 必须属于决定中的 Scene；request scene、当前 Scene 与
-place scene 必须一致。
+根 `world.toml` 必须以 `npc_generation_policy` 指向当前 WorldLock 中一个
+`GenerationPolicy Definition`。该 Definition 拥有 SpawnConstraints 和生成 NPC 使用的唯一
+AgentProfile；Preset Agent mode 从 Character Definition 自身解析 AgentProfile。世界编译在进入
+Runtime 前验证这些引用。Host 只配置 Provider 与资源上限，不在本地产品配置中重复声明世界的生成
+策略。Mod 可以通过既有显式 Patch 规则修改世界策略 Definition，但不能在运行时替换锁定结果。
 
-尚未物化的 target 使用统一、质量优先的两阶段编排，不按 `importance` 或 controller 增加不同复核
-分支：
+Generated source 由 Runtime 注入当前 Scene/Place 与根世界 GenerationPolicy，再通过现有 Narrator
+Provider 的独立 `npc_generation` stage 调用专用 `submit_npc_draft` Tool；NpcDraft 来自 Provider
+原生 ToolCall 参数，Runtime 不解析该 stage 的自然语言正文。NpcDraft 不选择 AgentProfile；绑定由
+锁定策略决定。该 stage 计为一个 started Agent Turn，并累计到同一 PlayerInput 的
+Model/Token/byte/time 预算，不新增 generator Provider 配置。
 
-1. Narrator 在当前 Turn 中调用 `materialize_npc`；Tool 只把合法决定加入 Runtime 临时队列；
-2. Narrator Turn 必须先结束并释放唯一 Agent 执行槽；该 Turn 的自然语言正文不承担 provisional
-   plan，只要队列含 Preset/Generated 物化请求就先处理物化并再次调用 Narrator；
-3. Runtime 按 ToolCall 顺序处理队列。Preset 使用 `compile_character`；Generated 先启动独立
-   `npc_generation` Turn，再用授权 GenerationPolicy 调用 `compile_draft`；
+Preset/Generated 使用统一、质量优先的两阶段编排：
+
+1. Narrator 在当前 Turn 中调用 `create_npc`；Tool 只把合法请求加入 Runtime 临时队列；
+2. Narrator Turn 先结束并释放唯一 Agent 执行槽；只要队列非空就先处理创建并再次调用 Narrator；
+3. Runtime 按 ToolCall 顺序处理队列，注入当前 Scene/Place。Preset 使用 `compile_character`；
+   Generated 启动独立 `npc_generation` Turn，再用锁定 GenerationPolicy 调用 `compile_draft`；
 4. 两种来源都只通过 `CharacterSpawnSpec -> SpawnCharacter` 提交，并从 committed
    `CharacterSpawned` Event 取得 ActorId；失败不得发布 ActorId、注册 Agent 或遗留部分领域记录；
 5. Runtime 把每项成功 ActorId 或结构化拒绝原因、更新后的 Scene Observation 作为下一次 Narrator
    输入，在同一次 PlayerInput 内重新调用 Narrator；该次重规划计入最大编排轮数和整轮资源预算；
 6. 只有后续 Narrator Turn 才能用 committed ActorId 调用 `request_npc_turn`。若新角色具有 enabled
-   AgentBinding，Runtime 从当前 Registry 解析 AgentProfile 并绑定 Host 已配置的 NPC Bridge；
-   NpcAgent 开始时仍从届时 committed Revision 重新投影完整 Character/Scene Context。
+   AgentBinding，Runtime 从当前 Registry 解析 AgentProfile 并绑定 Host 已配置的 NPC Bridge。
 
-Preset/Generated 决定在物化前不得携带最终 assignment；`NarratorNpcDecision.assignment` 对这两种
-target 必须为 `None`。具体 assignment 只能由物化后的 `request_npc_turn` ToolCall 给出，避免把不
-了解最终 Profile 时生成的任务文本沿用到新角色。
+`create_npc` 不携带 assignment，保证 Narrator 在决定具体任务前先看到生成后的姓名、Profile、属性、
+关系和状态。不设置 ReviewRequired、重要度等级或可选复核状态。Load 已保存 Generated NPC 时不得
+重新生成。同一 PlayerInput 内结构完全相同的 CreateNpcRequest 具有编排幂等语义；首次成功物化后，
+后续相同 ToolCall 返回既有 ActorId。需要多个同类角色时，Narrator 必须给出可区分的 role/purpose。
 
-该物化后重规划是所有 Preset/Generated target 的唯一流程：不设置 `ReviewRequired`、关键角色
-等级或可选复核状态。Narrator 因而能在决定具体 NPC assignment 前看到生成后的姓名、Profile、
-属性、关系和当前状态；额外调用只发生在首次物化，Load 已保存 Generated NPC 时不得重新生成。
-MentionOnly 不创建 Entity，也不触发物化后重规划。
+`request_npc_turn` 的模型参数固定为 committed `actor_id` 与自然语言 `assignment`。SceneId、Revision、
+request identity 与队列位置由 Runtime 注入。Scene Observation 的每个 visible actor 显式包含
+`npc_turn_available`；它只在角色与玩家位于同一可见 Place、controller 为 Agent、AgentBinding
+enabled 且 Profile 可解析时为 true。同一 Revision 中使用该 ActorId 的请求必须接受；真正执行前若
+世界已推进，则返回 stale NpcTurnResult 并重新规划，不能把隐藏前置条件留到 Tool Handler 拒绝。
 
-同一 PlayerInput 内结构完全相同的 Preset/Generated `NarratorNpcDecision` 具有编排幂等语义：首次
-成功物化后，后续相同 ToolCall 返回既有 ActorId，不再次编译、生成或提交。需要创建多个同类角色
-时，Narrator 必须给出可区分的 role/purpose/target 决定；该编排去重不替代 Store 的 ActionId 幂等。
+Runtime 仍验证 Schema、Capability、数量、Provider/Tool budget 和世界不变量，禁止 Narrator 提交
+原始 Component、未注册 Definition、Provider Client 或自定义 Executor。角色产生物品、关系、
+Knowledge、Goal、Quest 或持久 WorldEvent 前必须完成实体化。Scene-lifetime 实体与所属 Scene 一起
+持久保存；Scene 停用或故事阶段结束都不删除它们。角色需要跨 Scene 移动或成为世界级自治角色时
+必须先升为 Persistent。
 
-Runtime 只执行受约束决定：
-
-- 验证目标、Scene、Revision、Schema、Capability、数量、Provider/Tool budget 和 Agent Profile；
-- 禁止 Narrator 提交原始 Component、未注册 Definition、Provider Client 或自定义 Executor；
-- MentionOnly 不创建 ECS Entity；Materialize 创建受限 CharacterSpawnSpec；
-- RequestNpcTurn 要求已有或先创建带 AgentBinding 的 ECS Character；
-- 角色产生物品、关系、Knowledge、Goal、Quest 或持久 WorldEvent 前必须完成实体化；
-- Scene-lifetime 实体与所属 Scene 一起持久保存；Scene 停用或故事阶段结束都不删除它们；
-- 角色需要脱离原 Scene、跨 Scene 移动或成为世界级自治角色时必须先升为 Persistent，Runtime
-  可以拒绝 Scene lifetime 与目标行为不相容的请求，但不得擅自改写剧情；
-- 完整 Character 可以 Dormant/禁用 AgentBinding，不自动降级或删除权威状态。
-
-Runtime 拒绝时返回结构化原因，由 Narrator 重新选择代理、生成、请求 NPC Turn 或其它叙事路径。
-上述三个 enum 即第一阶段最终 wire 枚举，并补充以下约束：`Beat` 只可与 `MentionOnly` 组合且不保存；
-`MaterializeLightweight` 只可使用 Scene/Persistent lifetime 与 NarratorProxy/Rules controller；
-`RequestNpcTurn` 只可使用 Scene/Persistent lifetime，最终角色必须有 enabled AgentBinding，controller
-为 Agent。Lightweight 与 Agent character 使用同一完整 Character record，不存在丢字段的轻量
-持久格式。
-
-Runtime 数量门禁只使用 Host 的可配置资源 policy（每次编排生成数、每 Scene materialized 数和
-全存档 persistent generated 数），不是叙事优先级且不写入模型可覆盖字段；默认分别为 32、256 与
-1,024，Host 可调整。promotion 是独立 WorldCommand，只把 Character lifetime 从 Scene 改为
-Persistent；后续跨 Scene 移动或其它世界级行为在 current Revision 重新校验 lifetime。Scene、Place、
-Scene lifetime Character 及其拥有的 Item/Condition/SkillGrant/Goal 都保留在存档，普通 Scene
-切换不存在 cleanup Command。拒绝 promotion 或 Scene 切换不改变 Revision。
+Runtime 拒绝 Tool 时返回脱敏、稳定且可恢复的结构化 code；AgentRunner、UiSnapshot 与 TUI 必须保留
+该 code，但不得保留完整 Tool 参数或 ToolResult。Runtime 数量门禁只使用 Host 的可配置资源 policy
+（每次编排生成数、每 Scene materialized 数和全存档 persistent generated 数），默认分别为 32、256
+与 1,024。promotion 是独立 WorldCommand，只把 Character lifetime 从 Scene 改为 Persistent。
 
 #### 10.3.1 Scene 激活与重复进入
 
@@ -2394,8 +2360,10 @@ CI 使用最新 stable，不执行 MSRV Job，不允许 manifest 出现 `rust-ve
 7. Agent 只能使用当前 Actor 已持有且可用的 Skill Grant；
 8. Active Skill 经 `use_skill`、WorldCommand 和规则 System 结算资源、冷却和 Event；
 9. Passive/Reaction Skill 不会隐式启动无预算 Agent Loop；
-10. NarratorAgent 根据玩家意图选择 MentionOnly、Materialize 或 NpcTurn 及 controller/lifetime；
-11. Runtime 只校验并执行结构化 NarratorNpcDecision，不用关键词替 Narrator 判断叙事重要性；
+10. NarratorAgent 根据玩家意图选择纯叙事提及、`create_npc` 或 `request_npc_turn`；创建请求只包含
+    source/lifetime/mode；
+11. Runtime 注入 Scene/Place/Revision/GenerationPolicy/AgentProfile，不用关键词替 Narrator 判断
+    叙事重要性，也不把内部物化状态暴露为模型参数；
 12. 预设 Definition 与运行时 Draft 汇入同一 CharacterSpawnSpec/NpcFactory/SpawnNpcCommand；
 13. Content Pack 跨引用错误不会留下部分 Scene，Generated NPC 加载时不重新调用模型；
 14. Scene-scoped NPC 与 Scene 状态在停用后仍可存档恢复，不因离开 Scene 而删除；
@@ -2447,6 +2415,8 @@ CI 使用最新 stable，不执行 MSRV Job，不允许 manifest 出现 `rust-ve
 53. 等待 Provider 时 TUI 的 thinking 状态、取消和退出保持响应，不展示未完成模型正文，逻辑
     World Clock 不随墙钟时间隐式推进；
 54. Scene 切换原子停用当前 Scene 并激活或首次物化目标 Scene；再次进入恢复原状态且不调用 Provider。
+55. Observation 标记可调度的现有 NPC 后，Narrator 只需提交 ActorId 与 assignment；Tool 拒绝时
+    AgentRunner、UiSnapshot 与 TUI 保留脱敏错误码，且不持久化完整参数或 ToolResult。
 
 ## 18. Active Spec 下的范围化实施门禁
 
@@ -2458,8 +2428,9 @@ RFC 0001 已于 2026-08-30 被项目方接受。以下事项继续阻塞对应�
 - Store driver 的 AGPL 兼容分发方式在发布前确认；后端、公开依赖 revision 与
   commit/failure 协议已由 P0 Spike 冻结；物理 backup/restore/switch 仍受 SurrealDB shutdown
   上游能力门禁；
-- 第一阶段 PlayerInput 不做代码层说话/行动关键词分类，原文只进入 Narrator；NarratorNpcDecision、
-  Materialization/Lifetime/Controller、可配置数量 policy、promotion 与持久 Scene 激活语义已冻结；
+- 第一阶段 PlayerInput 不做代码层说话/行动关键词分类，原文只进入 Narrator；`create_npc` 的
+  source/lifetime/mode、`request_npc_turn` 的最小参数、内部物化状态、可配置数量 policy、promotion
+  与持久 Scene 激活语义已冻结；
 - Known Fact/Belief/Goal/Transcript 的 v1 最小 Schema 与有界上下文投影已冻结；
 - Content Pack 的目录布局、Manifest 与加载边界已冻结；Definition ID 的最终编码和各领域完整 JSON
   字段/迁移版本仍受对应门禁。CharacterSpawnSpec、NpcFactory、Content/Generated Origin 和导入

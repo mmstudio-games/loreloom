@@ -8,7 +8,7 @@
  Idle                  │ ⠋ Narrator is thinking…
  RESOURCES             │ ◌ observe_scene  running
  Stamina  ━━─────  4/12│ ✓ npc_speak  done
- ATTRIBUTES            │ ! take_crown  rejected
+ ATTRIBUTES            │ ! take_crown  rejected · invalid_input
  Resolve  12  base 10  │ × provider_call  failed
  CONDITIONS            │ i Demo ready
  ◇ Unknown condition · │ ╭ Working · Esc to cancel ───────────────────────────╮

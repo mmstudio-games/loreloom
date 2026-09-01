@@ -23,8 +23,9 @@ use serde::Serialize;
 use serde_json::json;
 
 use crate::{
-    NARRATOR_SUBMIT_NPC_DRAFT_CAPABILITY, OrchestrationBudget, RuntimeConfig, RuntimeError,
-    RuntimeToolExecutor, WorldService,
+    NARRATOR_CREATE_NPC_CAPABILITY, NARRATOR_REQUEST_NPC_TURN_CAPABILITY,
+    NARRATOR_SUBMIT_NPC_DRAFT_CAPABILITY, NARRATOR_TRANSITION_SCENE_CAPABILITY,
+    OrchestrationBudget, RuntimeConfig, RuntimeError, RuntimeToolExecutor, WorldService,
     context::{project_npc_context, project_observation},
     world_service::{CharacterMaterializationRequest, PendingNpcDecision},
 };
@@ -74,7 +75,10 @@ impl GameRuntime {
         session_id: SessionId,
         config: RuntimeConfig,
     ) -> Self {
-        let executor = Arc::new(RuntimeToolExecutor::new(Arc::clone(&service)));
+        let executor = Arc::new(RuntimeToolExecutor::with_generation_policy(
+            Arc::clone(&service),
+            config.generation_policy.clone(),
+        ));
         Self {
             service,
             executor: Arc::clone(&executor),
@@ -203,6 +207,11 @@ impl GameRuntime {
                 .observation(self.session_id, input.clone())
                 .await?;
             project_observation(&mut observation, self.config.context_projection);
+            let tools = narrator_tools(
+                self.runner.definitions(),
+                &observation,
+                &self.config.narrator_capabilities,
+            );
             let narrator_request = narrator_request(
                 "narrator_turn",
                 json!({
@@ -212,11 +221,7 @@ impl GameRuntime {
                     "npc_results": npc_results,
                     "committed_events": self.service.events().await
                 }),
-                self.runner
-                    .definitions()
-                    .into_iter()
-                    .filter(|definition| definition.name != "submit_npc_draft")
-                    .collect(),
+                tools,
                 &self.narrator_definition,
             )?;
             let narrator_turn = self
@@ -691,8 +696,9 @@ impl GameRuntime {
                     }
                     let Some(policy) = self
                         .config
-                        .generation_policies
-                        .get(generation_policy_id)
+                        .generation_policy
+                        .as_ref()
+                        .filter(|policy| &policy.id == generation_policy_id)
                         .cloned()
                     else {
                         outcomes.push(NpcMaterializationResult::rejected(
@@ -999,7 +1005,6 @@ fn lifetime(
     scene_id: loreloom_core::ObjectId,
 ) -> Result<CharacterLifetime, RuntimeError> {
     match kind {
-        NpcLifetime::Beat => Err(RuntimeError::InvalidInput),
         NpcLifetime::Scene => Ok(CharacterLifetime::Scene { scene_id }),
         NpcLifetime::Persistent => Ok(CharacterLifetime::Persistent),
     }
@@ -1074,6 +1079,46 @@ impl OrchestrationState {
     }
 }
 
+fn narrator_tools(
+    definitions: Vec<armillae_core::ToolDefinition>,
+    observation: &loreloom_core::SceneObservation,
+    capabilities: &BTreeSet<String>,
+) -> Vec<armillae_core::ToolDefinition> {
+    let available_actor_ids = observation
+        .scene
+        .visible_actors
+        .iter()
+        .filter(|actor| actor.npc_turn_available)
+        .map(|actor| json!(actor.actor_id))
+        .collect::<Vec<_>>();
+    definitions
+        .into_iter()
+        .filter_map(|mut definition| {
+            let authorized = match definition.name.as_str() {
+                "submit_npc_draft" => false,
+                "create_npc" => capabilities.contains(NARRATOR_CREATE_NPC_CAPABILITY),
+                "request_npc_turn" => {
+                    capabilities.contains(NARRATOR_REQUEST_NPC_TURN_CAPABILITY)
+                        && !available_actor_ids.is_empty()
+                }
+                "list_scene_transitions" | "transition_scene" => {
+                    capabilities.contains(NARRATOR_TRANSITION_SCENE_CAPABILITY)
+                }
+                _ => true,
+            };
+            if !authorized {
+                return None;
+            }
+            if definition.name == "request_npc_turn"
+                && let Some(actor_id) = definition.input_schema.pointer_mut("/properties/actor_id")
+            {
+                actor_id["enum"] = serde_json::Value::Array(available_actor_ids.clone());
+            }
+            Some(definition)
+        })
+        .collect()
+}
+
 fn narrator_request(
     kind: &'static str,
     payload: serde_json::Value,
@@ -1085,7 +1130,7 @@ fn narrator_request(
     let mut messages = vec![Message::new(
         Role::System,
         vec![ContentPart::text(
-            "Player input goes only to the narrator. Use native tools for every structured decision or world change. request_npc_turn queues NPCs in tool-call order. When scene transition tools are offered, call list_scene_transitions first and copy one returned target exactly; never invent a scene ID, retry an unchanged rejection, or narrate arrival before a committed transition result. If no scene target matches, explain that the destination is unavailable in current world content. When submit_npc_draft is offered, submit exactly one NPC through that tool rather than returning draft data in text. Return only natural-language prose in the response body; never return JSON or a structured control envelope. NPC claims are not committed facts; only committed events are world facts.",
+            "Player input goes only to the narrator. Use native tools for every structured decision or world change. request_npc_turn accepts only an actor_id marked npc_turn_available in the current observation plus a natural-language assignment; scene and revision are supplied by the runtime. create_npc accepts only source, lifetime and mode; after creation the runtime replans with the committed actor before any NPC turn. Pure narrative mentions need no tool. When scene transition tools are offered, call list_scene_transitions first and copy one returned target exactly; never invent a scene ID, retry an unchanged rejection, or narrate arrival before a committed transition result. If no scene target matches, explain that the destination is unavailable in current world content. When submit_npc_draft is offered, submit exactly one NPC through that tool rather than returning draft data in text. Return only natural-language prose in the response body; never return JSON or a structured control envelope. Never expose tool failures or internal orchestration in player-facing prose. NPC claims are not committed facts; only committed events are world facts.",
         )],
     )];
     messages.extend(
@@ -1172,10 +1217,15 @@ fn append_tool_activity(activity: &mut Vec<ToolActivity>, tools: &[ToolCallOutco
         call_id: tool.call_id.clone(),
         name: tool.name.clone(),
         state: if tool.is_error {
-            ToolActivityState::Rejected
+            if tool.error_code.as_deref() == Some("tool_execution_error") {
+                ToolActivityState::Failed
+            } else {
+                ToolActivityState::Rejected
+            }
         } else {
             ToolActivityState::Succeeded
         },
+        code: tool.error_code.clone(),
     }));
 }
 

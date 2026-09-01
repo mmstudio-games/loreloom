@@ -460,7 +460,11 @@ fn render_story(frame: &mut Frame<'_>, app: &mut TuiApp, area: Rect) {
         )));
     }
     for tool in &app.snapshot.tool_activity {
-        lines.push(tool_line(tool.name.as_str(), tool.state));
+        lines.push(tool_line(
+            tool.name.as_str(),
+            tool.state,
+            tool.code.as_deref(),
+        ));
     }
     for notice in &app.snapshot.notices {
         let (symbol, color) = match notice.kind {
@@ -594,18 +598,25 @@ fn section(lines: &mut Vec<Line<'static>>, title: &'static str) {
     )));
 }
 
-fn tool_line(name: &str, state: ToolActivityState) -> Line<'static> {
+fn tool_line(name: &str, state: ToolActivityState, code: Option<&str>) -> Line<'static> {
     let (symbol, label, color) = match state {
         ToolActivityState::Pending => ("◌", "running", Color::Yellow),
         ToolActivityState::Succeeded => ("✓", "done", MUTED),
         ToolActivityState::Rejected => ("!", "rejected", Color::Magenta),
         ToolActivityState::Failed => ("×", "failed", Color::Red),
     };
-    Line::from(vec![
+    let mut spans = vec![
         Span::styled(format!("{symbol} "), Style::default().fg(color)),
         Span::styled(name.to_owned(), Style::default().fg(color)),
         Span::styled(format!("  {label}"), Style::default().fg(MUTED)),
-    ])
+    ];
+    if let Some(code) = code {
+        spans.push(Span::styled(
+            format!(" · {code}"),
+            Style::default().fg(MUTED),
+        ));
+    }
+    Line::from(spans)
 }
 
 fn format_fixed(value: Fixed) -> String {

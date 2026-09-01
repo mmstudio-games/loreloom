@@ -31,6 +31,7 @@ pub struct ToolCallOutcome {
     pub call_id: String,
     pub name: String,
     pub is_error: bool,
+    pub error_code: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -285,10 +286,12 @@ impl AgentRunner {
                     collect_events(&result, &mut committed_events);
                     advance_tool_revision(&result, &mut tool_context);
                 }
+                let error_code = result.is_error.then(|| tool_error_code(&result)).flatten();
                 tool_calls.push(ToolCallOutcome {
                     call_id: call.id.as_str().to_owned(),
                     name: call.name,
                     is_error: result.is_error,
+                    error_code,
                 });
                 request.messages.push(Message::tool_result(result.clone()));
                 tool_results.push(result);
@@ -307,6 +310,23 @@ fn advance_tool_revision(result: &ToolResult, context: &mut AgentToolContext) {
             context.revision = revision;
         }
     }
+}
+
+fn tool_error_code(result: &ToolResult) -> Option<String> {
+    result.content.iter().find_map(|content| match content {
+        ToolResultContent::Json { value } => value
+            .get("code")
+            .and_then(serde_json::Value::as_str)
+            .filter(|code| {
+                !code.is_empty()
+                    && code.len() <= 64
+                    && code.bytes().all(|byte| {
+                        byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_'
+                    })
+            })
+            .map(str::to_owned),
+        _ => None,
+    })
 }
 
 fn response_text(response: &armillae_core::CompletionResponse) -> String {
@@ -399,5 +419,33 @@ fn failure_outcome(
         tool_calls,
         committed_events,
         usage,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn error_result(code: &str) -> ToolResult {
+        ToolResult {
+            call_id: armillae_core::ToolCallId::new("safe-code-test").expect("test tool call ID"),
+            content: vec![ToolResultContent::Json {
+                value: json!({ "code": code }),
+            }],
+            is_error: true,
+        }
+    }
+
+    #[test]
+    fn tool_error_codes_are_limited_to_safe_stable_identifiers() {
+        assert_eq!(
+            tool_error_code(&error_result("invalid_input")).as_deref(),
+            Some("invalid_input")
+        );
+        assert_eq!(tool_error_code(&error_result("InvalidInput")), None);
+        assert_eq!(tool_error_code(&error_result("invalid-input")), None);
+        assert_eq!(tool_error_code(&error_result("invalid input")), None);
+        assert_eq!(tool_error_code(&error_result("")), None);
+        assert_eq!(tool_error_code(&error_result(&"x".repeat(65))), None);
     }
 }

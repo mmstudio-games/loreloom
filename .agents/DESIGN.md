@@ -100,9 +100,11 @@ Loreloom Runtime ───────────────► Persistence
 9. Agent 上下文只接收背包摘要、当前可用技能和按需查询结果，不直接持有 ECS 集合或完整内容库；
    Runtime 为当前 ToolContext Actor 暴露有界、Stable ID 游标分页的物品/技能 Query，并只把冻结的
    Item/Skill WorldCommand 作为 Command Tool；查询不能借由任意 Actor 参数越过 Actor 所有权；
-10. 主 `NarratorAgent` 负责解释玩家交互意图，并决定 NPC 是仅叙事提及、实体化、由 Narrator
-    代理、规则控制还是请求独立 NPC Turn，以及建议其 Scene/World 生命周期；Runtime 不重新判断
-    叙事重要性，只负责 Schema、Revision、Capability、预算和世界不变量；
+10. 主 `NarratorAgent` 负责解释玩家交互意图，并决定是否创建 NPC、创建后的 Scene/World
+    生命周期、由 Narrator 叙述还是使用独立 NpcAgent，以及是否请求已有 NPC Turn；模型侧只使用
+    `create_npc` 与 `request_npc_turn` 两个正交 Tool，不直接操作 Runtime 的物化状态机；Runtime
+    不重新判断叙事重要性，只负责注入 Scene/Place/Revision、解析世界 GenerationPolicy 与
+    AgentProfile，并校验 Capability、预算和世界不变量；
 11. `NpcAgent` 是一次 NPC Turn 的临时对象，由 Agent Definition、不可变
     `CharacterContext`、`SceneContext` 和 `NpcAssignment` 构造；持久角色只保存 ECS 状态和
     Agent Binding；
@@ -187,25 +189,32 @@ Loreloom Runtime ───────────────► Persistence
 41. Content 与运行时生成共享 Core 拥有的 `CharacterSpawnSpec`；Content 拥有 Definition/NpcDraft
     Schema 与纯编译器，World 拥有结合当前状态校验并执行的 NpcFactory。Content document v1 拒绝
     未知字段；首个公开版本前直接更新 v1，发布后才按 content schema version 显式迁移。
-42. Beat lifetime 只允许 MentionOnly，不生成 Entity；Scene 与 Persistent 使用同一完整 Character
-    record，Lightweight 只是没有 AgentBinding 的 NarratorProxy/Rules controller。Scene、其状态与
+42. 纯叙事提及不调用 Tool、也不生成 Entity；Scene 与 Persistent 使用同一完整 Character
+    record，`create_npc` 的 narrated mode 只是没有 AgentBinding 的 Narrator controller。Scene、其状态与
     Scene-owned entity 都是存档中的持久事实；离开 Scene 只停用，重新进入时恢复，不因离开或故事
     阶段结束而 cleanup。promotion 只表达角色脱离原 Scene、成为世界级角色的领域语义。
 43. Agent 长期上下文不增加隐藏 Memory 数据库：KnownFact/Goal 是决策事实，Transcript 是有状态的
     对话归档。第一阶段只做确定性、可配置的有界投影，不调用摘要模型；Narrator/NPC 文本不会自动
     写入 KnownFact。
-44. `NpcTarget` 固定区分 Existing、Preset、Generated 与 Mentioned；Generated NPC 的 Draft 使用现有
-    Narrator Provider 的独立 generation stage，并通过该 stage 提供的原生 Tool 提交，不从模型正文
-    解析 JSON；它消费同一整轮编排预算，不增加隐式第三 Provider。Generated provenance 明确引用
-    触发本次生成的 PlayerInput Transcript 或 WorldEvent。
+44. 模型侧 `create_npc` 只区分 Preset 与 Generated source；Existing 只进入
+    `request_npc_turn`，Mentioned 是不产生世界事实的普通叙事而不是 Tool target。Generated NPC 的
+    Draft 使用现有 Narrator Provider 的独立 generation stage，并通过该 stage 提供的原生 Tool 提交，
+    不从模型正文解析 JSON；它消费同一整轮编排预算，不增加隐式第三 Provider。默认
+    GenerationPolicy 由根世界锁定，Agent mode 的 AgentProfile 由 Preset Character Definition 或
+    GenerationPolicy 解析，Narrator 不提交这些内部 ID。Generated provenance 明确引用触发本次生成
+    的 PlayerInput Transcript 或 WorldEvent。
 45. Condition Clock 在 periodic 与 expiry 同 tick 时先执行 periodic，再重新校验并执行 expiry；周期
     Effect 作用于 Condition target。诊断不写回 Condition，而使用观察者拥有、以目标 Actor 为 subject、
     Condition Definition 为 value 的 confirmed KnownFact 决定是否投影真实名称。
-46. Runtime 只从已接受的 `request_npc_turn` ToolCall 构造引用 committed `ActorId` 的内部
-    `NarratorPlan`。Narrator 请求 Preset/Generated NPC 时，当前 Turn 先结束，Runtime 才能串行完成
+46. Runtime 只从已接受的 `request_npc_turn { actor_id, assignment }` ToolCall 构造引用 committed
+    `ActorId` 的内部 `NarratorPlan`；Scene 与 Revision 来自 ToolContext 和当前 World，不能由模型
+    提交。Observation 对当前可调度角色显式投影 `npc_turn_available`，同一 Revision 中使用该
+    ActorId 的请求不得再被隐藏条件拒绝。Narrator 调用 `create_npc` 请求 Preset/Generated NPC 时，
+    当前 Turn 先结束，Runtime 才能串行完成
     编译或 `npc_generation`、经统一 `CharacterSpawnSpec -> SpawnCharacter` 路径提交；随后 Runtime
     在同一次玩家输入中把物化结果和更新后的 Scene Observation 交给 Narrator。Narrator 看过完整
-    角色投影后才能为其调用 `request_npc_turn`；不增加角色重要度、可选复核或未物化 target 的 wire。
+    角色投影后才能为其调用 `request_npc_turn`；内部物化状态、Place、GenerationPolicy、AgentProfile、
+    角色重要度和可选复核不进入模型 wire。
 47. `transition_scene` 是 Narrator 专用的延迟编排 Tool：它只接受已提交 Scene ObjectId 或当前
     ModLock 的 Scene Definition ID，当前 Narrator Turn 结束后才执行单个原子 `TransitionScene`
     Command。切换同时停用旧 Scene、激活或首次物化目标 Scene、移动现有玩家并产生 SceneLeft/
@@ -268,9 +277,9 @@ workspace、版本管理和仓库目录约定。尚未冻结的精确协议转�
 - Mod Package Manifest、命名空间、依赖解析、显式 Patch、内容哈希、信任来源和资源限额；
 - Event/Rule/Parameter Schema、Predicate/Effect 白名单、规则执行顺序和 Gameplay Action 协议；
 - Extension Mod 是否采用 WASM Component、Host API、Capability、签名与存档兼容边界；
-- NarratorNpcDecision、NpcTarget、持久 Scene 激活语义、Agent 化资源门禁和角色 promotion 规则已冻结；
-  Generated Draft 复用 Narrator Provider 的独立预算阶段，具体预算值是 Host 配置，不进入模型/Mod
-  wire；
+- `create_npc`/`request_npc_turn` 的简化 Narrator Tool 面、内部 NPC 物化状态、持久 Scene 激活语义、
+  Agent 化资源门禁和角色 promotion 规则已冻结；Generated Draft 复用 Narrator Provider 的独立预算
+  阶段，具体预算值是 Host 配置，不进入模型/Mod wire；
 - Store 各领域 payload Schema，以及最终 AGPL 兼容分发方式；record envelope、重建事实源、
   migration 顺序与未知字段策略已冻结；
 - 一个玩家输入、Agent Step、ToolCall、WorldCommand 和世界提交之间的原子性；

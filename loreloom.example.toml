@@ -1,6 +1,10 @@
 schema_version = 1
 allowed_endpoint_hosts = []
-narrator_capabilities = ["narrator.materialize_npc"]
+narrator_capabilities = [
+    "narrator.create_npc",
+    "narrator.request_npc_turn",
+    "narrator.transition_scene",
+]
 
 [narrator]
 api_version = "armillae.llm/v1alpha1"
@@ -58,18 +62,6 @@ visible_actors = 128
 inventory_items = 128
 skills = 64
 max_context_tokens = 32768
-
-[[generation_policies]]
-id = "games.loreloom.rainbound-inn:generation_policy/default"
-allowed_agent_profiles = ["games.loreloom.rainbound-inn:agent_profile/mira"]
-
-[generation_policies.constraints]
-minimum_attributes = {}
-maximum_attributes = {}
-maximum_attribute_points = 0
-maximum_items = 0
-maximum_skills = 0
-allowed_definitions = []
 
 [rule_limits]
 max_triggered_rules = 128

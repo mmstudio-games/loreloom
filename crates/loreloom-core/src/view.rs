@@ -77,6 +77,7 @@ pub struct VisibleActorView {
     pub actor_id: ActorId,
     pub display_name: DisplayName,
     pub controller: CharacterController,
+    pub npc_turn_available: bool,
     pub life_state: LifeState,
     pub action_state: ActionState,
     pub posture: Posture,
@@ -137,6 +138,8 @@ pub struct ToolActivity {
     pub call_id: String,
     pub name: String,
     pub state: ToolActivityState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

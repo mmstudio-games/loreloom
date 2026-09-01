@@ -13,10 +13,11 @@ pub use failure::{
     ModelInvocationKind,
 };
 pub use protocol::{
-    AgentDefinition, AgentError, AssignmentText, NarrationText, NarrativeImportance,
-    NarratorDefinition, NarratorNpcDecision, NarratorPlan, NpcAgent, NpcAssignment, NpcContext,
-    NpcControllerKind, NpcGenerationRequest, NpcLifetime, NpcNarrativeAction, NpcTarget,
-    NpcTurnRequest, NpcTurnResult, NpcTurnStatus,
+    AgentDefinition, AgentError, AssignmentText, CreateNpcRequest, NarrationText,
+    NarrativeImportance, NarratorDefinition, NarratorNpcDecision, NarratorPlan, NpcAgent,
+    NpcAssignment, NpcContext, NpcControllerKind, NpcCreationMode, NpcCreationSource,
+    NpcGenerationRequest, NpcLifetime, NpcNarrativeAction, NpcTarget, NpcTurnRequest,
+    NpcTurnResult, NpcTurnStatus,
 };
 pub use runner::{
     AgentRunner, AgentToolContext, ToolCallOutcome, TurnFailureStage, TurnInvocation, TurnOutcome,

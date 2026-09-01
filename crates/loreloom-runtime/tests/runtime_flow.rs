@@ -17,11 +17,10 @@ use armillae_llm::{
 };
 use armillae_tools::{ToolContext, ToolExecutor};
 use loreloom_agent::{
-    AgentDefinition, AgentRunner, AgentToolContext, CancellationToken, ModelFailureCategory,
-    ModelFailureStage, ModelInvocationKind, NarrativeImportance, NarratorDefinition,
-    NarratorNpcDecision, NarratorPlan, NpcControllerKind, NpcGenerationRequest, NpcLifetime,
-    NpcNarrativeAction, NpcTarget, NpcTurnRequest, NpcTurnStatus, ResourceBudget, TurnInvocation,
-    TurnStatus,
+    AgentDefinition, AgentRunner, AgentToolContext, CancellationToken, CreateNpcRequest,
+    ModelFailureCategory, ModelFailureStage, ModelInvocationKind, NarratorDefinition, NarratorPlan,
+    NpcCreationMode, NpcCreationSource, NpcLifetime, NpcTurnRequest, NpcTurnStatus, ResourceBudget,
+    TurnInvocation, TurnStatus,
 };
 use loreloom_content::{
     AgentProfileDefinition, AttributeDefinition, CONTENT_SCHEMA_V1, CharacterDefinition,
@@ -48,8 +47,8 @@ use loreloom_core::{
     WorldCommandKind, WorldEventKind, WorldId, WorldLock, WorldStateRecord, WorldTime,
 };
 use loreloom_runtime::{
-    ContextProjectionPolicy, GameRuntime, RuntimeConfig, RuntimeError, RuntimeToolExecutor,
-    WorldService,
+    ContextProjectionPolicy, GameRuntime, NpcResourcePolicy, OrchestrationBudget, RuntimeConfig,
+    RuntimeError, RuntimeToolExecutor, WorldService,
 };
 use loreloom_store::{CommitRequest, CommitResult, SaveStore};
 use loreloom_world::{GameWorld, WorldConfig};
@@ -845,6 +844,7 @@ struct NarratorBridge {
     support: SupportMode,
     calls: AtomicUsize,
     planning_observation: std::sync::Mutex<Option<JsonValue>>,
+    saw_minimal_npc_tool: std::sync::atomic::AtomicBool,
 }
 
 impl NarratorBridge {
@@ -854,6 +854,7 @@ impl NarratorBridge {
             support,
             calls: AtomicUsize::new(0),
             planning_observation: std::sync::Mutex::new(None),
+            saw_minimal_npc_tool: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -863,6 +864,10 @@ impl NarratorBridge {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
             .expect("planning observation")
+    }
+
+    fn saw_minimal_npc_tool(&self) -> bool {
+        self.saw_minimal_npc_tool.load(Ordering::SeqCst)
     }
 }
 
@@ -881,6 +886,18 @@ impl LlmBridge for NarratorBridge {
     ) -> BridgeFuture<'a, Result<CompletionResponse, BridgeError>> {
         Box::pin(async move {
             self.calls.fetch_add(1, Ordering::SeqCst);
+            if let Some(expected) = self.plan.npc_turns.first().map(|turn| turn.actor_id) {
+                let valid = request.tools.iter().any(|definition| {
+                    definition.name == "request_npc_turn"
+                        && definition.input_schema["properties"]
+                            .get("scene_id")
+                            .is_none()
+                        && definition.input_schema["properties"]["actor_id"]["enum"]
+                            .as_array()
+                            .is_some_and(|actors| actors.contains(&json!(expected)))
+                });
+                self.saw_minimal_npc_tool.store(valid, Ordering::SeqCst);
+            }
             let payload = request
                 .messages
                 .iter()
@@ -929,7 +946,6 @@ impl LlmBridge for NarratorBridge {
                             name: "request_npc_turn".to_owned(),
                             arguments: json!({
                                 "actor_id": npc.actor_id,
-                                "scene_id": npc.scene_id,
                                 "assignment": npc.assignment
                             }),
                         })
@@ -1047,10 +1063,7 @@ impl LlmBridge for RecoveringNarratorBridge {
 }
 
 struct GeneratedNarratorBridge {
-    scene_id: ObjectId,
-    place_id: ObjectId,
     profile_id: ContentDefinitionId,
-    policy_id: ContentDefinitionId,
     calls: AtomicUsize,
     saw_materialized_profile: std::sync::atomic::AtomicBool,
     repeat_materialization: bool,
@@ -1058,17 +1071,9 @@ struct GeneratedNarratorBridge {
 }
 
 impl GeneratedNarratorBridge {
-    fn new(
-        scene_id: ObjectId,
-        place_id: ObjectId,
-        profile_id: ContentDefinitionId,
-        policy_id: ContentDefinitionId,
-    ) -> Self {
+    fn new(profile_id: ContentDefinitionId) -> Self {
         Self {
-            scene_id,
-            place_id,
             profile_id,
-            policy_id,
             calls: AtomicUsize::new(0),
             saw_materialized_profile: std::sync::atomic::AtomicBool::new(false),
             repeat_materialization: false,
@@ -1076,38 +1081,22 @@ impl GeneratedNarratorBridge {
         }
     }
 
-    fn repeating(
-        scene_id: ObjectId,
-        place_id: ObjectId,
-        profile_id: ContentDefinitionId,
-        policy_id: ContentDefinitionId,
-    ) -> Self {
+    fn repeating(profile_id: ContentDefinitionId) -> Self {
         Self {
             repeat_materialization: true,
-            ..Self::new(scene_id, place_id, profile_id, policy_id)
+            ..Self::new(profile_id)
         }
     }
 
-    fn decision(&self) -> NarratorNpcDecision {
-        NarratorNpcDecision {
-            target: NpcTarget::Generated {
-                generation_policy_id: self.policy_id.clone(),
-                place_id: self.place_id,
-                request: NpcGenerationRequest {
-                    scene_id: self.scene_id,
-                    role: text("witness"),
-                    purpose: LongText::new(
-                        "Create a witness who can answer the player's question.",
-                    )
+    fn creation_request(&self) -> CreateNpcRequest {
+        CreateNpcRequest {
+            source: NpcCreationSource::Generated {
+                role: text("witness"),
+                purpose: LongText::new("Create a witness who can answer the player's question.")
                     .expect("generation purpose"),
-                    desired_traits: BTreeSet::new(),
-                    importance: NarrativeImportance::Supporting,
-                },
             },
-            action: NpcNarrativeAction::RequestNpcTurn,
             lifetime: NpcLifetime::Scene,
-            controller: NpcControllerKind::Agent(self.profile_id.clone()),
-            assignment: None,
+            mode: NpcCreationMode::Agent,
         }
     }
 
@@ -1117,7 +1106,6 @@ impl GeneratedNarratorBridge {
             name: "request_npc_turn".to_owned(),
             arguments: json!({
                 "actor_id": actor_id,
-                "scene_id": self.scene_id,
                 "assignment": "Answer according to the character that now exists."
             }),
         })
@@ -1162,8 +1150,8 @@ impl LlmBridge for GeneratedNarratorBridge {
             match call {
                 0 => Ok(tool_response(ToolCall {
                     id: ToolCallId::new("materialize-witness").expect("tool call ID"),
-                    name: "materialize_npc".to_owned(),
-                    arguments: serde_json::to_value(self.decision())
+                    name: "create_npc".to_owned(),
+                    arguments: serde_json::to_value(self.creation_request())
                         .expect("materialization arguments"),
                 })),
                 1 => Ok(text_response("The witness request is queued.")),
@@ -1216,8 +1204,8 @@ impl LlmBridge for GeneratedNarratorBridge {
                         Ok(tool_response(ToolCall {
                             id: ToolCallId::new("repeat-materialize-witness")
                                 .expect("repeat tool call ID"),
-                            name: "materialize_npc".to_owned(),
-                            arguments: serde_json::to_value(self.decision())
+                            name: "create_npc".to_owned(),
+                            arguments: serde_json::to_value(self.creation_request())
                                 .expect("repeated materialization arguments"),
                         }))
                     } else {
@@ -1261,26 +1249,15 @@ impl LlmBridge for GeneratedNarratorBridge {
 }
 
 struct PresetNarratorBridge {
-    scene_id: ObjectId,
-    place_id: ObjectId,
     character_id: ContentDefinitionId,
-    profile_id: ContentDefinitionId,
     calls: AtomicUsize,
     saw_materialized_profile: std::sync::atomic::AtomicBool,
 }
 
 impl PresetNarratorBridge {
-    fn new(
-        scene_id: ObjectId,
-        place_id: ObjectId,
-        character_id: ContentDefinitionId,
-        profile_id: ContentDefinitionId,
-    ) -> Self {
+    fn new(character_id: ContentDefinitionId) -> Self {
         Self {
-            scene_id,
-            place_id,
             character_id,
-            profile_id,
             calls: AtomicUsize::new(0),
             saw_materialized_profile: std::sync::atomic::AtomicBool::new(false),
         }
@@ -1305,16 +1282,13 @@ impl LlmBridge for PresetNarratorBridge {
             match call {
                 0 => Ok(tool_response(ToolCall {
                     id: ToolCallId::new("materialize-preset").expect("tool call ID"),
-                    name: "materialize_npc".to_owned(),
-                    arguments: serde_json::to_value(NarratorNpcDecision {
-                        target: NpcTarget::Preset {
+                    name: "create_npc".to_owned(),
+                    arguments: serde_json::to_value(CreateNpcRequest {
+                        source: NpcCreationSource::Preset {
                             character_id: self.character_id.clone(),
-                            place_id: self.place_id,
                         },
-                        action: NpcNarrativeAction::RequestNpcTurn,
                         lifetime: NpcLifetime::Persistent,
-                        controller: NpcControllerKind::Agent(self.profile_id.clone()),
-                        assignment: None,
+                        mode: NpcCreationMode::Agent,
                     })
                     .expect("preset decision"),
                 })),
@@ -1355,7 +1329,6 @@ impl LlmBridge for PresetNarratorBridge {
                         name: "request_npc_turn".to_owned(),
                         arguments: json!({
                             "actor_id": actor_id,
-                            "scene_id": self.scene_id,
                             "assignment": "Respond as the fully loaded preset character."
                         }),
                     }))
@@ -1390,50 +1363,28 @@ enum GenerationRejectionMode {
 }
 
 struct RejectedGenerationBridge {
-    scene_id: ObjectId,
-    place_id: ObjectId,
-    profile_id: ContentDefinitionId,
-    policy_id: ContentDefinitionId,
     mode: GenerationRejectionMode,
     calls: AtomicUsize,
     saw_rejection: std::sync::atomic::AtomicBool,
 }
 
 impl RejectedGenerationBridge {
-    fn new(
-        fixture: &Fixture,
-        policy_id: ContentDefinitionId,
-        mode: GenerationRejectionMode,
-    ) -> Self {
+    fn new(mode: GenerationRejectionMode) -> Self {
         Self {
-            scene_id: fixture.scene,
-            place_id: fixture.place,
-            profile_id: fixture.profile_id.clone(),
-            policy_id,
             mode,
             calls: AtomicUsize::new(0),
             saw_rejection: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
-    fn decision(&self) -> NarratorNpcDecision {
-        NarratorNpcDecision {
-            target: NpcTarget::Generated {
-                generation_policy_id: self.policy_id.clone(),
-                place_id: self.place_id,
-                request: NpcGenerationRequest {
-                    scene_id: self.scene_id,
-                    role: text("witness"),
-                    purpose: LongText::new("Create one bounded witness.")
-                        .expect("generation purpose"),
-                    desired_traits: BTreeSet::new(),
-                    importance: NarrativeImportance::Supporting,
-                },
+    fn creation_request(&self) -> CreateNpcRequest {
+        CreateNpcRequest {
+            source: NpcCreationSource::Generated {
+                role: text("witness"),
+                purpose: LongText::new("Create one bounded witness.").expect("generation purpose"),
             },
-            action: NpcNarrativeAction::RequestNpcTurn,
             lifetime: NpcLifetime::Scene,
-            controller: NpcControllerKind::Agent(self.profile_id.clone()),
-            assignment: None,
+            mode: NpcCreationMode::Agent,
         }
     }
 }
@@ -1456,8 +1407,9 @@ impl LlmBridge for RejectedGenerationBridge {
             if call == 0 {
                 return Ok(tool_response(ToolCall {
                     id: ToolCallId::new("rejected-generation").expect("tool call ID"),
-                    name: "materialize_npc".to_owned(),
-                    arguments: serde_json::to_value(self.decision()).expect("generation decision"),
+                    name: "create_npc".to_owned(),
+                    arguments: serde_json::to_value(self.creation_request())
+                        .expect("generation request"),
                 }));
             }
             if call == 1 {
@@ -1556,7 +1508,7 @@ impl LlmBridge for RejectedGenerationBridge {
 }
 
 struct CancellableGenerationBridge {
-    decision: NarratorNpcDecision,
+    request: CreateNpcRequest,
     calls: AtomicUsize,
     entered_generation: Arc<tokio::sync::Notify>,
 }
@@ -1578,9 +1530,9 @@ impl LlmBridge for CancellableGenerationBridge {
             match self.calls.fetch_add(1, Ordering::SeqCst) {
                 0 => Ok(tool_response(ToolCall {
                     id: ToolCallId::new("cancelled-generation").expect("tool call ID"),
-                    name: "materialize_npc".to_owned(),
-                    arguments: serde_json::to_value(&self.decision)
-                        .expect("cancelled generation decision"),
+                    name: "create_npc".to_owned(),
+                    arguments: serde_json::to_value(&self.request)
+                        .expect("cancelled generation request"),
                 })),
                 1 => Ok(text_response(
                     serde_json::to_string(&NarratorPlan {
@@ -2121,7 +2073,6 @@ async fn scene_transition_is_mutually_exclusive_with_scene_bound_npc_orchestrati
                 name: "request_npc_turn".to_owned(),
                 arguments: json!({
                     "actor_id": fixture.npc,
-                    "scene_id": fixture.scene,
                     "assignment": "Remain in the current scene."
                 }),
             },
@@ -2173,7 +2124,6 @@ async fn scene_transition_is_mutually_exclusive_with_scene_bound_npc_orchestrati
                 name: "request_npc_turn".to_owned(),
                 arguments: json!({
                     "actor_id": fixture.npc,
-                    "scene_id": fixture.scene,
                     "assignment": "This request must wait for replanning."
                 }),
             },
@@ -2212,7 +2162,7 @@ async fn player_narrator_npc_and_surreal_store_form_a_durable_vertical_slice() {
     let npc = npc_bridge();
     let mut runtime = GameRuntime::new(
         Arc::clone(&service),
-        narrator,
+        narrator.clone(),
         narrator_definition(),
         parse::<SessionId>("ses_01890f6a-2b61-7d4e-8f90-123456789abc"),
         RuntimeConfig::default(),
@@ -2238,6 +2188,15 @@ async fn player_narrator_npc_and_surreal_store_form_a_durable_vertical_slice() {
     assert!(phases.contains(&loreloom_core::RuntimePhase::NarratorThinking));
     assert!(phases.contains(&loreloom_core::RuntimePhase::ResolvingOrchestration));
     assert!(phases.contains(&loreloom_core::RuntimePhase::NpcThinking));
+    assert!(narrator.saw_minimal_npc_tool());
+    assert!(
+        narrator.planning_observation()["scene"]["visible_actors"]
+            .as_array()
+            .is_some_and(|actors| actors.iter().any(|actor| {
+                actor["actor_id"] == json!(fixture.npc)
+                    && actor["npc_turn_available"] == json!(true)
+            }))
+    );
     assert_eq!(
         phases.last(),
         Some(&loreloom_core::RuntimePhase::UpdatingWorld)
@@ -2399,17 +2358,14 @@ async fn generated_npc_is_committed_before_narrator_replans_and_dispatches_it() 
         },
         allowed_agent_profiles: BTreeSet::from([fixture.profile_id.clone()]),
     };
-    let narrator = Arc::new(GeneratedNarratorBridge::new(
-        fixture.scene,
-        fixture.place,
-        fixture.profile_id.clone(),
-        policy_id.clone(),
-    ));
+    let narrator = Arc::new(GeneratedNarratorBridge::new(fixture.profile_id.clone()));
     let npc = Arc::new(MockBridge::scripted([MockResponse::text(
         "I saw the lantern before the rain, and I will answer truthfully.",
     )]));
-    let mut config = RuntimeConfig::default();
-    config.generation_policies.insert(policy_id, policy);
+    let config = RuntimeConfig {
+        generation_policy: Some(policy),
+        ..RuntimeConfig::default()
+    };
     let mut runtime = GameRuntime::new(
         Arc::clone(&service),
         narrator.clone(),
@@ -2496,19 +2452,15 @@ async fn repeated_materialization_request_does_not_generate_a_second_character()
     .expect("open service");
     let policy_id = definition_id("generation_policy", "deduplicated");
     let narrator = Arc::new(GeneratedNarratorBridge::repeating(
-        fixture.scene,
-        fixture.place,
         fixture.profile_id.clone(),
-        policy_id.clone(),
     ));
     let npc = Arc::new(MockBridge::scripted([MockResponse::text(
         "There is still only one of me.",
     )]));
-    let mut config = RuntimeConfig::default();
-    config.generation_policies.insert(
-        policy_id.clone(),
-        generation_policy(policy_id, fixture.profile_id),
-    );
+    let config = RuntimeConfig {
+        generation_policy: Some(generation_policy(policy_id, fixture.profile_id)),
+        ..RuntimeConfig::default()
+    };
     let mut runtime = GameRuntime::new(
         service,
         narrator.clone(),
@@ -2563,12 +2515,7 @@ async fn preset_npc_uses_the_same_spawn_event_and_post_commit_replanning_barrier
     )
     .await
     .expect("open service");
-    let narrator = Arc::new(PresetNarratorBridge::new(
-        fixture.scene,
-        fixture.place,
-        fixture.preset_id.clone(),
-        fixture.profile_id.clone(),
-    ));
+    let narrator = Arc::new(PresetNarratorBridge::new(fixture.preset_id.clone()));
     let npc = Arc::new(MockBridge::scripted([MockResponse::text(
         "I was already expected.",
     )]));
@@ -2647,19 +2594,20 @@ async fn generation_limits_and_provider_failures_return_to_narrator_without_part
         .await
         .expect("open service");
         let policy_id = definition_id("generation_policy", "rejected");
-        let narrator = Arc::new(RejectedGenerationBridge::new(
-            &fixture,
-            policy_id.clone(),
-            mode,
-        ));
-        let mut config = RuntimeConfig::default();
-        config.generation_policies.insert(
-            policy_id.clone(),
-            generation_policy(policy_id, fixture.profile_id),
-        );
-        if matches!(mode, GenerationRejectionMode::ResourceLimit) {
-            config.npc_resources.max_generated_per_orchestration = 0;
-        }
+        let narrator = Arc::new(RejectedGenerationBridge::new(mode));
+        let npc_resources = if matches!(mode, GenerationRejectionMode::ResourceLimit) {
+            NpcResourcePolicy {
+                max_generated_per_orchestration: 0,
+                ..NpcResourcePolicy::default()
+            }
+        } else {
+            NpcResourcePolicy::default()
+        };
+        let config = RuntimeConfig {
+            npc_resources,
+            generation_policy: Some(generation_policy(policy_id, fixture.profile_id)),
+            ..RuntimeConfig::default()
+        };
         let mut runtime = GameRuntime::new(
             service,
             narrator.clone(),
@@ -2731,28 +2679,21 @@ async fn cancellation_during_npc_generation_does_not_publish_a_character() {
     let policy = generation_policy(policy_id.clone(), fixture.profile_id.clone());
     let entered_generation = Arc::new(tokio::sync::Notify::new());
     let narrator = Arc::new(CancellableGenerationBridge {
-        decision: NarratorNpcDecision {
-            target: NpcTarget::Generated {
-                generation_policy_id: policy_id.clone(),
-                place_id: fixture.place,
-                request: NpcGenerationRequest {
-                    scene_id: fixture.scene,
-                    role: text("delayed witness"),
-                    purpose: LongText::new("Wait until cancelled.").expect("purpose"),
-                    desired_traits: BTreeSet::new(),
-                    importance: NarrativeImportance::Supporting,
-                },
+        request: CreateNpcRequest {
+            source: NpcCreationSource::Generated {
+                role: text("delayed witness"),
+                purpose: LongText::new("Wait until cancelled.").expect("purpose"),
             },
-            action: NpcNarrativeAction::RequestNpcTurn,
             lifetime: NpcLifetime::Scene,
-            controller: NpcControllerKind::Agent(fixture.profile_id),
-            assignment: None,
+            mode: NpcCreationMode::Agent,
         },
         calls: AtomicUsize::new(0),
         entered_generation: Arc::clone(&entered_generation),
     });
-    let mut config = RuntimeConfig::default();
-    config.generation_policies.insert(policy_id, policy);
+    let config = RuntimeConfig {
+        generation_policy: Some(policy),
+        ..RuntimeConfig::default()
+    };
     let mut runtime = GameRuntime::new(
         service,
         narrator,
@@ -2810,18 +2751,15 @@ async fn npc_generation_consumes_the_shared_started_agent_turn_budget() {
     .await
     .expect("open service");
     let policy_id = definition_id("generation_policy", "turn_budget");
-    let narrator = Arc::new(GeneratedNarratorBridge::new(
-        fixture.scene,
-        fixture.place,
-        fixture.profile_id.clone(),
-        policy_id.clone(),
-    ));
-    let mut config = RuntimeConfig::default();
-    config.orchestration_budget.max_started_agent_turns = 1;
-    config.generation_policies.insert(
-        policy_id.clone(),
-        generation_policy(policy_id, fixture.profile_id),
-    );
+    let narrator = Arc::new(GeneratedNarratorBridge::new(fixture.profile_id.clone()));
+    let config = RuntimeConfig {
+        orchestration_budget: OrchestrationBudget {
+            max_started_agent_turns: 1,
+            ..OrchestrationBudget::default()
+        },
+        generation_policy: Some(generation_policy(policy_id, fixture.profile_id)),
+        ..RuntimeConfig::default()
+    };
     let mut runtime = GameRuntime::new(
         service,
         narrator.clone(),
@@ -2853,7 +2791,7 @@ async fn npc_generation_consumes_the_shared_started_agent_turn_budget() {
 }
 
 #[tokio::test]
-async fn stale_npc_requests_are_correlated_without_calling_the_provider() {
+async fn request_npc_turn_derives_the_current_scene_instead_of_accepting_model_scene_state() {
     let directory = TempDir::new().expect("temporary save parent");
     let fixture = fixture();
     let candidate_world_lock = fixture.manifest.world_lock.clone();
@@ -2874,6 +2812,32 @@ async fn stale_npc_requests_are_correlated_without_calling_the_provider() {
     )
     .await
     .expect("open service");
+    let executor = RuntimeToolExecutor::new(Arc::clone(&service));
+    let rejected_legacy_shape = executor
+        .execute(
+            ToolContext::new().with_extension(AgentToolContext {
+                actor_id: fixture.player,
+                revision: Revision::ZERO,
+                session_id: parse("ses_01890f6a-2bc1-7d4e-8f90-123456789abc"),
+                capabilities: BTreeSet::from(["narrator.request_npc_turn".to_owned()]),
+            }),
+            ToolCall {
+                id: ToolCallId::new("request-with-model-scene").expect("tool call ID"),
+                name: "request_npc_turn".to_owned(),
+                arguments: json!({
+                    "actor_id": fixture.npc,
+                    "scene_id": fixture.scene,
+                    "assignment": "The runtime must reject model-supplied scene state."
+                }),
+            },
+        )
+        .await
+        .expect("correlated legacy-shape rejection");
+    assert!(rejected_legacy_shape.is_error);
+    assert_eq!(
+        tool_result_json(&rejected_legacy_shape)["code"],
+        json!("invalid_input")
+    );
     let plan = NarratorPlan {
         based_on_revision: Revision::new(1),
         npc_turns: vec![request(fixture.npc, object_id("2b6f"))],
@@ -2889,14 +2853,14 @@ async fn stale_npc_requests_are_correlated_without_calling_the_provider() {
     runtime.register_npc(fixture.npc, definition(fixture.profile_id), npc.clone());
 
     let outcome = runtime
-        .handle_player_input("Call for Mira outside this scene.")
+        .handle_player_input("Ask Mira to answer in the current scene.")
         .await
-        .expect("complete with stale result");
+        .expect("complete with runtime-derived scene");
 
     assert_eq!(outcome.npc_results.len(), 1);
-    assert_eq!(outcome.npc_results[0].status, NpcTurnStatus::Stale);
-    assert_eq!(outcome.npc_results[0].observed_revision, None);
-    assert!(npc.requests().expect("npc request log").is_empty());
+    assert_eq!(outcome.npc_results[0].status, NpcTurnStatus::Completed);
+    assert!(outcome.npc_results[0].observed_revision.is_some());
+    assert_eq!(npc.requests().expect("npc request log").len(), 2);
 }
 
 #[tokio::test]
@@ -3061,7 +3025,7 @@ async fn narrator_and_npc_contexts_apply_host_projection_limits_before_provider_
                 transcript_bytes: 0,
                 known_facts: 0,
                 goals: 0,
-                visible_actors: 0,
+                visible_actors: 2,
                 inventory_items: 0,
                 skills: 0,
                 max_context_tokens: 131_072,
@@ -3090,11 +3054,11 @@ async fn narrator_and_npc_contexts_apply_host_projection_limits_before_provider_
             .expect("skills")
             .is_empty()
     );
-    assert!(
+    assert_eq!(
         observation["scene"]["visible_actors"]
             .as_array()
-            .expect("visible actors")
-            .is_empty()
+            .map(Vec::len),
+        Some(2)
     );
     assert!(
         observation["recent_transcript"]

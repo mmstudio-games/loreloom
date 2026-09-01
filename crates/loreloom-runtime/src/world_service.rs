@@ -7,7 +7,9 @@ use std::{
 use armillae_core::{ToolCall, ToolDefinition, ToolResult, ToolResultContent};
 use armillae_tools::{BoxFuture, ToolContext, ToolExecutionError, ToolExecutor};
 use loreloom_agent::{
-    AgentDefinition, AgentToolContext, AssignmentText, NarratorNpcDecision, NpcTurnRequest,
+    AgentDefinition, AgentToolContext, AssignmentText, CreateNpcRequest, NarrativeImportance,
+    NarratorNpcDecision, NpcControllerKind, NpcCreationMode, NpcCreationSource,
+    NpcGenerationRequest, NpcNarrativeAction, NpcTarget, NpcTurnRequest,
 };
 use loreloom_content::{
     CharacterCompileRequest, Definition, DefinitionRegistry, DraftCompileRequest, GenerationPolicy,
@@ -31,7 +33,7 @@ use serde_json::{Value as JsonValue, json};
 use tokio::sync::Mutex;
 
 use crate::{
-    NARRATOR_MATERIALIZE_NPC_CAPABILITY, NARRATOR_REQUEST_NPC_TURN_CAPABILITY,
+    NARRATOR_CREATE_NPC_CAPABILITY, NARRATOR_REQUEST_NPC_TURN_CAPABILITY,
     NARRATOR_SUBMIT_NPC_DRAFT_CAPABILITY, NARRATOR_TRANSITION_SCENE_CAPABILITY, RuntimeError,
 };
 
@@ -173,6 +175,106 @@ impl WorldService {
             .and_then(|character| character.agent_binding.as_ref())
             .filter(|binding| binding.enabled)
             .map(|binding| binding.profile_id.clone())
+    }
+
+    async fn npc_creation_location(
+        &self,
+        actor_id: ActorId,
+        expected_revision: Revision,
+    ) -> Result<(ObjectId, ObjectId), RuntimeError> {
+        let inner = self.inner.lock().await;
+        require_revision(&inner, expected_revision)?;
+        if inner.world.world_state().player_actor != actor_id {
+            return Err(RuntimeError::CapabilityDenied);
+        }
+        let character = inner
+            .world
+            .character(actor_id)
+            .ok_or(RuntimeError::Unavailable)?;
+        let records = inner.world.project_records()?;
+        let place = records
+            .iter()
+            .find_map(|record| match record {
+                DomainRecord::Place(place) if place.id == character.location => Some(place),
+                _ => None,
+            })
+            .ok_or(RuntimeError::Unavailable)?;
+        if place.scene_id != inner.world.world_state().active_scene {
+            return Err(RuntimeError::Unavailable);
+        }
+        Ok((place.scene_id, place.id))
+    }
+
+    async fn preset_agent_profile(
+        &self,
+        character_id: &ContentDefinitionId,
+    ) -> Result<ContentDefinitionId, RuntimeError> {
+        let inner = self.inner.lock().await;
+        let profile_id = inner
+            .registry
+            .get(character_id)
+            .and_then(|entry| match &entry.definition {
+                Definition::Character(character) => character.agent_profile.as_ref(),
+                _ => None,
+            })
+            .ok_or(RuntimeError::Unavailable)?;
+        match inner
+            .registry
+            .get(profile_id)
+            .map(|entry| &entry.definition)
+        {
+            Some(Definition::AgentProfile(_)) => Ok(profile_id.clone()),
+            _ => Err(RuntimeError::Unavailable),
+        }
+    }
+
+    async fn npc_turn_scene(
+        &self,
+        player_actor: ActorId,
+        npc_actor: ActorId,
+        expected_revision: Revision,
+    ) -> Result<ObjectId, RuntimeError> {
+        let inner = self.inner.lock().await;
+        require_revision(&inner, expected_revision)?;
+        if inner.world.world_state().player_actor != player_actor {
+            return Err(RuntimeError::CapabilityDenied);
+        }
+        let player = inner
+            .world
+            .character(player_actor)
+            .ok_or(RuntimeError::Unavailable)?;
+        let npc = inner
+            .world
+            .character(npc_actor)
+            .filter(|npc| npc.location == player.location)
+            .filter(|npc| npc.controller == CharacterController::Agent)
+            .ok_or(RuntimeError::Unavailable)?;
+        let binding = npc
+            .agent_binding
+            .as_ref()
+            .filter(|binding| binding.enabled)
+            .ok_or(RuntimeError::Unavailable)?;
+        if !matches!(
+            inner
+                .registry
+                .get(&binding.profile_id)
+                .map(|entry| &entry.definition),
+            Some(Definition::AgentProfile(_))
+        ) {
+            return Err(RuntimeError::Unavailable);
+        }
+        let records = inner.world.project_records()?;
+        let place = records
+            .iter()
+            .find_map(|record| match record {
+                DomainRecord::Place(place) if place.id == player.location => Some(place),
+                _ => None,
+            })
+            .ok_or(RuntimeError::Unavailable)?;
+        if place.scene_id != inner.world.world_state().active_scene {
+            return Err(RuntimeError::Unavailable);
+        }
+        Ok(place.scene_id)
     }
 
     pub(crate) async fn has_character(&self, actor_id: ActorId) -> bool {
@@ -343,7 +445,13 @@ impl WorldService {
         let player_id = inner.world.world_state().player_actor;
         let records = inner.world.project_records()?;
         let player = character_context(&records, &inner.registry, player_id, revision)?;
-        let scene = scene_context(&records, &inner.events, player_id, revision)?;
+        let scene = scene_context(
+            &records,
+            &inner.events,
+            &inner.registry,
+            player_id,
+            revision,
+        )?;
         let transcript = transcript_records(&records);
         let truncated = transcript.len() > CONTEXT_TRANSCRIPT_SOURCE_LIMIT;
         let recent_transcript = tail(transcript, CONTEXT_TRANSCRIPT_SOURCE_LIMIT);
@@ -374,7 +482,7 @@ impl WorldService {
         let revision = inner.world.revision();
         let records = inner.world.project_records()?;
         let character = character_context(&records, &inner.registry, actor_id, revision)?;
-        let scene = scene_context(&records, &inner.events, actor_id, revision)?;
+        let scene = scene_context(&records, &inner.events, &inner.registry, actor_id, revision)?;
         if scene.scene_id != scene_id {
             return Err(RuntimeError::Unavailable);
         }
@@ -751,7 +859,13 @@ impl WorldService {
             revision,
             session_id,
             player: character_context(&records, &inner.registry, player_id, revision)?,
-            scene: scene_context(&records, &inner.events, player_id, revision)?,
+            scene: scene_context(
+                &records,
+                &inner.events,
+                &inner.registry,
+                player_id,
+                revision,
+            )?,
             parameters: parameter_views(
                 &records,
                 inner.world.session_parameters(),
@@ -785,6 +899,7 @@ impl WorldService {
 #[derive(Debug)]
 pub struct RuntimeToolExecutor {
     service: Arc<WorldService>,
+    generation_policy: Option<GenerationPolicy>,
     pending_npc_decisions: Mutex<Vec<PendingNpcDecision>>,
     pending_npc_turns: Mutex<Vec<NpcTurnRequest>>,
     pending_npc_drafts: Mutex<Vec<NpcDraft>>,
@@ -806,11 +921,27 @@ pub(crate) struct PendingSceneTransition {
     pub target: SceneTransitionTarget,
 }
 
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NpcTurnToolRequest {
+    actor_id: ActorId,
+    assignment: AssignmentText,
+}
+
 impl RuntimeToolExecutor {
     #[must_use]
     pub fn new(service: Arc<WorldService>) -> Self {
+        Self::with_generation_policy(service, None)
+    }
+
+    #[must_use]
+    pub fn with_generation_policy(
+        service: Arc<WorldService>,
+        generation_policy: Option<GenerationPolicy>,
+    ) -> Self {
         Self {
             service,
+            generation_policy,
             pending_npc_decisions: Mutex::new(Vec::new()),
             pending_npc_turns: Mutex::new(Vec::new()),
             pending_npc_drafts: Mutex::new(Vec::new()),
@@ -1026,14 +1157,12 @@ impl ToolExecutor for RuntimeToolExecutor {
             },
             ToolDefinition {
                 name: "request_npc_turn".to_owned(),
-                description: "Queue one turn for an existing NPC after this narrator turn."
-                    .to_owned(),
+                description: "Queue one turn for an existing visible NPC whose observation has npc_turn_available=true. Copy its actor_id exactly; the runtime supplies scene and revision.".to_owned(),
                 input_schema: json!({
                     "type": "object",
-                    "required": ["actor_id", "scene_id", "assignment"],
+                    "required": ["actor_id", "assignment"],
                     "properties": {
                         "actor_id": { "type": "string" },
-                        "scene_id": { "type": "string" },
                         "assignment": { "type": "string" }
                     },
                     "additionalProperties": false
@@ -1081,115 +1210,42 @@ impl ToolExecutor for RuntimeToolExecutor {
                 }),
             },
             ToolDefinition {
-                name: "materialize_npc".to_owned(),
-                description: "Queue one bounded NPC decision. Preset/generated targets are materialized after this narrator turn, then planning restarts with the committed actor ID.".to_owned(),
+                name: "create_npc".to_owned(),
+                description: "Create a preset or generated NPC in the current place after this narrator turn. Planning restarts with the committed actor; request its turn separately only after it appears in observation.".to_owned(),
                 input_schema: json!({
                     "type": "object",
-                    "required": ["target", "action", "lifetime", "controller"],
+                    "required": ["source", "lifetime", "mode"],
                     "properties": {
-                        "target": {
+                        "source": {
                             "oneOf": [
                                 {
                                     "type": "object",
-                                    "required": ["type", "actor_id"],
-                                    "properties": {
-                                        "type": { "const": "existing" },
-                                        "actor_id": { "type": "string" }
-                                    },
-                                    "additionalProperties": false
-                                },
-                                {
-                                    "type": "object",
-                                    "required": ["type", "character_id", "place_id"],
+                                    "required": ["type", "character_id"],
                                     "properties": {
                                         "type": { "const": "preset" },
-                                        "character_id": { "type": "string" },
-                                        "place_id": { "type": "string" }
+                                        "character_id": { "type": "string" }
                                     },
                                     "additionalProperties": false
                                 },
                                 {
                                     "type": "object",
-                                    "required": ["type", "generation_policy_id", "place_id", "request"],
+                                    "required": ["type", "role", "purpose"],
                                     "properties": {
                                         "type": { "const": "generated" },
-                                        "generation_policy_id": { "type": "string" },
-                                        "place_id": { "type": "string" },
-                                        "request": {
-                                            "type": "object",
-                                            "required": ["scene_id", "role", "purpose", "desired_traits", "importance"],
-                                            "properties": {
-                                                "scene_id": { "type": "string" },
-                                                "role": { "type": "string", "maxLength": 1024 },
-                                                "purpose": { "type": "string", "maxLength": 65536 },
-                                                "desired_traits": {
-                                                    "type": "array",
-                                                    "items": { "type": "string" },
-                                                    "uniqueItems": true,
-                                                    "maxItems": 256
-                                                },
-                                                "importance": {
-                                                    "type": "string",
-                                                    "enum": ["ambient", "supporting", "principal"]
-                                                }
-                                            },
-                                            "additionalProperties": false
-                                        }
-                                    },
-                                    "additionalProperties": false
-                                },
-                                {
-                                    "type": "object",
-                                    "required": ["type", "display_name"],
-                                    "properties": {
-                                        "type": { "const": "mentioned" },
-                                        "display_name": { "type": "string", "maxLength": 256 }
+                                        "role": { "type": "string", "maxLength": 1024 },
+                                        "purpose": { "type": "string", "maxLength": 65536 }
                                     },
                                     "additionalProperties": false
                                 }
                             ]
-                        },
-                        "action": {
-                            "type": "string",
-                            "enum": ["mention_only", "materialize_lightweight", "request_npc_turn"]
                         },
                         "lifetime": {
                             "type": "string",
-                            "enum": ["beat", "scene", "persistent"]
+                            "enum": ["scene", "persistent"]
                         },
-                        "controller": {
-                            "oneOf": [
-                                {
-                                    "type": "object",
-                                    "required": ["type"],
-                                    "properties": { "type": { "const": "narrator_proxy" } },
-                                    "additionalProperties": false
-                                },
-                                {
-                                    "type": "object",
-                                    "required": ["type"],
-                                    "properties": { "type": { "const": "rules" } },
-                                    "additionalProperties": false
-                                },
-                                {
-                                    "type": "object",
-                                    "required": ["type", "profile_id"],
-                                    "properties": {
-                                        "type": { "const": "agent" },
-                                        "profile_id": { "type": "string" }
-                                    },
-                                    "additionalProperties": false
-                                }
-                            ]
-                        },
-                        "assignment": {
-                            "type": "object",
-                            "required": ["text", "revision"],
-                            "properties": {
-                                "text": { "type": "string", "maxLength": 4096 },
-                                "revision": { "type": "integer", "minimum": 0 }
-                            },
-                            "additionalProperties": false
+                        "mode": {
+                            "type": "string",
+                            "enum": ["narrated", "agent"]
                         }
                     },
                     "additionalProperties": false
@@ -1328,10 +1384,10 @@ impl ToolExecutor for RuntimeToolExecutor {
                         .map(committed_json),
                     _ => Err(RuntimeError::InvalidInput),
                 },
-                "materialize_npc" => {
+                "create_npc" => {
                     if !runtime
                         .capabilities
-                        .contains(NARRATOR_MATERIALIZE_NPC_CAPABILITY)
+                        .contains(NARRATOR_CREATE_NPC_CAPABILITY)
                         || self.service.player_actor().await != runtime.actor_id
                     {
                         Err(RuntimeError::CapabilityDenied)
@@ -1340,28 +1396,101 @@ impl ToolExecutor for RuntimeToolExecutor {
                     } else if self.pending_scene_transition.lock().await.is_some() {
                         Err(RuntimeError::InvalidInput)
                     } else {
-                        match serde_json::from_value::<NarratorNpcDecision>(call.arguments.clone())
-                        {
-                            Ok(decision) => match decision.validate() {
-                                Ok(()) => {
-                                    let requires_replanning = decision.requires_materialization();
-                                    self.pending_npc_decisions.lock().await.push(
-                                        PendingNpcDecision {
-                                            call_id: call.id.as_str().to_owned(),
-                                            revision: runtime.revision,
-                                            decision,
-                                        },
-                                    );
-                                    Ok(json!({
-                                        "status": "accepted_pending",
-                                        "revision": runtime.revision,
-                                        "requires_replanning_after_materialization": requires_replanning
-                                    }))
+                        async {
+                            let request =
+                                serde_json::from_value::<CreateNpcRequest>(call.arguments.clone())
+                                    .map_err(|_| RuntimeError::InvalidInput)?;
+                            let (scene_id, place_id) = self
+                                .service
+                                .npc_creation_location(runtime.actor_id, runtime.revision)
+                                .await?;
+                            let action = match request.mode {
+                                NpcCreationMode::Narrated => {
+                                    NpcNarrativeAction::MaterializeLightweight
                                 }
-                                Err(error) => Err(RuntimeError::Agent(error)),
-                            },
-                            Err(_) => Err(RuntimeError::InvalidInput),
+                                NpcCreationMode::Agent => NpcNarrativeAction::RequestNpcTurn,
+                            };
+                            let (target, controller) = match request.source {
+                                NpcCreationSource::Preset { character_id } => {
+                                    let controller = match request.mode {
+                                        NpcCreationMode::Narrated => {
+                                            NpcControllerKind::NarratorProxy
+                                        }
+                                        NpcCreationMode::Agent => NpcControllerKind::Agent(
+                                            self.service
+                                                .preset_agent_profile(&character_id)
+                                                .await?,
+                                        ),
+                                    };
+                                    (
+                                        NpcTarget::Preset {
+                                            character_id,
+                                            place_id,
+                                        },
+                                        controller,
+                                    )
+                                }
+                                NpcCreationSource::Generated { role, purpose } => {
+                                    let policy = self
+                                        .generation_policy
+                                        .as_ref()
+                                        .ok_or(RuntimeError::Unavailable)?;
+                                    let controller = match request.mode {
+                                        NpcCreationMode::Narrated => {
+                                            NpcControllerKind::NarratorProxy
+                                        }
+                                        NpcCreationMode::Agent => {
+                                            let profile_id = policy
+                                                .allowed_agent_profiles
+                                                .iter()
+                                                .next()
+                                                .filter(|_| {
+                                                    policy.allowed_agent_profiles.len() == 1
+                                                })
+                                                .cloned()
+                                                .ok_or(RuntimeError::Unavailable)?;
+                                            NpcControllerKind::Agent(profile_id)
+                                        }
+                                    };
+                                    (
+                                        NpcTarget::Generated {
+                                            generation_policy_id: policy.id.clone(),
+                                            place_id,
+                                            request: NpcGenerationRequest {
+                                                scene_id,
+                                                role,
+                                                purpose,
+                                                desired_traits: BTreeSet::new(),
+                                                importance: NarrativeImportance::Supporting,
+                                            },
+                                        },
+                                        controller,
+                                    )
+                                }
+                            };
+                            let decision = NarratorNpcDecision {
+                                target,
+                                action,
+                                lifetime: request.lifetime,
+                                controller,
+                                assignment: None,
+                            };
+                            decision.validate()?;
+                            self.pending_npc_decisions
+                                .lock()
+                                .await
+                                .push(PendingNpcDecision {
+                                    call_id: call.id.as_str().to_owned(),
+                                    revision: runtime.revision,
+                                    decision,
+                                });
+                            Ok::<JsonValue, RuntimeError>(json!({
+                                "status": "accepted_pending",
+                                "revision": runtime.revision,
+                                "requires_replanning_after_materialization": true
+                            }))
                         }
+                        .await
                     }
                 }
                 "request_npc_turn" => {
@@ -1376,44 +1505,36 @@ impl ToolExecutor for RuntimeToolExecutor {
                     } else if self.pending_scene_transition.lock().await.is_some() {
                         Err(RuntimeError::InvalidInput)
                     } else {
-                        match (
-                            parse_actor_id(&call.arguments, "actor_id"),
-                            parse_object_id(&call.arguments, "scene_id"),
-                            call.arguments.get("assignment").and_then(JsonValue::as_str),
-                        ) {
-                            (Ok(actor_id), Ok(scene_id), Some(assignment)) => {
-                                match AssignmentText::new(assignment) {
-                                    Ok(assignment) => {
-                                        let request_id = match NpcTurnRequestId::generate_with(
-                                            &mut *self.request_ids.lock().await,
-                                        ) {
-                                            Ok(request_id) => request_id,
-                                            Err(error) => {
-                                                return Ok(tool_result(
-                                                    &call,
-                                                    json!({ "code": RuntimeError::from(error).code() }),
-                                                    true,
-                                                ));
-                                            }
-                                        };
-                                        self.pending_npc_turns.lock().await.push(NpcTurnRequest {
-                                            request_id,
-                                            actor_id,
-                                            scene_id,
-                                            based_on_revision: runtime.revision,
-                                            assignment,
-                                        });
-                                        Ok(json!({
-                                            "status": "accepted_pending",
-                                            "request_id": request_id,
-                                            "revision": runtime.revision
-                                        }))
-                                    }
-                                    Err(_) => Err(RuntimeError::InvalidInput),
-                                }
-                            }
-                            _ => Err(RuntimeError::InvalidInput),
+                        async {
+                            let request = serde_json::from_value::<NpcTurnToolRequest>(
+                                call.arguments.clone(),
+                            )
+                            .map_err(|_| RuntimeError::InvalidInput)?;
+                            let scene_id = self
+                                .service
+                                .npc_turn_scene(
+                                    runtime.actor_id,
+                                    request.actor_id,
+                                    runtime.revision,
+                                )
+                                .await?;
+                            let request_id = NpcTurnRequestId::generate_with(
+                                &mut *self.request_ids.lock().await,
+                            )?;
+                            self.pending_npc_turns.lock().await.push(NpcTurnRequest {
+                                request_id,
+                                actor_id: request.actor_id,
+                                scene_id,
+                                based_on_revision: runtime.revision,
+                                assignment: request.assignment,
+                            });
+                            Ok::<JsonValue, RuntimeError>(json!({
+                                "status": "accepted_pending",
+                                "request_id": request_id,
+                                "revision": runtime.revision
+                            }))
                         }
+                        .await
                     }
                 }
                 "list_scene_transitions" => self.service.list_scene_transitions(runtime).await,
@@ -1853,6 +1974,7 @@ fn condition_is_diagnosed(
 fn scene_context(
     records: &[DomainRecord],
     events: &[WorldEvent],
+    registry: &DefinitionRegistry,
     actor_id: ActorId,
     revision: Revision,
 ) -> Result<SceneContext, RuntimeError> {
@@ -1892,6 +2014,16 @@ fn scene_context(
                     actor_id: other.id,
                     display_name: other.display_name.clone(),
                     controller: other.controller,
+                    npc_turn_available: other.controller == CharacterController::Agent
+                        && other.agent_binding.as_ref().is_some_and(|binding| {
+                            binding.enabled
+                                && matches!(
+                                    registry
+                                        .get(&binding.profile_id)
+                                        .map(|entry| &entry.definition),
+                                    Some(Definition::AgentProfile(_))
+                                )
+                        }),
                     life_state: other.life_state,
                     action_state: other.action_state,
                     posture: other.posture,
@@ -2394,10 +2526,6 @@ fn parse_object_id(arguments: &JsonValue, field: &str) -> Result<ObjectId, Runti
         .ok_or(RuntimeError::InvalidInput)?
         .parse()
         .map_err(RuntimeError::Identity)
-}
-
-fn parse_actor_id(arguments: &JsonValue, field: &str) -> Result<ActorId, RuntimeError> {
-    parse_object_id(arguments, field).map(ActorId::from)
 }
 
 fn parse_u32(arguments: &JsonValue, field: &str) -> Result<u32, RuntimeError> {

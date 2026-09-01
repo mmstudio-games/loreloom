@@ -8,7 +8,7 @@
  ⠋ Narrator is thinking…
  ◌ observe_scene  running
  ✓ npc_speak  done
- ! take_crown  rejected
+ ! take_crown  rejected · invalid_input
  × provider_call  failed
  i Demo ready
  ╭ Working · Esc to cancel ───────────────────╮

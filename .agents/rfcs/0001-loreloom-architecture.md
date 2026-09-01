@@ -239,7 +239,8 @@ Revision 冲突策略设计。
 - 自然语言 `PlayerInput` 只进入主 `NarratorAgent`。Narrator 观察当前 Scene、已提交
   WorldEvent 和玩家输入，通过 Provider 原生 Tool Calling 请求结构化编排或世界操作，并以自然
   语言正文提供最终叙事；Runtime 不解析模型正文中的 JSON 或其它控制协议；
-- Runtime 按已接受 `request_npc_turn` ToolCall 的顺序构造内部 `NarratorPlan`。它决定 NPC 是否
+- Runtime 按已接受 `request_npc_turn { actor_id, assignment }` ToolCall 的顺序构造内部
+  `NarratorPlan`。Scene、Revision 与 request identity 由 Runtime 注入；它决定 NPC 是否
   需要独立 Turn、需要哪些 NPC 以及语义执行顺序；Runtime 不再实现叙事优先级、公平性或“重要
   NPC”判断；
 - `NarratorAgent` 不在 Tool Handler 内同步创建或递归执行另一个模型。Runtime 依次校验请求中的
@@ -289,19 +290,21 @@ Content Pack 至少包含 Character/Scene Definition 以及它们引用的 Agent
 Content Definition ID 与运行 ObjectId 必须分离。预设实例记录
 `ContentOrigin { pack_id, definition_id, version }`，存档固定或迁移相应 content version。
 
-运行时生成由 Narrator 提交受限 `NpcGenerationRequest`，生成器只产生 `NpcDraft`。Draft 不是
-World Fact；Content 层必须先校验 Definition 引用和静态约束，Runtime 校验 Capability、数量与
+运行时生成由 Narrator 通过 `create_npc` 提交受限角色意图，Runtime 从根世界解析默认
+GenerationPolicy、当前 Scene/Place 和生成用 AgentProfile，再构造内部 `NpcGenerationRequest`；
+生成器只产生 `NpcDraft`。Draft 不是 World Fact；Content 层必须先校验 Definition 引用和静态约束，Runtime 校验 Capability、数量与
 模型预算，NpcFactory 再结合当前世界校验属性预算、初始物品/技能/Condition、Scene 和领域
 不变量，最后转换为与预设内容相同的 `CharacterSpawnSpec -> SpawnNpcCommand`。生成成功后保存
 完整领域状态和 `GeneratedOrigin`，加载时不得重新调用模型生成。
 
-NarratorAgent 拥有 NPC 的叙事分级与调度决定。它可以根据玩家输入和 SceneContext 输出结构化
-`NarratorNpcDecision`，至少表达：
+NarratorAgent 拥有 NPC 的叙事分级与调度决定，但模型侧不直接操作物化状态机。Narrator 只使用：
 
-- MentionOnly、MaterializeLightweight 或 RequestNpcTurn；
-- Beat、Scene 或 Persistent lifetime；
-- NarratorProxy、Rules 或独立 Agent controller；
-- 目标 NPC/角色、叙事原因和可选 NpcAssignment。
+- `create_npc`：选择 Preset/Generated source、Scene/Persistent lifetime 与 narrated/agent mode；
+- `request_npc_turn`：对 Observation 中标记为可调度的 committed ActorId 提供自然语言 assignment。
+
+纯叙事提及不调用 Tool。`create_npc` 不接受 SceneId、PlaceId、GenerationPolicyId、AgentProfileId、
+Revision 或 assignment；`request_npc_turn` 不接受 SceneId 或 Revision。上述字段由 Runtime 根据当前
+World、ToolContext、Character Definition 与根世界默认 GenerationPolicy 注入。
 
 Runtime 不用硬编码自然语言规则重新判断 NPC 是否“重要”，也不因为玩家出现“交互”关键词就
 强制 Agent 化。玩家明确与某个角色交互时，Narrator 可以根据所需独立人格、记忆和决策深度
@@ -309,6 +312,8 @@ Runtime 不用硬编码自然语言规则重新判断 NPC 是否“重要”，�
 
 Runtime 只承担可信执行：
 
+- 在 Scene Observation 中明确投影 `npc_turn_available`；同一 Revision 中，使用该投影 ActorId 的
+  `request_npc_turn` 不得再因未向模型披露的条件被拒绝；
 - 验证 Schema、目标、Scene membership、Revision、Capability、数量和模型预算；
 - 限制 Narrator 不能选择任意 Provider、原始 Component 或越权 Agent Profile；
 - 在角色获得物品、建立关系/知识/目标、成为持久 Event 引用或被安排复现前，强制先完成实体化
@@ -857,8 +862,7 @@ LLM 输出本身不被宣称为确定性。Loreloom 的可回放承诺应是：
 11. 物品堆叠的等价比较、拆分 ID 和容量/重量单位如何精确表示？
 12. Skill Executor 第一阶段允许哪些数据驱动效果，哪些必须注册 Native System？
 13. Content Pack、Character/Scene Definition、SpawnSpec 和 Origin 的精确 Schema 是什么？
-14. NarratorNpcDecision 的 Materialization/Lifetime/Controller 枚举、Scene 清理和 promotion
-    条件如何冻结？
+14. `create_npc` 的 source/lifetime/mode、内部物化状态、Scene 清理和 promotion 条件如何冻结？
 15. Attribute 数值类型、ID 注册、Modifier 优先级与 Multiplication/Override 语义是什么？
 16. Resource maximum 变化时 current 使用 clamp、比例缩放还是 Definition 自定义策略？
 17. Condition Stack/Duration/Executor、症状投影与 Life/Action/Posture 状态机的精确 Schema
@@ -1015,3 +1019,16 @@ workspace 脚手架、版本工具配置与 P0 Spike。
 的早期表达，但不改变 Narrator 的编排所有权、NpcTurnRequest 的语义顺序、单一 Agent 执行槽、
 Tool 权威边界、两级预算或 World Clock 等既有核心决定。持续约束实现的精确契约以 Active Runtime
 Spec 为准。
+
+### 16.7 Narrator NPC Tool 面压平记录
+
+项目方于 2026-09-01 确认现有 `NarratorNpcDecision` 交叉组合对模型暴露了过多 Runtime 内部状态，
+并接受把模型侧接口压平为 `create_npc` 与 `request_npc_turn`：前者只表达 Preset/Generated source、
+Scene/Persistent lifetime 和 narrated/agent mode，后者只接受 Observation 中 committed ActorId 与
+自然语言 assignment。Scene、Place、Revision、GenerationPolicy、AgentProfile、request identity 与
+队列位置均由 Runtime 注入。
+
+该修订保留质量优先的物化后重规划、单一 Agent 执行槽、NpcDraft Tool Calling、统一
+CharacterSpawnSpec 路径和 Narrator 编排所有权，只撤销模型直接构造 `NpcTarget × Action × Lifetime
+× Controller × Assignment` 组合的 wire。纯叙事提及不调用 Tool；Runtime 必须明确投影可调度 NPC，
+并为 TUI 保留脱敏 Tool 拒绝码。

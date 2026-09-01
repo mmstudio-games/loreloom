@@ -168,6 +168,10 @@ fn product_runner_rejects_a_known_tool_that_was_not_offered_to_the_model() {
         &outcome.tool_results[0].content[..],
         [ToolResultContent::Json { value }] if value["code"] == json!("tool_not_offered")
     ));
+    assert_eq!(
+        outcome.tool_calls[0].error_code.as_deref(),
+        Some("tool_not_offered")
+    );
 }
 
 #[test]

@@ -139,7 +139,7 @@ fn snapshot() -> UiSnapshot {
         tool_activity: vec![
             tool("observe_scene", ToolActivityState::Pending),
             tool("npc_speak", ToolActivityState::Succeeded),
-            tool("take_crown", ToolActivityState::Rejected),
+            tool_with_code("take_crown", ToolActivityState::Rejected, "invalid_input"),
             tool("provider_call", ToolActivityState::Failed),
         ],
         phase: RuntimePhase::Idle,
@@ -159,6 +159,14 @@ fn tool(name: &str, state: ToolActivityState) -> ToolActivity {
         call_id: format!("call-{name}"),
         name: name.to_owned(),
         state,
+        code: None,
+    }
+}
+
+fn tool_with_code(name: &str, state: ToolActivityState, code: &str) -> ToolActivity {
+    ToolActivity {
+        code: Some(code.to_owned()),
+        ..tool(name, state)
     }
 }
 
@@ -419,6 +427,7 @@ fn product_renderer_preserves_text_labels_and_distinct_tool_colors() {
     for label in ["running", "done", "rejected", "failed"] {
         assert!(text.contains(label));
     }
+    assert!(text.contains("invalid_input"));
 }
 
 #[test]

@@ -31,6 +31,7 @@ pub struct WorldManifest {
     pub initial_scene: ContentDefinitionId,
     pub inventory_root_definition: ContentDefinitionId,
     pub spawn_system_definition: ContentDefinitionId,
+    pub npc_generation_policy: ContentDefinitionId,
     pub content: Vec<String>,
     #[serde(default)]
     pub rules: Vec<String>,
@@ -192,6 +193,11 @@ fn validate_manifest(manifest: &WorldManifest) -> Result<(), WorldProjectError> 
             "spawn_system_definition",
             &manifest.spawn_system_definition,
             "system",
+        ),
+        (
+            "npc_generation_policy",
+            &manifest.npc_generation_policy,
+            "generation_policy",
         ),
     ] {
         if id
@@ -360,6 +366,7 @@ content_schema = 1
 initial_scene = "games.loreloom.test-world:scene/start"
 inventory_root_definition = "games.loreloom.test-world:item/inventory"
 spawn_system_definition = "games.loreloom.test-world:system/spawn"
+npc_generation_policy = "games.loreloom.test-world:generation_policy/default"
 content = ["content/world.json"]
 rules = []
 resources = []

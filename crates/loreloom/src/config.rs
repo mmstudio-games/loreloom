@@ -1,17 +1,10 @@
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    net::IpAddr,
-    path::Path,
-    sync::Arc,
-    time::Duration,
-};
+use std::{collections::BTreeSet, net::IpAddr, path::Path, sync::Arc, time::Duration};
 
 use armillae_llm::{
     BridgeConfig, BridgeFactory, BridgeResolveContext, CredentialRef, EndpointPolicy, LlmBridge,
 };
 use armillae_llm_rig::RigBridgeFactory;
 use loreloom_agent::ResourceBudget;
-use loreloom_content::GenerationPolicy;
 use loreloom_runtime::{
     ContextProjectionPolicy, NpcResourcePolicy, OrchestrationBudget, RuntimeConfig,
 };
@@ -40,8 +33,6 @@ pub struct ProductConfig {
     orchestration_budget: OrchestrationConfig,
     #[serde(default)]
     npc_resources: NpcResourceConfig,
-    #[serde(default)]
-    generation_policies: Vec<GenerationPolicy>,
     #[serde(default)]
     context_projection: ContextProjectionPolicy,
     #[serde(default)]
@@ -194,11 +185,7 @@ impl ProductConfig {
                     },
                     narrator_capabilities: self.narrator_capabilities,
                     npc_resources: self.npc_resources.into(),
-                    generation_policies: self
-                        .generation_policies
-                        .into_iter()
-                        .map(|policy| (policy.id.clone(), policy))
-                        .collect::<BTreeMap<_, _>>(),
+                    generation_policy: None,
                     context_projection: self.context_projection,
                 },
                 rules: self.rule_limits.into(),
@@ -222,14 +209,6 @@ impl ProductConfig {
         };
         self.narrator.validate(Some(&policy))?;
         self.npc.validate(Some(&policy))?;
-        let mut generation_policy_ids = BTreeSet::new();
-        if self
-            .generation_policies
-            .iter()
-            .any(|policy| !generation_policy_ids.insert(policy.id.clone()))
-        {
-            return Err(AppError::ConfigPolicy("duplicate generation policy"));
-        }
         self.context_projection
             .validate()
             .map_err(AppError::ConfigPolicy)?;

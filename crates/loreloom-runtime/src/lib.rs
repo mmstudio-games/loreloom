@@ -7,9 +7,9 @@ mod runtime;
 mod world_service;
 
 pub use config::{
-    ContextProjectionPolicy, NARRATOR_MATERIALIZE_NPC_CAPABILITY,
-    NARRATOR_REQUEST_NPC_TURN_CAPABILITY, NARRATOR_SUBMIT_NPC_DRAFT_CAPABILITY,
-    NARRATOR_TRANSITION_SCENE_CAPABILITY, NpcResourcePolicy, OrchestrationBudget, RuntimeConfig,
+    ContextProjectionPolicy, NARRATOR_CREATE_NPC_CAPABILITY, NARRATOR_REQUEST_NPC_TURN_CAPABILITY,
+    NARRATOR_SUBMIT_NPC_DRAFT_CAPABILITY, NARRATOR_TRANSITION_SCENE_CAPABILITY, NpcResourcePolicy,
+    OrchestrationBudget, RuntimeConfig,
 };
 pub use error::RuntimeError;
 pub use runtime::{GameRuntime, PlayerTurnOutcome};

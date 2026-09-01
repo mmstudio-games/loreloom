@@ -22,6 +22,8 @@ pub enum AppError {
     ConfigCodec,
     #[error("application configuration is invalid: {0}")]
     ConfigPolicy(&'static str),
+    #[error("world configuration is invalid: {0}")]
+    WorldPolicy(&'static str),
     #[error("provider setup failed: {0}")]
     Provider(ModelFailureDiagnostic),
     #[error(transparent)]

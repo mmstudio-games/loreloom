@@ -730,6 +730,9 @@ fn validate_local_values(definition: &Definition) -> Result<(), ContentError> {
         }
         Definition::Skill(value) => validate_skill(value).map_err(invalid),
         Definition::Character(value) => validate_character(value).map_err(invalid),
+        Definition::GenerationPolicy(value) if value.allowed_agent_profiles.len() != 1 => {
+            Err(invalid("generation_policy.agent_profile"))
+        }
         Definition::RelationshipKind(value) if value.minimum > value.maximum => {
             Err(invalid("relationship_kind.range"))
         }
@@ -989,6 +992,27 @@ fn validate_references(
             }
             Definition::Character(value) => {
                 validate_character_references(definitions, owner, value)?;
+            }
+            Definition::GenerationPolicy(value) => {
+                for profile in &value.allowed_agent_profiles {
+                    require_kind(definitions, owner, profile, "agent_profile")?;
+                }
+                for attribute in value
+                    .constraints
+                    .minimum_attributes
+                    .keys()
+                    .chain(value.constraints.maximum_attributes.keys())
+                {
+                    require_kind(definitions, owner, attribute, "attribute")?;
+                }
+                for definition in &value.constraints.allowed_definitions {
+                    if !definitions.contains_key(definition) {
+                        return Err(ContentError::InvalidValue {
+                            id: owner.clone(),
+                            field: "generation_policy.allowed_definitions",
+                        });
+                    }
+                }
             }
             Definition::Place(value) => {
                 for tag in &value.tags {

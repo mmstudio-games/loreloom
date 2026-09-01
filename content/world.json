@@ -11,6 +11,30 @@
       "autonomy": "directed"
     },
     {
+      "type": "agent_profile",
+      "id": "games.loreloom.rainbound-inn:agent_profile/generated",
+      "display_name": "动态角色",
+      "system_style": "完整扮演当前生成角色，只依据角色上下文、当前场景、已知事实和叙事者任务行动与回应。",
+      "model_alias": "loreloom-npc",
+      "tool_capabilities": ["advance_time"],
+      "autonomy": "directed"
+    },
+    {
+      "type": "generation_policy",
+      "id": "games.loreloom.rainbound-inn:generation_policy/default",
+      "constraints": {
+        "minimum_attributes": {},
+        "maximum_attributes": {},
+        "maximum_attribute_points": 0,
+        "maximum_items": 0,
+        "maximum_skills": 0,
+        "allowed_definitions": []
+      },
+      "allowed_agent_profiles": [
+        "games.loreloom.rainbound-inn:agent_profile/generated"
+      ]
+    },
+    {
       "type": "attribute",
       "id": "games.loreloom.rainbound-inn:attribute/resolve",
       "display_name": "意志",

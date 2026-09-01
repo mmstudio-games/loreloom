@@ -21,6 +21,7 @@ pub struct ContentDocument {
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Definition {
     AgentProfile(AgentProfileDefinition),
+    GenerationPolicy(GenerationPolicy),
     Tag(TagDefinition),
     RelationshipKind(RelationshipKindDefinition),
     Attribute(AttributeDefinition),
@@ -43,6 +44,7 @@ impl Definition {
     pub fn id(&self) -> &ContentDefinitionId {
         match self {
             Self::AgentProfile(value) => &value.id,
+            Self::GenerationPolicy(value) => &value.id,
             Self::Tag(value) => &value.id,
             Self::RelationshipKind(value) => &value.id,
             Self::Attribute(value) => &value.id,
@@ -65,6 +67,7 @@ impl Definition {
     pub const fn expected_kind(&self) -> &'static str {
         match self {
             Self::AgentProfile(_) => "agent_profile",
+            Self::GenerationPolicy(_) => "generation_policy",
             Self::Tag(_) => "tag",
             Self::RelationshipKind(_) => "relationship_kind",
             Self::Attribute(_) => "attribute",
