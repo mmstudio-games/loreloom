@@ -16,16 +16,16 @@ use loreloom_content::{
     NpcDraft, ParameterVisibility, PredicateDefinition, SceneSpawnPlan,
 };
 use loreloom_core::{
-    ActionId, ActiveEventView, ActorId, AttributeAdjustment, AttributeOperation, AttributeView,
-    CharacterContext, CharacterController, CharacterLifetime, CharacterSpawnSpec, ConditionRecord,
-    ConditionView, ContentDefinitionId, DIAGNOSED_CONDITION_PREDICATE_ID, DisplayName,
-    DomainRecord, EventId, EventOptionView, FactSubject, FactValue, GeneratedOrigin, InventoryView,
-    KnowledgeStatus, LongText, ModLock, NpcTurnRequestId, ObjectId, ParameterSetView,
-    ParameterValue, ParameterValueView, ResourceView, Revision, RuntimePhase, SAVE_FORMAT_V1,
-    SaveId, SaveManifest, SceneContext, SceneObservation, SceneRecord, SceneTransitionTarget,
-    SessionId, ShortText, SkillTargetRef, SkillView, SystemIdGenerator, ToolActivity,
-    TranscriptWindow, UiNotice, UiSnapshot, VisibleActorView, WorldCommand, WorldCommandKind,
-    WorldEvent, WorldEventKind, WorldLock,
+    ActionId, ActiveEventView, ActorId, AdjacentPlaceView, AttributeAdjustment, AttributeOperation,
+    AttributeView, CharacterContext, CharacterController, CharacterLifetime, CharacterSpawnSpec,
+    ConditionRecord, ConditionView, ContentDefinitionId, DIAGNOSED_CONDITION_PREDICATE_ID,
+    DisplayName, DomainRecord, EventId, EventOptionView, FactSubject, FactValue, GeneratedOrigin,
+    InventoryView, KnowledgeStatus, LongText, ModLock, NpcTurnRequestId, ObjectId,
+    ParameterSetView, ParameterValue, ParameterValueView, ResourceView, Revision, RuntimePhase,
+    SAVE_FORMAT_V1, SaveId, SaveManifest, SceneContext, SceneObservation, SceneRecord,
+    SceneTransitionTarget, SessionId, ShortText, SkillTargetRef, SkillView, SystemIdGenerator,
+    ToolActivity, TranscriptWindow, UiNotice, UiSnapshot, VisibleActorView, WorldCommand,
+    WorldCommandKind, WorldEvent, WorldEventKind, WorldLock,
 };
 use loreloom_store::{ActionResolution, CommitRequest, CommitResult, CommittedAction, SaveStore};
 use loreloom_world::{GameWorld, WorldBootstrap, WorldConfig};
@@ -33,7 +33,8 @@ use serde_json::{Value as JsonValue, json};
 use tokio::sync::Mutex;
 
 use crate::{
-    NARRATOR_CREATE_NPC_CAPABILITY, NARRATOR_REQUEST_NPC_TURN_CAPABILITY,
+    NARRATOR_CREATE_NPC_CAPABILITY, NARRATOR_CREATE_PLACE_CAPABILITY,
+    NARRATOR_CREATE_SCENE_CAPABILITY, NARRATOR_REQUEST_NPC_TURN_CAPABILITY,
     NARRATOR_SUBMIT_NPC_DRAFT_CAPABILITY, NARRATOR_TRANSITION_SCENE_CAPABILITY, RuntimeError,
 };
 
@@ -161,10 +162,6 @@ impl WorldService {
 
     pub async fn player_actor(&self) -> ActorId {
         self.inner.lock().await.world.world_state().player_actor
-    }
-
-    pub(crate) async fn active_scene(&self) -> ObjectId {
-        self.inner.lock().await.world.world_state().active_scene
     }
 
     pub async fn agent_profile(
@@ -788,7 +785,7 @@ impl WorldService {
             "revision": context.revision,
             "current": {
                 "scene_id": projection.current.id,
-                "scene_definition_id": projection.current.origin.definition_id,
+                "scene_definition_id": projection.current.origin.content().map(|origin| &origin.definition_id),
                 "display_name": projection.current.display_name,
                 "framing": projection.current.framing,
             },
@@ -908,7 +905,7 @@ pub struct RuntimeToolExecutor {
     pending_npc_decisions: Mutex<Vec<PendingNpcDecision>>,
     pending_npc_turns: Mutex<Vec<NpcTurnRequest>>,
     pending_npc_drafts: Mutex<Vec<NpcDraft>>,
-    pending_scene_transition: Mutex<Option<PendingSceneTransition>>,
+    pending_topology: Mutex<Option<PendingTopologyRequest>>,
     request_ids: Mutex<SystemIdGenerator>,
 }
 
@@ -920,10 +917,27 @@ pub(crate) struct PendingNpcDecision {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct PendingSceneTransition {
+pub(crate) struct PendingTopologyRequest {
     pub call_id: String,
     pub revision: Revision,
-    pub target: SceneTransitionTarget,
+    pub kind: PendingTopologyKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PendingTopologyKind {
+    Transition {
+        target: SceneTransitionTarget,
+    },
+    CreateScene {
+        display_name: DisplayName,
+        framing: ShortText,
+        entry_place_name: DisplayName,
+        entry_place_description: ShortText,
+    },
+    CreatePlace {
+        display_name: DisplayName,
+        description: ShortText,
+    },
 }
 
 #[derive(serde::Deserialize)]
@@ -931,6 +945,22 @@ pub(crate) struct PendingSceneTransition {
 struct NpcTurnToolRequest {
     actor_id: ActorId,
     assignment: AssignmentText,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CreateSceneToolRequest {
+    display_name: DisplayName,
+    framing: ShortText,
+    entry_place_name: DisplayName,
+    entry_place_description: ShortText,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CreatePlaceToolRequest {
+    display_name: DisplayName,
+    description: ShortText,
 }
 
 impl RuntimeToolExecutor {
@@ -950,7 +980,7 @@ impl RuntimeToolExecutor {
             pending_npc_decisions: Mutex::new(Vec::new()),
             pending_npc_turns: Mutex::new(Vec::new()),
             pending_npc_drafts: Mutex::new(Vec::new()),
-            pending_scene_transition: Mutex::new(None),
+            pending_topology: Mutex::new(None),
             request_ids: Mutex::new(SystemIdGenerator),
         }
     }
@@ -967,8 +997,41 @@ impl RuntimeToolExecutor {
         std::mem::take(&mut *self.pending_npc_drafts.lock().await)
     }
 
-    pub(crate) async fn take_pending_scene_transition(&self) -> Option<PendingSceneTransition> {
-        self.pending_scene_transition.lock().await.take()
+    pub(crate) async fn take_pending_topology(&self) -> Option<PendingTopologyRequest> {
+        self.pending_topology.lock().await.take()
+    }
+
+    async fn queue_topology(
+        &self,
+        call_id: &str,
+        revision: Revision,
+        kind: PendingTopologyKind,
+    ) -> Result<JsonValue, RuntimeError> {
+        if !self.pending_npc_decisions.lock().await.is_empty()
+            || !self.pending_npc_turns.lock().await.is_empty()
+        {
+            return Err(RuntimeError::WorldTopologyConflict);
+        }
+        let mut pending = self.pending_topology.lock().await;
+        match pending.as_ref() {
+            Some(existing) if existing.kind == kind => Ok(json!({
+                "status": "accepted_pending",
+                "revision": revision,
+                "duplicate": true
+            })),
+            Some(_) => Err(RuntimeError::WorldTopologyConflict),
+            None => {
+                *pending = Some(PendingTopologyRequest {
+                    call_id: call_id.to_owned(),
+                    revision,
+                    kind,
+                });
+                Ok(json!({
+                    "status": "accepted_pending",
+                    "revision": revision
+                }))
+            }
+        }
     }
 }
 
@@ -1215,6 +1278,39 @@ impl ToolExecutor for RuntimeToolExecutor {
                 }),
             },
             ToolDefinition {
+                name: "create_scene".to_owned(),
+                description: "Create a persistent inactive scene and its entry place after this narrator turn. The runtime supplies IDs and provenance; replan before transitioning.".to_owned(),
+                input_schema: json!({
+                    "type": "object",
+                    "required": [
+                        "display_name",
+                        "framing",
+                        "entry_place_name",
+                        "entry_place_description"
+                    ],
+                    "properties": {
+                        "display_name": { "type": "string", "maxLength": 256 },
+                        "framing": { "type": "string", "maxLength": 4096 },
+                        "entry_place_name": { "type": "string", "maxLength": 256 },
+                        "entry_place_description": { "type": "string", "maxLength": 4096 }
+                    },
+                    "additionalProperties": false
+                }),
+            },
+            ToolDefinition {
+                name: "create_place".to_owned(),
+                description: "Create a persistent place in the active scene after this narrator turn. The runtime connects it to the current place and supplies IDs and provenance; replan before moving.".to_owned(),
+                input_schema: json!({
+                    "type": "object",
+                    "required": ["display_name", "description"],
+                    "properties": {
+                        "display_name": { "type": "string", "maxLength": 256 },
+                        "description": { "type": "string", "maxLength": 4096 }
+                    },
+                    "additionalProperties": false
+                }),
+            },
+            ToolDefinition {
                 name: "create_npc".to_owned(),
                 description: "Create a preset or generated NPC in the current place after this narrator turn. Planning restarts with the committed actor; request its turn separately only after it appears in observation.".to_owned(),
                 input_schema: json!({
@@ -1389,6 +1485,64 @@ impl ToolExecutor for RuntimeToolExecutor {
                         .map(committed_json),
                     _ => Err(RuntimeError::InvalidInput),
                 },
+                "create_scene" => {
+                    if !runtime
+                        .capabilities
+                        .contains(NARRATOR_CREATE_SCENE_CAPABILITY)
+                        || self.service.player_actor().await != runtime.actor_id
+                    {
+                        Err(RuntimeError::CapabilityDenied)
+                    } else if self.service.revision().await != runtime.revision {
+                        Err(RuntimeError::Unavailable)
+                    } else {
+                        match serde_json::from_value::<CreateSceneToolRequest>(
+                            call.arguments.clone(),
+                        ) {
+                            Ok(request) => {
+                                self.queue_topology(
+                                    call.id.as_str(),
+                                    runtime.revision,
+                                    PendingTopologyKind::CreateScene {
+                                        display_name: request.display_name,
+                                        framing: request.framing,
+                                        entry_place_name: request.entry_place_name,
+                                        entry_place_description: request.entry_place_description,
+                                    },
+                                )
+                                .await
+                            }
+                            Err(_) => Err(RuntimeError::InvalidInput),
+                        }
+                    }
+                }
+                "create_place" => {
+                    if !runtime
+                        .capabilities
+                        .contains(NARRATOR_CREATE_PLACE_CAPABILITY)
+                        || self.service.player_actor().await != runtime.actor_id
+                    {
+                        Err(RuntimeError::CapabilityDenied)
+                    } else if self.service.revision().await != runtime.revision {
+                        Err(RuntimeError::Unavailable)
+                    } else {
+                        match serde_json::from_value::<CreatePlaceToolRequest>(
+                            call.arguments.clone(),
+                        ) {
+                            Ok(request) => {
+                                self.queue_topology(
+                                    call.id.as_str(),
+                                    runtime.revision,
+                                    PendingTopologyKind::CreatePlace {
+                                        display_name: request.display_name,
+                                        description: request.description,
+                                    },
+                                )
+                                .await
+                            }
+                            Err(_) => Err(RuntimeError::InvalidInput),
+                        }
+                    }
+                }
                 "create_npc" => {
                     if !runtime
                         .capabilities
@@ -1398,8 +1552,8 @@ impl ToolExecutor for RuntimeToolExecutor {
                         Err(RuntimeError::CapabilityDenied)
                     } else if self.service.revision().await != runtime.revision {
                         Err(RuntimeError::Unavailable)
-                    } else if self.pending_scene_transition.lock().await.is_some() {
-                        Err(RuntimeError::InvalidInput)
+                    } else if self.pending_topology.lock().await.is_some() {
+                        Err(RuntimeError::WorldTopologyConflict)
                     } else {
                         async {
                             let request =
@@ -1507,8 +1661,8 @@ impl ToolExecutor for RuntimeToolExecutor {
                         Err(RuntimeError::CapabilityDenied)
                     } else if self.service.revision().await != runtime.revision {
                         Err(RuntimeError::Unavailable)
-                    } else if self.pending_scene_transition.lock().await.is_some() {
-                        Err(RuntimeError::InvalidInput)
+                    } else if self.pending_topology.lock().await.is_some() {
+                        Err(RuntimeError::WorldTopologyConflict)
                     } else {
                         async {
                             let request = serde_json::from_value::<NpcTurnToolRequest>(
@@ -1552,10 +1706,6 @@ impl ToolExecutor for RuntimeToolExecutor {
                         Err(RuntimeError::CapabilityDenied)
                     } else if self.service.revision().await != runtime.revision {
                         Err(RuntimeError::Unavailable)
-                    } else if !self.pending_npc_decisions.lock().await.is_empty()
-                        || !self.pending_npc_turns.lock().await.is_empty()
-                    {
-                        Err(RuntimeError::SceneTransitionConflict)
                     } else {
                         let target = match call
                             .arguments
@@ -1577,26 +1727,12 @@ impl ToolExecutor for RuntimeToolExecutor {
                             .await
                         {
                             Ok(()) => {
-                                let mut pending = self.pending_scene_transition.lock().await;
-                                match pending.as_ref() {
-                                    Some(existing) if existing.target == target => Ok(json!({
-                                        "status": "accepted_pending",
-                                        "revision": runtime.revision,
-                                        "duplicate": true
-                                    })),
-                                    Some(_) => Err(RuntimeError::SceneTransitionConflict),
-                                    None => {
-                                        *pending = Some(PendingSceneTransition {
-                                            call_id: call.id.as_str().to_owned(),
-                                            revision: runtime.revision,
-                                            target,
-                                        });
-                                        Ok(json!({
-                                        "status": "accepted_pending",
-                                        "revision": runtime.revision
-                                        }))
-                                    }
-                                }
+                                self.queue_topology(
+                                    call.id.as_str(),
+                                    runtime.revision,
+                                    PendingTopologyKind::Transition { target },
+                                )
+                                .await
                             }
                             Err(error) => Err(error),
                         }
@@ -1663,7 +1799,12 @@ fn scene_transition_projection(
         .ok_or(RuntimeError::Unavailable)?;
     let materialized_definitions = scenes
         .iter()
-        .map(|scene| scene.origin.definition_id.clone())
+        .filter_map(|scene| {
+            scene
+                .origin
+                .content()
+                .map(|origin| origin.definition_id.clone())
+        })
         .collect::<BTreeSet<_>>();
     let mut targets = scenes
         .into_iter()
@@ -2038,6 +2179,26 @@ fn scene_context(
         })
         .collect::<Vec<_>>();
     visible_actors.sort_by_key(|actor| actor.actor_id);
+    let mut adjacent_places = place
+        .edges
+        .iter()
+        .map(|place_id| {
+            records
+                .iter()
+                .find_map(|record| match record {
+                    DomainRecord::Place(adjacent) if adjacent.id == *place_id => {
+                        Some(AdjacentPlaceView {
+                            place_id: adjacent.id,
+                            display_name: adjacent.display_name.clone(),
+                            description: adjacent.description.clone(),
+                        })
+                    }
+                    _ => None,
+                })
+                .ok_or(RuntimeError::Unavailable)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    adjacent_places.sort_by_key(|adjacent| adjacent.place_id);
     Ok(SceneContext {
         scene_id: scene.id,
         revision,
@@ -2045,6 +2206,7 @@ fn scene_context(
         framing: scene.framing.clone(),
         place_id: place.id,
         place_name: place.display_name.clone(),
+        adjacent_places,
         clock: state.clock,
         visible_actors,
         recent_events: tail(events.iter().cloned(), CONTEXT_EVENT_LIMIT),
@@ -2605,7 +2767,7 @@ fn runtime_error_json(error: &RuntimeError) -> JsonValue {
             "recovery_tool": "list_scene_transitions",
             "retry_unchanged": false,
         }),
-        RuntimeError::SceneTransitionConflict => json!({
+        RuntimeError::WorldTopologyConflict => json!({
             "code": error.code(),
             "retry_unchanged": false,
         }),

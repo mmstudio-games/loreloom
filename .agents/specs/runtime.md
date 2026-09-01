@@ -1549,7 +1549,8 @@ EntityOrigin；`PlaceRecord` 是该 Scene 内的位置节点，拥有 display na
 EntityOrigin 和 `BTreeSet<ObjectId>` 双向 edges。每个 edge 必须存在、指向 Place、属于同一 Scene、
 不能自连接，并在对端包含反向 edge。Character.location 必须指向 Place；普通 `Move` 还必须要求
 目标位于当前 Place 的 edges 中。Scene transition 直接把玩家放到目标 entry Place，不受普通 edge
-约束。
+约束。SceneContext 必须投影当前 Place 的 canonical adjacent Place ID、名称和描述，使 Agent 只需从
+当前 Observation 选择合法 `move_character` 目标，不猜测运行 ID 或遍历整个 Scene。
 
 Narrator Tool wire 固定为：
 

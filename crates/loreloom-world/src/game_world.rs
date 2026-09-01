@@ -7,16 +7,18 @@ use bevy_ecs::{entity::Entity, prelude::Resource, world::World};
 use loreloom_content::{
     CharacterCompileRequest, Definition, DefinitionRegistry, DurationPolicy, EffectDefinition,
     InitialCharacterLifetime, ItemDefinition, ParameterPersistence, ParameterType,
-    PredicateDefinition, SceneSpawnPlan, SkillKind, SkillTarget, StackPolicy, TriggerDefinition,
+    PredicateDefinition, ScenePlaceSpawnPlan, SceneSpawnPlan, SkillKind, SkillTarget, StackPolicy,
+    TriggerDefinition,
 };
 use loreloom_core::{
     ActionId, ActorId, CharacterController, CharacterLifetime, CharacterRecord, CharacterSpawnSpec,
-    ConditionRecord, ConditionSource, ContentDefinitionId, DomainRecord, EntityOrigin, EventId,
-    EventStatus, ExecutionChangeSet, Fixed, GoalRecord, GoalStatus, IdGenerator, IntensityPolicy,
-    ItemRecord, KnownFactRecord, LifeState, ObjectId, ParameterSetRecord, ParameterValue,
-    PlaceRecord, Posture, RecordKey, Revision, RuleStateRecord, SceneRecord, SceneTransitionTarget,
-    ShortText, SkillGrantRecord, SkillSource, StackState, TranscriptItemRecord, WorldCommand,
-    WorldCommandKind, WorldEvent, WorldEventKind, WorldId, WorldStateRecord, WorldTime,
+    ConditionRecord, ConditionSource, ContentDefinitionId, DisplayName, DomainRecord, EntityOrigin,
+    EventId, EventStatus, ExecutionChangeSet, Fixed, GeneratedOrigin, GoalRecord, GoalStatus,
+    IdGenerator, IntensityPolicy, ItemRecord, KnownFactRecord, LifeState, ObjectId,
+    ParameterSetRecord, ParameterValue, PlaceRecord, Posture, RecordKey, Revision, RuleStateRecord,
+    SceneRecord, SceneTransitionTarget, ShortText, SkillGrantRecord, SkillSource, StackState,
+    TranscriptItemRecord, WorldCommand, WorldCommandKind, WorldEvent, WorldEventKind, WorldId,
+    WorldStateRecord, WorldTime,
 };
 
 use crate::{
@@ -144,19 +146,25 @@ impl GameWorld {
                 framing: plan.framing.clone(),
                 entry_place,
                 active: true,
-                origin: plan.origin.clone(),
+                origin: EntityOrigin::Content {
+                    origin: plan.origin.clone(),
+                },
             }),
         ];
-        records.extend(places.into_iter().map(|place| {
-            DomainRecord::Place(PlaceRecord {
+        for place in places {
+            let edges = resolve_place_edges(&place, &place_ids, "bootstrap.place_edge")?;
+            records.push(DomainRecord::Place(PlaceRecord {
                 id: place_ids[&place.definition_id],
                 scene_id,
                 display_name: place.display_name,
                 description: place.description,
                 tags: place.tags,
-                origin: place.origin,
-            })
-        }));
+                edges,
+                origin: EntityOrigin::Content {
+                    origin: place.origin,
+                },
+            }));
+        }
         for entry in entries {
             let place_id =
                 place_ids
@@ -443,6 +451,36 @@ impl GameWorld {
             WorldCommandKind::TransitionScene { target } => {
                 self.transition_scene(actor_id, target, action_id, revision, registry, ids)?
             }
+            WorldCommandKind::CreateScene {
+                display_name,
+                framing,
+                entry_place_name,
+                entry_place_description,
+                origin,
+            } => self.create_scene(
+                actor_id,
+                display_name,
+                framing,
+                entry_place_name,
+                entry_place_description,
+                origin,
+                action_id,
+                revision,
+                ids,
+            )?,
+            WorldCommandKind::CreatePlace {
+                display_name,
+                description,
+                origin,
+            } => self.create_place(
+                actor_id,
+                display_name,
+                description,
+                origin,
+                action_id,
+                revision,
+                ids,
+            )?,
             WorldCommandKind::AppendTranscript { items } => {
                 self.append_transcripts(actor_id, items, revision)?
             }
@@ -523,8 +561,14 @@ impl GameWorld {
                 return invariant("persistent_id.index");
             }
             if let Some(scene) = self.world.get::<SceneComponent>(*entity) {
-                if !scene_definitions.insert(scene.0.origin.definition_id.clone()) {
-                    return invariant("scene.definition_single_instance");
+                match &scene.0.origin {
+                    EntityOrigin::Content { origin }
+                        if !scene_definitions.insert(origin.definition_id.clone()) =>
+                    {
+                        return invariant("scene.definition_single_instance");
+                    }
+                    EntityOrigin::System { .. } => return invariant("scene.origin"),
+                    EntityOrigin::Content { .. } | EntityOrigin::Generated { .. } => {}
                 }
                 if scene.0.active {
                     active_scenes += 1;
@@ -722,6 +766,21 @@ impl GameWorld {
                 }
             } else if let Some(value) = self.world.get::<PlaceComponent>(*entity) {
                 self.scene(value.0.scene_id)?;
+                if matches!(value.0.origin, EntityOrigin::System { .. }) {
+                    return invariant("place.origin");
+                }
+                for edge_id in &value.0.edges {
+                    if edge_id == &value.0.id {
+                        return invariant("place.edge_self");
+                    }
+                    let edge = self.place(*edge_id)?;
+                    if edge.scene_id != value.0.scene_id {
+                        return invariant("place.edge_scene");
+                    }
+                    if !edge.edges.contains(&value.0.id) {
+                        return invariant("place.edge_bidirectional");
+                    }
+                }
             } else if let Some(value) = self.world.get::<CharacterComponent>(*entity) {
                 let place = self.place(value.0.location)?;
                 let root =
@@ -935,7 +994,6 @@ impl GameWorld {
         revision: Revision,
         ids: &mut impl IdGenerator,
     ) -> Result<ChangeParts, WorldError> {
-        self.place(destination)?;
         let current = self
             .character(actor_id)
             .cloned()
@@ -946,8 +1004,16 @@ impl GameWorld {
         if from == destination {
             return domain_rule("already_at_destination");
         }
+        let source = self.place(from)?;
+        let destination_place = self.place(destination)?;
+        if !source.edges.contains(&destination) {
+            return domain_rule("places_not_connected");
+        }
+        if source.scene_id != destination_place.scene_id {
+            return invariant("place.edge_scene");
+        }
         if let CharacterLifetime::Scene { scene_id } = current.lifetime
-            && self.place(destination)?.scene_id != scene_id
+            && destination_place.scene_id != scene_id
         {
             return domain_rule("scene_lifetime_cannot_leave_scene");
         }
@@ -1591,6 +1657,134 @@ impl GameWorld {
     }
 
     #[allow(clippy::too_many_arguments)]
+    fn create_scene(
+        &mut self,
+        actor_id: ActorId,
+        display_name: DisplayName,
+        framing: ShortText,
+        entry_place_name: DisplayName,
+        entry_place_description: ShortText,
+        origin: GeneratedOrigin,
+        action_id: ActionId,
+        revision: Revision,
+        ids: &mut impl IdGenerator,
+    ) -> Result<ChangeParts, WorldError> {
+        if actor_id != self.world_state().player_actor {
+            return domain_rule("only_player_can_create_scene");
+        }
+        let scene_id = ObjectId::generate_with(ids)?;
+        let entry_place_id = ObjectId::generate_with(ids)?;
+        if self.objects.contains_key(&scene_id) || self.objects.contains_key(&entry_place_id) {
+            return Err(WorldError::DuplicateIdentity);
+        }
+        let entity_origin = EntityOrigin::Generated { origin };
+        let records = vec![
+            DomainRecord::Scene(SceneRecord {
+                id: scene_id,
+                display_name,
+                framing,
+                entry_place: entry_place_id,
+                active: false,
+                origin: entity_origin.clone(),
+            }),
+            DomainRecord::Place(PlaceRecord {
+                id: entry_place_id,
+                scene_id,
+                display_name: entry_place_name,
+                description: entry_place_description,
+                tags: BTreeSet::new(),
+                edges: BTreeSet::new(),
+                origin: entity_origin,
+            }),
+        ];
+        for record in records.iter().cloned() {
+            self.spawn_record(record)?;
+        }
+        Ok((
+            records,
+            Vec::new(),
+            vec![event(
+                ids,
+                action_id,
+                actor_id,
+                revision,
+                WorldEventKind::SceneCreated {
+                    scene_id,
+                    entry_place_id,
+                },
+            )?],
+            summary("scene created")?,
+        ))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn create_place(
+        &mut self,
+        actor_id: ActorId,
+        display_name: DisplayName,
+        description: ShortText,
+        origin: GeneratedOrigin,
+        action_id: ActionId,
+        revision: Revision,
+        ids: &mut impl IdGenerator,
+    ) -> Result<ChangeParts, WorldError> {
+        let state = self.world_state().clone();
+        if actor_id != state.player_actor {
+            return domain_rule("only_player_can_create_place");
+        }
+        let player = self
+            .character(actor_id)
+            .cloned()
+            .ok_or(WorldError::WrongObjectKind {
+                id: actor_id.object_id(),
+            })?;
+        let connected_to = player.location;
+        let current_place = self.place(connected_to)?.clone();
+        if current_place.scene_id != state.active_scene {
+            return invariant("player.active_scene_location");
+        }
+        let place_id = ObjectId::generate_with(ids)?;
+        if self.objects.contains_key(&place_id) {
+            return Err(WorldError::DuplicateIdentity);
+        }
+        let place = PlaceRecord {
+            id: place_id,
+            scene_id: state.active_scene,
+            display_name,
+            description,
+            tags: BTreeSet::new(),
+            edges: BTreeSet::from([connected_to]),
+            origin: EntityOrigin::Generated { origin },
+        };
+        let current = {
+            let entity = self.require_object(connected_to)?;
+            let mut current = self
+                .world
+                .get_mut::<PlaceComponent>(entity)
+                .ok_or(WorldError::WrongObjectKind { id: connected_to })?;
+            current.0.edges.insert(place_id);
+            current.0.clone()
+        };
+        self.spawn_record(DomainRecord::Place(place.clone()))?;
+        Ok((
+            vec![DomainRecord::Place(current), DomainRecord::Place(place)],
+            Vec::new(),
+            vec![event(
+                ids,
+                action_id,
+                actor_id,
+                revision,
+                WorldEventKind::PlaceCreated {
+                    scene_id: state.active_scene,
+                    place_id,
+                    connected_to,
+                },
+            )?],
+            summary("place created")?,
+        ))
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn transition_scene(
         &mut self,
         actor_id: ActorId,
@@ -1629,7 +1823,11 @@ impl GameWorld {
                     .filter_map(|(id, entity)| {
                         self.world
                             .get::<SceneComponent>(*entity)
-                            .filter(|scene| scene.0.origin.definition_id == scene_definition_id)
+                            .filter(|scene| {
+                                scene.0.origin.content().is_some_and(|origin| {
+                                    origin.definition_id == scene_definition_id
+                                })
+                            })
                             .map(|_| *id)
                     })
                     .collect::<Vec<_>>();
@@ -1768,18 +1966,24 @@ impl GameWorld {
             framing: plan.framing.clone(),
             entry_place,
             active: false,
-            origin: plan.origin.clone(),
+            origin: EntityOrigin::Content {
+                origin: plan.origin.clone(),
+            },
         })];
-        records.extend(places.into_iter().map(|place| {
-            DomainRecord::Place(PlaceRecord {
+        for place in places {
+            let edges = resolve_place_edges(&place, &place_ids, "scene.place_edge")?;
+            records.push(DomainRecord::Place(PlaceRecord {
                 id: place_ids[&place.definition_id],
                 scene_id,
                 display_name: place.display_name,
                 description: place.description,
                 tags: place.tags,
-                origin: place.origin,
-            })
-        }));
+                edges,
+                origin: EntityOrigin::Content {
+                    origin: place.origin,
+                },
+            }));
+        }
 
         let mut entries = plan.characters.clone();
         entries.sort_by(|left, right| left.local_key.cmp(&right.local_key));
@@ -2302,6 +2506,22 @@ fn candidate_item_tree_weight(
     }
     visited.remove(&item_id);
     Ok(total)
+}
+
+fn resolve_place_edges(
+    place: &ScenePlaceSpawnPlan,
+    place_ids: &BTreeMap<ContentDefinitionId, ObjectId>,
+    invariant_name: &'static str,
+) -> Result<BTreeSet<ObjectId>, WorldError> {
+    place
+        .edges
+        .iter()
+        .map(|edge| {
+            place_ids.get(edge).copied().ok_or(WorldError::Invariant {
+                invariant: invariant_name,
+            })
+        })
+        .collect()
 }
 
 fn object_id(record: &DomainRecord) -> Option<ObjectId> {

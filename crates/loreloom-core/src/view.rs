@@ -85,6 +85,14 @@ pub struct VisibleActorView {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct AdjacentPlaceView {
+    pub place_id: ObjectId,
+    pub display_name: DisplayName,
+    pub description: ShortText,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SceneContext {
     pub scene_id: ObjectId,
     pub revision: Revision,
@@ -92,6 +100,7 @@ pub struct SceneContext {
     pub framing: ShortText,
     pub place_id: ObjectId,
     pub place_name: DisplayName,
+    pub adjacent_places: Vec<AdjacentPlaceView>,
     pub clock: WorldTime,
     pub visible_actors: Vec<VisibleActorView>,
     pub recent_events: Vec<WorldEvent>,

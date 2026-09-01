@@ -1,4 +1,7 @@
-use std::{collections::BTreeMap, num::NonZeroU32};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    num::NonZeroU32,
+};
 
 use loreloom_content::{
     AgentProfileDefinition, CONTENT_SCHEMA_V1, CharacterDefinition, ContainerDefinition,
@@ -11,12 +14,12 @@ use loreloom_content::{
 use loreloom_core::{
     ActionId, ActionState, ActorId, BaseAttributes, CharacterController, CharacterLifetime,
     CharacterProfile, CharacterRecord, CharacterSpawnSpec, ContentDefinitionId, ContentOrigin,
-    DisplayName, DomainRecord, EntityOrigin, Fixed, ItemRecord, LifeState, ModId, ObjectId,
-    PlaceRecord, PlacementInput, Posture, ResourcePool, Revision, SceneRecord,
-    SceneTransitionTarget, ShortText, SkillGrantRecord, SkillSource, SkillTargetRef,
-    SpawnConstraints, StackState, SystemIdGenerator, TranscriptItemId, TranscriptItemRecord,
-    TranscriptSpeaker, TranscriptState, WorldCommand, WorldCommandKind, WorldEventKind, WorldId,
-    WorldStateRecord, WorldTime,
+    DisplayName, DomainRecord, EntityOrigin, Fixed, GeneratedOrigin, GenerationId,
+    GenerationSource, ItemRecord, LifeState, ModId, ObjectId, PlaceRecord, PlacementInput, Posture,
+    ResourcePool, Revision, SceneRecord, SceneTransitionTarget, ShortText, SkillGrantRecord,
+    SkillSource, SkillTargetRef, SpawnConstraints, StackState, SystemIdGenerator, TranscriptItemId,
+    TranscriptItemRecord, TranscriptSpeaker, TranscriptState, WorldCommand, WorldCommandKind,
+    WorldEventKind, WorldId, WorldStateRecord, WorldTime,
 };
 use loreloom_world::{GameWorld, WorldConfig, WorldError};
 use semver::Version;
@@ -331,7 +334,9 @@ fn fixture() -> Fixture {
             framing: text("Rain falls over the harbor."),
             entry_place: quay,
             active: true,
-            origin: origin(&scene_definition),
+            origin: EntityOrigin::Content {
+                origin: origin(&scene_definition),
+            },
         }),
         DomainRecord::Place(PlaceRecord {
             id: quay,
@@ -339,7 +344,10 @@ fn fixture() -> Fixture {
             display_name: name("Quay"),
             description: text("Wet stone."),
             tags: Default::default(),
-            origin: origin(&quay_definition),
+            edges: BTreeSet::from([inn]),
+            origin: EntityOrigin::Content {
+                origin: origin(&quay_definition),
+            },
         }),
         DomainRecord::Place(PlaceRecord {
             id: inn,
@@ -347,7 +355,10 @@ fn fixture() -> Fixture {
             display_name: name("Inn"),
             description: text("A warm common room."),
             tags: Default::default(),
-            origin: origin(&inn_definition),
+            edges: BTreeSet::from([quay]),
+            origin: EntityOrigin::Content {
+                origin: origin(&inn_definition),
+            },
         }),
         DomainRecord::Character(CharacterRecord {
             id: player,
@@ -615,6 +626,152 @@ fn rejected_scene_transition_restores_the_candidate_world() {
     assert!(matches!(error, WorldError::DomainRule { .. }));
     assert_eq!(world.revision(), Revision::ZERO);
     assert_eq!(world.project_records().expect("after records"), before);
+}
+
+#[test]
+fn generated_scene_and_place_are_atomic_connected_and_rebuildable() {
+    let fixture = fixture();
+    let mut world = GameWorld::from_records(
+        Revision::ZERO,
+        fixture.records,
+        fixture.config.clone(),
+        &fixture.registry,
+    )
+    .expect("load world");
+    let origin = || GeneratedOrigin {
+        generation_id: GenerationId::new(),
+        generator_version: text("world_topology.v1"),
+        source: GenerationSource::PlayerInput {
+            transcript_id: "trn_01890f6a-2b84-7d4e-8f90-123456789abc"
+                .parse()
+                .expect("transcript ID"),
+        },
+    };
+    let mut ids = SystemIdGenerator;
+
+    let scene_changes = world
+        .execute(
+            WorldCommand {
+                action_id: action_id("2b85"),
+                actor_id: fixture.player,
+                expected_revision: Revision::ZERO,
+                kind: WorldCommandKind::CreateScene {
+                    display_name: name("Glass Garden"),
+                    framing: text("Moonlight gathers beneath glass."),
+                    entry_place_name: name("Garden Gate"),
+                    entry_place_description: text("A silver gate opens into quiet paths."),
+                    origin: origin(),
+                },
+            },
+            &fixture.registry,
+            &mut ids,
+        )
+        .expect("create generated scene");
+    let (generated_scene, generated_entry) = scene_changes
+        .events
+        .iter()
+        .find_map(|event| match event.kind {
+            WorldEventKind::SceneCreated {
+                scene_id,
+                entry_place_id,
+            } => Some((scene_id, entry_place_id)),
+            _ => None,
+        })
+        .expect("scene creation event");
+
+    let place_changes = world
+        .execute(
+            WorldCommand {
+                action_id: action_id("2b86"),
+                actor_id: fixture.player,
+                expected_revision: Revision::new(1),
+                kind: WorldCommandKind::CreatePlace {
+                    display_name: name("Lantern Alley"),
+                    description: text("Lanterns sway above a narrow lane."),
+                    origin: origin(),
+                },
+            },
+            &fixture.registry,
+            &mut ids,
+        )
+        .expect("create connected place");
+    let generated_place = place_changes
+        .events
+        .iter()
+        .find_map(|event| match event.kind {
+            WorldEventKind::PlaceCreated {
+                place_id,
+                connected_to,
+                ..
+            } if connected_to == fixture.quay => Some(place_id),
+            _ => None,
+        })
+        .expect("place creation event");
+
+    let records = world.project_records().expect("project generated topology");
+    let scene = records
+        .iter()
+        .find_map(|record| match record {
+            DomainRecord::Scene(scene) if scene.id == generated_scene => Some(scene),
+            _ => None,
+        })
+        .expect("generated scene record");
+    assert!(!scene.active);
+    assert!(matches!(scene.origin, EntityOrigin::Generated { .. }));
+    let entry = records
+        .iter()
+        .find_map(|record| match record {
+            DomainRecord::Place(place) if place.id == generated_entry => Some(place),
+            _ => None,
+        })
+        .expect("generated entry place");
+    assert!(entry.edges.is_empty());
+    let connected = records
+        .iter()
+        .find_map(|record| match record {
+            DomainRecord::Place(place) if place.id == generated_place => Some(place),
+            _ => None,
+        })
+        .expect("generated connected place");
+    assert_eq!(connected.edges, BTreeSet::from([fixture.quay]));
+
+    let mut rebuilt =
+        GameWorld::from_records(Revision::new(2), records, fixture.config, &fixture.registry)
+            .expect("rebuild generated topology");
+    rebuilt
+        .execute(
+            WorldCommand {
+                action_id: action_id("2b87"),
+                actor_id: fixture.player,
+                expected_revision: Revision::new(2),
+                kind: WorldCommandKind::Move {
+                    destination_id: generated_place,
+                },
+            },
+            &fixture.registry,
+            &mut ids,
+        )
+        .expect("move along generated edge");
+    let error = rebuilt
+        .execute(
+            WorldCommand {
+                action_id: action_id("2b88"),
+                actor_id: fixture.player,
+                expected_revision: Revision::new(3),
+                kind: WorldCommandKind::Move {
+                    destination_id: generated_entry,
+                },
+            },
+            &fixture.registry,
+            &mut ids,
+        )
+        .expect_err("cannot move across an unconnected scene boundary");
+    assert!(matches!(
+        error,
+        WorldError::DomainRule {
+            rule: "places_not_connected"
+        }
+    ));
 }
 
 #[test]

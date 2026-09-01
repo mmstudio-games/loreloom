@@ -428,7 +428,9 @@ fn fixture() -> Fixture {
             framing: text("Rain taps on the shutters."),
             entry_place: place,
             active: true,
-            origin: origin(&scene_definition),
+            origin: EntityOrigin::Content {
+                origin: origin(&scene_definition),
+            },
         }),
         DomainRecord::Place(PlaceRecord {
             id: place,
@@ -436,7 +438,10 @@ fn fixture() -> Fixture {
             display_name: name("Hall"),
             description: text("A quiet timber hall."),
             tags: BTreeSet::new(),
-            origin: origin(&place_definition),
+            edges: BTreeSet::new(),
+            origin: EntityOrigin::Content {
+                origin: origin(&place_definition),
+            },
         }),
         character(
             player,
@@ -2100,6 +2105,130 @@ async fn narrator_scene_transition_materializes_replans_and_revisits_without_reg
             .count(),
         3
     );
+}
+
+#[tokio::test]
+async fn narrator_creates_persistent_scene_and_connected_place_then_replans() {
+    let directory = TempDir::new().expect("temporary save parent");
+    let fixture = fixture();
+    let store = SaveStore::create(
+        directory.path().join("save"),
+        fixture.manifest.clone(),
+        fixture.records.clone(),
+    )
+    .await
+    .expect("create save");
+    let service = WorldService::open(
+        store,
+        fixture.registry,
+        &fixture.manifest.world_lock,
+        &fixture.manifest.mod_lock,
+        fixture.world_config,
+    )
+    .await
+    .expect("open world service");
+    let narrator = Arc::new(MockBridge::scripted([
+        MockResponse::tool_call(
+            ToolCallId::new("create-glass-garden").expect("tool call ID"),
+            "create_scene",
+            json!({
+                "display_name": "Glass Garden",
+                "framing": "Moonlight gathers beneath glass.",
+                "entry_place_name": "Garden Gate",
+                "entry_place_description": "A silver gate opens into quiet paths."
+            }),
+        ),
+        MockResponse::text("I will establish the garden before entering it."),
+        MockResponse::text("The distant Glass Garden now waits beyond the rain."),
+        MockResponse::tool_call(
+            ToolCallId::new("create-lantern-alley").expect("tool call ID"),
+            "create_place",
+            json!({
+                "display_name": "Lantern Alley",
+                "description": "Lanterns sway above a narrow lane."
+            }),
+        ),
+        MockResponse::text("I will establish the alley before anyone moves."),
+        MockResponse::text("A lantern-lit alley now branches from the hall."),
+    ]));
+    let session_id = parse("ses_01890f6a-2b90-7d4e-8f90-123456789abc");
+    let mut runtime = GameRuntime::new(
+        Arc::clone(&service),
+        narrator,
+        narrator_definition(),
+        session_id,
+        RuntimeConfig::default(),
+    );
+
+    let scene_turn = runtime
+        .handle_player_input("There should be a glass garden beyond the inn.")
+        .await
+        .expect("create generated scene and replan");
+    assert_eq!(scene_turn.snapshot.revision, Revision::new(3));
+    assert_eq!(scene_turn.snapshot.scene.scene_id, fixture.scene);
+
+    let transition_executor = RuntimeToolExecutor::new(Arc::clone(&service));
+    let listed = transition_executor
+        .execute(
+            ToolContext::new().with_extension(AgentToolContext {
+                actor_id: fixture.player,
+                revision: Revision::new(3),
+                session_id,
+                capabilities: BTreeSet::from(["narrator.transition_scene".to_owned()]),
+            }),
+            ToolCall {
+                id: ToolCallId::new("list-generated-scene").expect("tool call ID"),
+                name: "list_scene_transitions".to_owned(),
+                arguments: json!({}),
+            },
+        )
+        .await
+        .expect("list generated scene");
+    let generated_target = tool_result_json(&listed)["targets"]
+        .as_array()
+        .expect("transition targets")
+        .iter()
+        .find(|option| option["display_name"] == json!("Glass Garden"))
+        .expect("generated scene target");
+    assert_eq!(generated_target["target"]["type"], json!("existing"));
+
+    let place_turn = runtime
+        .handle_player_input("Add a lantern alley beside this hall.")
+        .await
+        .expect("create generated place and replan");
+    assert_eq!(place_turn.snapshot.revision, Revision::new(6));
+    assert_eq!(place_turn.snapshot.scene.place_id, fixture.place);
+    assert_eq!(place_turn.snapshot.scene.adjacent_places.len(), 1);
+    let alley = place_turn.snapshot.scene.adjacent_places[0].clone();
+    assert_eq!(alley.display_name.as_str(), "Lantern Alley");
+
+    service
+        .execute(
+            &AgentToolContext {
+                actor_id: fixture.player,
+                revision: Revision::new(6),
+                session_id,
+                capabilities: BTreeSet::new(),
+            },
+            WorldCommandKind::Move {
+                destination_id: alley.place_id,
+            },
+        )
+        .await
+        .expect("move along generated place edge");
+    let moved = service
+        .snapshot(
+            session_id,
+            loreloom_core::RuntimePhase::Completed,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        )
+        .await
+        .expect("snapshot moved player");
+    assert_eq!(moved.revision, Revision::new(7));
+    assert_eq!(moved.scene.place_id, alley.place_id);
+    assert_eq!(moved.scene.adjacent_places[0].place_id, fixture.place);
 }
 
 #[tokio::test]

@@ -23,11 +23,12 @@ use serde::Serialize;
 use serde_json::json;
 
 use crate::{
-    NARRATOR_CREATE_NPC_CAPABILITY, NARRATOR_REQUEST_NPC_TURN_CAPABILITY,
+    NARRATOR_CREATE_NPC_CAPABILITY, NARRATOR_CREATE_PLACE_CAPABILITY,
+    NARRATOR_CREATE_SCENE_CAPABILITY, NARRATOR_REQUEST_NPC_TURN_CAPABILITY,
     NARRATOR_SUBMIT_NPC_DRAFT_CAPABILITY, NARRATOR_TRANSITION_SCENE_CAPABILITY,
     OrchestrationBudget, RuntimeConfig, RuntimeError, RuntimeToolExecutor, WorldService,
     context::{project_npc_context, project_observation},
-    world_service::{CharacterMaterializationRequest, PendingNpcDecision},
+    world_service::{CharacterMaterializationRequest, PendingNpcDecision, PendingTopologyKind},
 };
 
 struct NpcRegistration {
@@ -173,7 +174,7 @@ impl GameRuntime {
         let mut notices = Vec::new();
         let _ = self.executor.take_pending_npc_decisions().await;
         let _ = self.executor.take_pending_npc_turns().await;
-        let _ = self.executor.take_pending_scene_transition().await;
+        let _ = self.executor.take_pending_topology().await;
 
         let before = self
             .service
@@ -195,7 +196,7 @@ impl GameRuntime {
             .await?;
 
         let mut materialization_results = Vec::new();
-        let mut scene_transition_results = Vec::new();
+        let mut world_topology_results = Vec::new();
         let mut settled_materializations = Vec::new();
         let mut generated_attempts = 0_u32;
         loop {
@@ -217,7 +218,7 @@ impl GameRuntime {
                 json!({
                     "observation": observation,
                     "materialization_results": materialization_results,
-                    "scene_transition_results": scene_transition_results,
+                    "world_topology_results": world_topology_results,
                     "npc_results": npc_results,
                     "committed_events": self.service.events().await
                 }),
@@ -249,39 +250,78 @@ impl GameRuntime {
             )?;
             let pending = self.executor.take_pending_npc_decisions().await;
             let mut pending_turns = self.executor.take_pending_npc_turns().await;
-            let pending_transition = self.executor.take_pending_scene_transition().await;
+            let pending_topology = self.executor.take_pending_topology().await;
             let narrator_text = require_text(&narrator_turn)?;
             on_phase(RuntimePhase::ResolvingOrchestration);
-            if let Some(pending_transition) = pending_transition {
+            if let Some(pending_topology) = pending_topology {
                 let context = AgentToolContext {
                     actor_id: before.player.actor_id,
-                    revision: pending_transition.revision,
+                    revision: pending_topology.revision,
                     session_id: self.session_id,
                     capabilities: self.config.narrator_capabilities.clone(),
                 };
-                let target = pending_transition.target.clone();
-                on_phase(RuntimePhase::UpdatingWorld);
-                let result = self
-                    .service
-                    .execute(
-                        &context,
-                        WorldCommandKind::TransitionScene {
-                            target: pending_transition.target,
+                let origin = GeneratedOrigin {
+                    generation_id: GenerationId::new(),
+                    generator_version: ShortText::new("world_topology.v1")?,
+                    source: GenerationSource::PlayerInput {
+                        transcript_id: player_transcript.id,
+                    },
+                };
+                let (request, command) = match pending_topology.kind {
+                    PendingTopologyKind::Transition { target } => (
+                        json!({ "type": "transition", "target": target }),
+                        WorldCommandKind::TransitionScene { target },
+                    ),
+                    PendingTopologyKind::CreateScene {
+                        display_name,
+                        framing,
+                        entry_place_name,
+                        entry_place_description,
+                    } => (
+                        json!({ "type": "create_scene", "display_name": display_name }),
+                        WorldCommandKind::CreateScene {
+                            display_name,
+                            framing,
+                            entry_place_name,
+                            entry_place_description,
+                            origin,
                         },
-                    )
-                    .await;
+                    ),
+                    PendingTopologyKind::CreatePlace {
+                        display_name,
+                        description,
+                    } => (
+                        json!({ "type": "create_place", "display_name": display_name }),
+                        WorldCommandKind::CreatePlace {
+                            display_name,
+                            description,
+                            origin,
+                        },
+                    ),
+                };
+                on_phase(RuntimePhase::UpdatingWorld);
+                let result = self.service.execute(&context, command).await;
                 match result {
-                    Ok(committed) => scene_transition_results.push(json!({
-                        "call_id": pending_transition.call_id,
-                        "target": target,
-                        "status": "committed",
-                        "scene_id": self.service.active_scene().await,
-                        "revision": committed.revision
-                    })),
+                    Ok(committed) => {
+                        let events = self
+                            .service
+                            .events()
+                            .await
+                            .into_iter()
+                            .filter(|event| committed.event_ids.contains(&event.id))
+                            .collect::<Vec<_>>();
+                        world_topology_results.push(json!({
+                            "call_id": pending_topology.call_id,
+                            "request": request,
+                            "status": "committed",
+                            "revision": committed.revision,
+                            "events": events
+                        }));
+                    }
                     Err(error @ (RuntimeError::World(_) | RuntimeError::Content(_))) => {
-                        scene_transition_results.push(json!({
-                            "call_id": pending_transition.call_id,
-                            "target": target,
+                        world_topology_results.push(json!({
+                            "call_id": pending_topology.call_id,
+                            "request": request,
                             "status": "rejected",
                             "code": error.code(),
                             "revision": self.service.revision().await
@@ -1097,6 +1137,8 @@ fn narrator_tools(
             let authorized = match definition.name.as_str() {
                 "submit_npc_draft" => false,
                 "create_npc" => capabilities.contains(NARRATOR_CREATE_NPC_CAPABILITY),
+                "create_scene" => capabilities.contains(NARRATOR_CREATE_SCENE_CAPABILITY),
+                "create_place" => capabilities.contains(NARRATOR_CREATE_PLACE_CAPABILITY),
                 "request_npc_turn" => {
                     capabilities.contains(NARRATOR_REQUEST_NPC_TURN_CAPABILITY)
                         && !available_actor_ids.is_empty()

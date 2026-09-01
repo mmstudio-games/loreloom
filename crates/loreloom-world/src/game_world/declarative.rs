@@ -1108,16 +1108,20 @@ impl GameWorld {
                 });
             }
             WorldEventKind::SceneLeft { scene_id } => {
-                signals.push_back(RuleSignal::SceneLeft {
-                    scene_definition_id: self.scene(*scene_id)?.origin.definition_id.clone(),
-                    depth,
-                });
+                if let Some(origin) = self.scene(*scene_id)?.origin.content() {
+                    signals.push_back(RuleSignal::SceneLeft {
+                        scene_definition_id: origin.definition_id.clone(),
+                        depth,
+                    });
+                }
             }
             WorldEventKind::SceneEntered { scene_id } => {
-                signals.push_back(RuleSignal::SceneEntered {
-                    scene_definition_id: self.scene(*scene_id)?.origin.definition_id.clone(),
-                    depth,
-                });
+                if let Some(origin) = self.scene(*scene_id)?.origin.content() {
+                    signals.push_back(RuleSignal::SceneEntered {
+                        scene_definition_id: origin.definition_id.clone(),
+                        depth,
+                    });
+                }
             }
             _ => {}
         }
@@ -1173,6 +1177,8 @@ fn world_event_type(kind: &WorldEventKind) -> Result<Option<ShortText>, WorldErr
         WorldEventKind::CharacterPromoted { .. } => "character_promoted",
         WorldEventKind::SceneLeft { .. } => "scene_left",
         WorldEventKind::SceneEntered { .. } => "scene_entered",
+        WorldEventKind::SceneCreated { .. } => "scene_created",
+        WorldEventKind::PlaceCreated { .. } => "place_created",
         WorldEventKind::ConditionExpired { .. } => "condition_expired",
         WorldEventKind::ConditionTicked { .. } => "condition_ticked",
         WorldEventKind::ResourceChanged { .. } => "resource_changed",

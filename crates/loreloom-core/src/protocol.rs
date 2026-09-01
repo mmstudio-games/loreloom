@@ -3,9 +3,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    ActionId, ActorId, CharacterSpawnSpec, ContentDefinitionId, DomainError, DomainRecord, EventId,
-    Fixed, ObjectId, ParameterValue, RecordKey, RecordMutation, RecordProvenance, Revision,
-    ShortText, TranscriptItemRecord, VersionedRecordOp, WorldTime,
+    ActionId, ActorId, CharacterSpawnSpec, ContentDefinitionId, DisplayName, DomainError,
+    DomainRecord, EventId, Fixed, GeneratedOrigin, ObjectId, ParameterValue, RecordKey,
+    RecordMutation, RecordProvenance, Revision, ShortText, TranscriptItemRecord, VersionedRecordOp,
+    WorldTime,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -61,6 +62,18 @@ pub enum WorldCommandKind {
     },
     TransitionScene {
         target: SceneTransitionTarget,
+    },
+    CreateScene {
+        display_name: DisplayName,
+        framing: ShortText,
+        entry_place_name: DisplayName,
+        entry_place_description: ShortText,
+        origin: GeneratedOrigin,
+    },
+    CreatePlace {
+        display_name: DisplayName,
+        description: ShortText,
+        origin: GeneratedOrigin,
     },
     AppendTranscript {
         items: Vec<TranscriptItemRecord>,
@@ -136,6 +149,15 @@ pub enum WorldEventKind {
     },
     SceneEntered {
         scene_id: ObjectId,
+    },
+    SceneCreated {
+        scene_id: ObjectId,
+        entry_place_id: ObjectId,
+    },
+    PlaceCreated {
+        scene_id: ObjectId,
+        place_id: ObjectId,
+        connected_to: ObjectId,
     },
     ConditionExpired {
         condition_id: ObjectId,

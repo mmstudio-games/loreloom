@@ -2,6 +2,8 @@ schema_version = 1
 allowed_endpoint_hosts = []
 narrator_capabilities = [
     "narrator.create_npc",
+    "narrator.create_place",
+    "narrator.create_scene",
     "narrator.request_npc_turn",
     "narrator.transition_scene",
 ]

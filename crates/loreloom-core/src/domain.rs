@@ -104,6 +104,16 @@ pub enum EntityOrigin {
     System { source: ContentDefinitionId },
 }
 
+impl EntityOrigin {
+    #[must_use]
+    pub const fn content(&self) -> Option<&ContentOrigin> {
+        match self {
+            Self::Content { origin } => Some(origin),
+            Self::Generated { .. } | Self::System { .. } => None,
+        }
+    }
+}
+
 pub type CharacterOrigin = EntityOrigin;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -220,7 +230,7 @@ pub struct SceneRecord {
     pub framing: ShortText,
     pub entry_place: ObjectId,
     pub active: bool,
-    pub origin: ContentOrigin,
+    pub origin: EntityOrigin,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -231,7 +241,8 @@ pub struct PlaceRecord {
     pub display_name: DisplayName,
     pub description: ShortText,
     pub tags: BTreeSet<ContentDefinitionId>,
-    pub origin: ContentOrigin,
+    pub edges: BTreeSet<ObjectId>,
+    pub origin: EntityOrigin,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

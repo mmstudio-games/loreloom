@@ -5,6 +5,8 @@ use loreloom_content::GenerationPolicy;
 use serde::{Deserialize, Serialize};
 
 pub const NARRATOR_CREATE_NPC_CAPABILITY: &str = "narrator.create_npc";
+pub const NARRATOR_CREATE_PLACE_CAPABILITY: &str = "narrator.create_place";
+pub const NARRATOR_CREATE_SCENE_CAPABILITY: &str = "narrator.create_scene";
 pub const NARRATOR_REQUEST_NPC_TURN_CAPABILITY: &str = "narrator.request_npc_turn";
 pub const NARRATOR_SUBMIT_NPC_DRAFT_CAPABILITY: &str = "narrator.submit_npc_draft";
 pub const NARRATOR_TRANSITION_SCENE_CAPABILITY: &str = "narrator.transition_scene";
@@ -139,6 +141,8 @@ impl Default for RuntimeConfig {
             orchestration_budget: OrchestrationBudget::default(),
             narrator_capabilities: BTreeSet::from([
                 NARRATOR_CREATE_NPC_CAPABILITY.to_owned(),
+                NARRATOR_CREATE_PLACE_CAPABILITY.to_owned(),
+                NARRATOR_CREATE_SCENE_CAPABILITY.to_owned(),
                 NARRATOR_REQUEST_NPC_TURN_CAPABILITY.to_owned(),
                 NARRATOR_TRANSITION_SCENE_CAPABILITY.to_owned(),
             ]),

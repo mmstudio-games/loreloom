@@ -485,3 +485,65 @@ fn declarative_registry_rejects_nested_predicate_budget_and_static_emit_cycles()
         })
     ));
 }
+
+#[test]
+fn scene_compilation_preserves_only_bidirectional_in_scene_place_edges() {
+    let quay = id("place", "quay");
+    let alley = id("place", "alley");
+    let scene_id = id("scene", "harbor");
+    let document_with_edges = |bidirectional: bool| {
+        let mut document = fixture_document();
+        let quay_definition = document
+            .definitions
+            .iter_mut()
+            .find_map(|definition| match definition {
+                Definition::Place(place) if place.id == quay => Some(place),
+                _ => None,
+            })
+            .expect("quay definition");
+        quay_definition.edges.insert(alley.clone());
+        document
+            .definitions
+            .push(Definition::Place(PlaceDefinition {
+                id: alley.clone(),
+                display_name: name("Lantern Alley"),
+                description: text("Lanterns sway above a narrow lane."),
+                tags: BTreeSet::new(),
+                edges: bidirectional.then(|| quay.clone()).into_iter().collect(),
+            }));
+        let scene_definition = document
+            .definitions
+            .iter_mut()
+            .find_map(|definition| match definition {
+                Definition::Scene(scene) if scene.id == scene_id => Some(scene),
+                _ => None,
+            })
+            .expect("scene definition");
+        scene_definition.places.insert(alley.clone());
+        document
+    };
+
+    let registry = DefinitionRegistry::build(context(), [document_with_edges(true)])
+        .expect("build connected scene registry");
+    let plan = registry
+        .compile_scene(&scene_id)
+        .expect("compile connected scene");
+    assert_eq!(
+        plan.places
+            .iter()
+            .find(|place| place.definition_id == quay)
+            .expect("compiled quay")
+            .edges,
+        BTreeSet::from([alley.clone()])
+    );
+
+    let asymmetric = DefinitionRegistry::build(context(), [document_with_edges(false)])
+        .expect("build registry before scene-local edge validation");
+    assert!(matches!(
+        asymmetric.compile_scene(&scene_id),
+        Err(ContentError::CompileScene {
+            reason: "place edge is not a bidirectional peer",
+            ..
+        })
+    ));
+}

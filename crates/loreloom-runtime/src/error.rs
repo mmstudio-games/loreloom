@@ -23,8 +23,8 @@ pub enum RuntimeError {
     CapabilityDenied,
     #[error("scene transition target is invalid or unavailable")]
     SceneTransitionTargetUnavailable,
-    #[error("scene transition conflicts with pending narrator orchestration")]
-    SceneTransitionConflict,
+    #[error("world topology change conflicts with pending narrator orchestration")]
+    WorldTopologyConflict,
     #[error("agent orchestration budget exhausted: {0:?}")]
     Budget(BudgetReason),
     #[error("operation was cancelled")]
@@ -64,7 +64,7 @@ impl RuntimeError {
             Self::BridgeUnavailable(_) => "bridge_unavailable",
             Self::CapabilityDenied => "capability_denied",
             Self::SceneTransitionTargetUnavailable => "scene_transition_target_unavailable",
-            Self::SceneTransitionConflict => "scene_transition_conflict",
+            Self::WorldTopologyConflict => "world_topology_conflict",
             Self::Budget(_) => "budget_exhausted",
             Self::Cancelled => "cancelled",
             Self::Identity(_) => "identity_error",

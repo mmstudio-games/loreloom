@@ -90,7 +90,7 @@ OPEN 项、后续 RFC 或 P0 Spike；空 crate 不代表相关协议已经实现
   `promote_npc` 只改变角色的领域归属；
 - [x] 为 Narrator 提供当前 Revision 的 canonical Scene 切换目标查询，拒绝猜测或过期目标，并让
   重复的同目标请求幂等收敛；
-- [ ] 把 Place Definition edge 物化为同 Scene 双向 ObjectId 连接并约束普通移动；实现 Narrator-only
+- [x] 把 Place Definition edge 物化为同 Scene 双向 ObjectId 连接并约束普通移动；实现 Narrator-only
   延迟 `create_scene`/`create_place`、GeneratedOrigin、原子 Command/Event/RecordOp 与创建后重规划；
 - [x] 实现根级 `world.toml`、外部 Content/Prompt、WorldLock 与只含已启用扩展的 ModLock；
 - [x] 统一根世界与 Mod 的 `[prompts]` Narrator/NPC 全局上下文声明，按根世界、依赖拓扑和列表顺序

@@ -111,6 +111,7 @@ pub struct ScenePlaceSpawnPlan {
     pub display_name: DisplayName,
     pub description: ShortText,
     pub tags: BTreeSet<ContentDefinitionId>,
+    pub edges: BTreeSet<ContentDefinitionId>,
     pub origin: ContentOrigin,
 }
 
@@ -245,11 +246,36 @@ impl DefinitionRegistry {
                     reason: "place has the wrong kind",
                 });
             };
+            for edge in &place.edges {
+                if !scene.places.contains(edge) {
+                    return Err(ContentError::CompileScene {
+                        id: id.clone(),
+                        reason: "place edge leaves the scene",
+                    });
+                }
+                let Some(Definition::Place(peer)) = self
+                    .definitions
+                    .get(edge)
+                    .map(|registered| &registered.definition)
+                else {
+                    return Err(ContentError::CompileScene {
+                        id: id.clone(),
+                        reason: "place edge is unavailable",
+                    });
+                };
+                if edge == place_id || !peer.edges.contains(place_id) {
+                    return Err(ContentError::CompileScene {
+                        id: id.clone(),
+                        reason: "place edge is not a bidirectional peer",
+                    });
+                }
+            }
             places.push(ScenePlaceSpawnPlan {
                 definition_id: place.id.clone(),
                 display_name: place.display_name.clone(),
                 description: place.description.clone(),
                 tags: place.tags.clone(),
+                edges: place.edges.clone(),
                 origin: place_entry.origin.clone(),
             });
         }

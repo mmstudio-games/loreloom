@@ -104,6 +104,7 @@ fn snapshot() -> UiSnapshot {
             framing: text("Amber light crosses the mill."),
             place_id: place,
             place_name: name("Bell Room"),
+            adjacent_places: Vec::new(),
             clock: WorldTime::from_ticks(42),
             visible_actors: Vec::new(),
             recent_events: Vec::new(),
