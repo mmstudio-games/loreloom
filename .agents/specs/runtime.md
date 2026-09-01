@@ -1552,7 +1552,7 @@ mods/<mod-id>/...
 Narrator/NPC Prompt 路径。根世界 Narrator Prompt 列表非空，NPC 列表可为空。只读取 Manifest 显式
 声明的世界文件；`mods/`、`.loreloom/`、Cargo
 源码和其它根目录文件不进入世界 payload。Manifest 原始 bytes、声明 payload 和 Prompt 全部进入
-WorldLock 内容哈希。
+WorldLock 内容哈希，但该 hash 只表达完整性与内容 provenance；Prompt-only 差异不得成为读档硬门禁。
 
 回复语言是 World/Mod Prompt 拥有的叙事内容，不是 Manifest 或 Runtime 协议。Manifest v1 不声明
 `response_language`；Agent 定义、Narrator/NPC Request Builder 与 Runtime 不保存或追加独立语言策略，
@@ -1588,7 +1588,8 @@ version、required/optional dependencies、`content | rules` capability、64-byt
 SHA-256、显式 Patch，以及可选的 `[prompts] narrator = [...]`、`npc = [...]` 有序路径列表。JSON
 文件为 versioned tagged Schema，拒绝未知控制字段。第一阶段没有
 package signature/authenticity 承诺；包来源信任由用户配置表达，SHA-256 只提供内容完整性和存档
-精确锁定。第一阶段 Loreloom Engine compatibility version 固定为 `0.1.0`，独立于各 Rust crate 的
+provenance，不能单独判定内容与存档不兼容。第一阶段 Loreloom Engine compatibility version 固定为
+`0.1.0`，独立于各 Rust crate 的
 Semifold patch release；只有协议兼容边界变化时才显式提升。
 
 `content/*.json` 使用第 10.2 节 Content Document v1，并只允许 AgentProfile 到 Scene 的静态
@@ -1631,11 +1632,20 @@ Runtime/Content 加载顺序必须是：
 8. Runtime 在一个初始化提交边界内安装 Registry 并物化 `world.toml` 指定的初始 Scene；
 9. 成功后分别生成 WorldLock，以及只保存已启用扩展的 ModLock。
 
-WorldLock 固定保存根世界 ID、SemVer、content hash 与 Manifest/Content Schema；ModLock 每项固定保存
+WorldLock 保存最后成功采用的根世界 ID、SemVer、content hash 与 Manifest/Content Schema；ModLock
+每项保存
 Mod ID、resolved SemVer、content hash、Manifest/Content Schema version、
 `builtin | directory` source kind、已解析 dependency ID/version/optional flag 和按序 applied Patch ID；
-不保存机器绝对路径。打开存档必须重新构建 candidate lock 并精确比较；不一致时迁移或拒绝，失败不
-替换已发布 Registry/lock。
+不保存机器绝对路径。打开存档必须重新构建 candidate lock；不一致时进入内容兼容性协调，不能直接
+把“内容已变化”判定为“存档不兼容”。
+
+协调顺序固定为：完整编译候选包与不可变 Registry；在未发布 Working World 的边界内读取领域记录并
+使用候选 Registry 重建；验证 Stable ID、Definition 引用、Rule/Parameter 状态、Scene/Place、领域
+不变量和候选 Mod 依赖闭包。Prompt-only 修改、纯增量 Definition/Mod、未被领域记录或依赖闭包引用的
+内容移除必须允许；已物化 Character/Scene 使用存档拥有的领域值，不从修改后的模板静默覆盖。重建
+成功后才在显式事务中更新 SaveManifest 的 WorldLock/ModLock 并发布 Registry/World；重建或 Lock
+提交失败时，原存档、原 Lock 和已发布世界都保持不变。缺失或不兼容时错误必须列出稳定的 Mod ID、
+Definition ID 与失败分类，不得要求或自动执行删档。
 
 根世界/Mod 文本、Agent Profile 和展示资源均视为不可信数据，不能改变 Engine Prompt 优先级、Tool
 Capability 或日志/Secret 策略。Content/Rule Mod 没有包外文件、网络、Shell、Provider 或 Secret
@@ -1643,9 +1653,9 @@ Capability 或日志/Secret 策略。Content/Rule Mod 没有包外文件、网�
 
 Content 产品 API 以根世界路径、显式 Mod root 或测试 virtual directory 为输入；它们必须经过同一
 path/size、hash、Definition、Patch 与 Registry 验证。编译结果拥有不可变 DefinitionRegistry、规范
-WorldLock/ModLock 与有界资源索引。打开既有 Save 时 Runtime 必须在物化 World 前比较 candidate
-WorldLock/ModLock 与 SaveManifest；不匹配
-返回稳定 `content_lock_mismatch`，不能先替换 Registry 或加载部分 World。
+WorldLock/ModLock 与有界资源索引。打开既有 Save 时 Runtime 必须在发布 World 前比较 candidate
+WorldLock/ModLock 与 SaveManifest；不匹配进入上述协调。只有候选内容无法完整重建或通过校验时才
+返回稳定拒绝；不能先替换 Registry、更新 Lock 或加载部分 World。
 
 第一阶段不支持在活动 World 中热替换 Definition/Rule。启停或升级 Mod 必须关闭当前世界，并在
 重开时通过版本检查、迁移和完整重建边界执行。
@@ -1858,7 +1868,8 @@ Core；其 dependency topology 顺序且 Mod ID 唯一。每个 `dependencies` �
 byte-order 排序且唯一。required dependency 必须存在、版本精确相等并排在依赖者之前；optional
 dependency 可以缺失，但已安装时同样必须精确匹配并排在依赖者之前。Manifest/Content Schema 必须
 非零。`applied_patches` 保存实际应用顺序且 ID 唯一，不能在保存时重新排序。`source_kind` 不携带
-机器路径。Load 比较完整 WorldLock 与 ModLock，不能只比较 ID/版本。
+机器路径。Load 使用完整 WorldLock 与 ModLock 检测候选变化，不能只比较 ID/版本，也不能把完整
+Lock 不等直接作为拒绝原因；最终兼容性由第 10.4 节的候选重建与原子 adoption 决定。
 
 Runtime 到 Store 的 durable unit 使用以下后端无关语义；具体 Rust 构造器可以通过
 `ExecutionChangeSet` 生成它，但必须在打开事务前完成全部关联校验：
@@ -1930,7 +1941,7 @@ Checkpoint、RecordOp、WorldEvent、Transcript 与 ActionCommit 的 JSON payloa
 - TUI widget/focus 的临时内部对象；
 - 未经明确产品决定的模型隐藏推理；
 - 正在执行且没有明确恢复协议的 Future/Task；
-- 可从精确 ModLock 和 Definition 重新编译的 Registry 索引、Predicate/Effect plan 缓存；
+- 可从当前采用的 ModLock 和 Definition 重新编译的 Registry 索引、Predicate/Effect plan 缓存；
 - 可从 Definition、实例和规则重新计算的 EffectiveAttributes、effective resource maximum、
   总重量、装备加成、技能可用性、可用行动或 UI 状态文本缓存。
 
@@ -2396,7 +2407,8 @@ CI 使用最新 stable，不执行 MSRV Job，不允许 manifest 出现 `rust-ve
 39. Rule Trigger/Predicate/Effect 按稳定顺序和预算执行，只能产生白名单 WorldCommand；
 40. `choose_event_option`/`perform_gameplay_action` 使用引擎通用 Tool，数据 Mod 不能注入 Handler；
 41. 包路径逃逸、超限文件/递归/解压和对文件、网络、Shell、Secret 的访问被拒绝；
-42. 存档使用精确 ModLock 重开，缺失或内容哈希不同的包不会被同名近似版本替代；
+42. WorldLock/ModLock 变化触发候选重建：Prompt-only 与兼容增量内容可以采用，缺失实际依赖时精确
+    报告 Mod/Definition 且不修改存档，同名近似版本不会被静默替代；
 43. 相同 ModLock、初始状态与规则记录无需 Provider 即可重建等价 Event/Parameter/世界状态；
 44. RecordOp、WorldEvent、Transcript 和 Revision 在故障注入下始终同成同败；
 45. 双连接从同一 expected Revision 竞争提交时恰好一个成功，重复 ActionId 不产生第二份结果；

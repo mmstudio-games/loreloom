@@ -63,6 +63,9 @@ OPEN 项、后续 RFC 或 P0 Spike；空 crate 不代表相关协议已经实现
   World、Agent、Store、TUI 纵向切片；
 - [x] 实现正式目录 Mod package discovery、依赖/Patch/hash lock、统一内置/外部 Registry 加载与
   精确 ModLock 重开门禁；
+- [ ] **DEFERRED**：把当前 WorldLock/ModLock 精确相等门禁替换为候选内容协调；Prompt-only、纯增量
+  Definition/Mod 与未被引用内容的移除通过内存重建和领域校验后可原子更新 SaveManifest Lock，缺失
+  实际依赖时保持原存档不变并报告稳定 Mod/Definition ID；暂不实现通用 Definition migration；
 - [x] 把根世界/外部 Mod 的初始 Scene 统一编译为 spawn plan，并通过共享 NpcFactory/初始化提交物化，
   不在应用代码中手工构造初始 Character/Item records；
 - [x] 实现 Event Option、Gameplay Action 与声明式 Rule 的产品 executor、可信 capability 门禁、

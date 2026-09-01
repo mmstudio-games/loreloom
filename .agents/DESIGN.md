@@ -131,8 +131,10 @@ Loreloom Runtime ───────────────► Persistence
     或动态 ECS Component 名称；
 22. 特殊玩法优先表达为 `Trigger -> Predicate -> Effect -> WorldCommand`，数据 Mod 只能调用引擎
     注册的白名单效果和通用 Gameplay Tool，不能自行注册任意 Tool 或扩大 Capability；
-23. 存档用 WorldLock 固定根世界身份、版本与内容哈希，并用 ModLock 单独固定已启用 Mod 的版本、
-    哈希和依赖闭包；缺失或不兼容内容必须迁移或拒绝加载，不能依赖模糊加载顺序静默覆盖 Definition；
+23. 存档用 WorldLock 记录根世界身份、版本与内容哈希，并用 ModLock 单独记录已启用 Mod 的版本、
+    哈希和依赖闭包；Lock 差异只表示候选内容发生变化，必须先用候选 Registry 重建并校验存档，不能
+    直接等同于不兼容。Prompt-only、纯增量内容与未被引用内容的移除应允许重开并原子采用新 Lock；
+    缺失或不兼容的实际依赖必须迁移或精确拒绝，不能依赖模糊加载顺序静默覆盖 Definition；
 24. 第一阶段持久化后端固定为 SurrealDB + SurrealKV，SQLite 只作为测试对照；SurrealDB driver
     固定到公开 Git revision，已通过 Store Spike 验证显式事务、原生 JSON、migration tracking、
     Revision CAS、崩溃恢复和 10,000 Record 规模；确定性关闭、物理备份/恢复与存档切换受已确认的
@@ -237,8 +239,9 @@ Loreloom Runtime ───────────────► Persistence
 52. 根世界通过 `[prompts]` 分别拥有有序的 Narrator 与 NPC 基础 Prompt，启用的 Mod 可用相同结构
     按依赖拓扑和声明顺序追加两类全局 Prompt；引擎只在其前保留不可覆盖的 Tool/ECS/安全协议，
     Mod Prompt 不能扩大 Tool Capability。回复语言完全由 World/Mod Prompt 表达，Manifest、Agent
-    协议和 Runtime 不拥有、检测或追加独立语言策略。初始 Save Format v1 直接保存 WorldLock 与只含
-    已启用扩展的 ModLock，不为开发期存档增加兼容分支。Rainbound Inn 必须从
+    协议和 Runtime 不拥有、检测或追加独立语言策略。Prompt hash 可以作为 WorldLock/ModLock 的内容
+    provenance，但 Prompt 变化不得独自阻止读档。初始 Save Format v1 直接保存 WorldLock 与只含已
+    启用扩展的 ModLock，不为开发期存档增加 Schema 兼容分支。Rainbound Inn 必须从
     Rust 硬编码迁移到根目录内容文件；生产二进制不使用硬编码 Demo Bridge 生成剧情。
 53. 首个公开版本发布前，Save Format、领域 payload 和内容 Schema 的破坏性修改直接压平进各自的
     初始 v1；开发期产物直接拒绝并重建，不分配 v2、不注册兼容迁移，也不保留 legacy load 分支。
