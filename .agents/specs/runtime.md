@@ -1778,7 +1778,8 @@ text | long_text | integer | number | boolean | single_choice | multi_choice
 每个字段拥有稳定 field ID、展示名、可选说明、required/default 与类型边界。Choice option 拥有稳定
 value ID、展示名和受限初始化 Effect。字段 binding 只能是 `display_name`、`profile_summary`、
 `profile_speaking_style`、`profile_value`、`attribute { id }` 或 `parameter { id }`；字段类型与 binding
-必须匹配。Choice option Effect 只允许 grant item/skill/condition、set attribute/parameter 与 add
+必须匹配；角色创建写入的 Parameter 必须声明为 Save persistence，Session/Derived Parameter 不能
+承载角色卡结果。Choice option Effect 只允许 grant item/skill/condition、set attribute/parameter 与 add
 narrative tag，并复用当前 Registry 的 Definition/Parameter/SpawnConstraint 校验；不得包含脚本、
 Tool、任意对象路径或动态 Component 名称。
 

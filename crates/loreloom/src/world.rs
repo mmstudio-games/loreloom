@@ -6,13 +6,15 @@ use std::{
 
 use loreloom_agent::NarratorDefinition;
 use loreloom_content::{
-    CONTENT_SCHEMA_V1, ContentDocument, Definition, LORELOOM_ENGINE_VERSION,
+    CONTENT_SCHEMA_V1, ContentDocument, Definition, DefinitionRegistry, LORELOOM_ENGINE_VERSION,
     MOD_MANIFEST_SCHEMA_V1, ModCapability, ModManifestDraft, PackageCompiler, PackagePayload,
-    PackageSource, PlayerBootstrap, TagDefinition, VirtualPackage, WorldProjectSource,
+    PackageSource, PlayerBootstrap, PlayerCreationMode, TagDefinition, VirtualPackage,
+    WorldProjectSource,
 };
 use loreloom_core::{
     ContentDefinitionId, DIAGNOSED_CONDITION_PREDICATE_ID, DisplayName, ModId, ModPackageStatus,
-    ModPackageView, SaveId, SessionId, SystemIdGenerator, UiSnapshot,
+    ModPackageView, PackageCatalogView, SaveId, SessionId, SystemIdGenerator, UiSnapshot,
+    WorldPackageView,
 };
 use loreloom_runtime::{GameRuntime, WorldService};
 use loreloom_store::SaveStore;
@@ -24,12 +26,99 @@ use crate::{config::ConfiguredProviders, error::AppError};
 pub struct WorldSetup {
     pub runtime: GameRuntime,
     pub initial_snapshot: UiSnapshot,
+    pub save_id: SaveId,
+    pub world_id: ModId,
     #[cfg(test)]
     world_lock: loreloom_core::WorldLock,
     #[cfg(test)]
     mod_lock: loreloom_core::ModLock,
 }
 
+pub struct StartupContent {
+    pub world_id: ModId,
+    pub world_name: DisplayName,
+    pub player_creation: PlayerCreationMode,
+    pub registry: DefinitionRegistry,
+    pub packages: PackageCatalogView,
+}
+
+pub fn inspect_world_with(
+    world_root: &Path,
+    mod_paths: &[PathBuf],
+) -> Result<StartupContent, AppError> {
+    let world_source = WorldProjectSource::load(world_root)?;
+    let core_id = ModId::parse("games.loreloom.core")?;
+    let engine_namespaces = BTreeSet::from([core_id]);
+    let compiler = PackageCompiler::default();
+    let (mut installed_mods, unavailable_installed) =
+        discover_installed_mods(world_root, &compiler);
+    let compiled = compiler.compile_world(
+        &world_source,
+        [PackageSource::Builtin(core_package()?)],
+        mod_paths.iter().cloned().map(PackageSource::Directory),
+        &engine_namespaces,
+    )?;
+    let manifest = world_source.manifest();
+    let world_name = compiled
+        .registry()
+        .get(&manifest.initial_scene)
+        .and_then(|entry| match &entry.definition {
+            Definition::Scene(scene) => Some(scene.display_name.clone()),
+            _ => None,
+        })
+        .ok_or(AppError::WorldPolicy("initial Scene is unavailable"))?;
+    let mut enabled = compiled
+        .mod_lock()
+        .mods
+        .iter()
+        .map(|locked| {
+            let content = compiled
+                .package_content()
+                .get(&locked.mod_id)
+                .cloned()
+                .ok_or(AppError::WorldPolicy(
+                    "compiled Mod content summary is unavailable",
+                ))?;
+            Ok(ModPackageView {
+                mod_id: locked.mod_id.clone(),
+                version: locked.version.clone(),
+                status: ModPackageStatus::Enabled,
+                dependency_count: u32::try_from(locked.dependencies.len()).unwrap_or(u32::MAX),
+                content,
+            })
+        })
+        .collect::<Result<Vec<_>, AppError>>()?;
+    installed_mods.retain(|installed| {
+        !enabled
+            .iter()
+            .any(|active| active.mod_id == installed.mod_id && active.version == installed.version)
+    });
+    enabled.extend(installed_mods);
+    enabled.sort_by(|left, right| {
+        left.status
+            .cmp(&right.status)
+            .then_with(|| left.mod_id.cmp(&right.mod_id))
+            .then_with(|| left.version.cmp(&right.version))
+    });
+    let packages = PackageCatalogView {
+        world: WorldPackageView {
+            world_id: manifest.world_id.clone(),
+            version: manifest.version.clone(),
+        },
+        mods: enabled,
+        unavailable_installed,
+    };
+    let (registry, _, _, _) = compiled.into_parts();
+    Ok(StartupContent {
+        world_id: manifest.world_id.clone(),
+        world_name,
+        player_creation: manifest.player_creation.clone(),
+        registry,
+        packages,
+    })
+}
+
+#[cfg(test)]
 pub async fn build_world_with(
     world_root: &Path,
     save_path: &Path,
@@ -120,29 +209,31 @@ pub async fn build_world_with_player(
         std::fs::create_dir_all(parent)?;
     }
     let mut ids = SystemIdGenerator;
-    let service = if save_path.exists() {
-        WorldService::open(
-            SaveStore::open(save_path).await?,
-            registry,
-            &world_lock,
-            &mod_lock,
-            world_config,
+    let (service, save_id) = if save_path.exists() {
+        let store = SaveStore::open(save_path).await?;
+        let save_id = store.manifest().save_id;
+        (
+            WorldService::open(store, registry, &world_lock, &mod_lock, world_config).await?,
+            save_id,
         )
-        .await?
     } else {
-        WorldService::create_with_player(
-            save_path,
-            SaveId::generate_with(&mut ids)?,
-            world_lock,
-            mod_lock,
-            registry,
-            &plan,
-            player_bootstrap,
-            [11; 32],
-            world_config,
+        let save_id = SaveId::generate_with(&mut ids)?;
+        (
+            WorldService::create_with_player(
+                save_path,
+                save_id,
+                world_lock,
+                mod_lock,
+                registry,
+                &plan,
+                player_bootstrap,
+                [11; 32],
+                world_config,
+            )
+            .await?
+            .0,
+            save_id,
         )
-        .await?
-        .0
     };
     let session_id = SessionId::generate_with(&mut ids)?;
     let mut runtime = GameRuntime::new(
@@ -160,6 +251,8 @@ pub async fn build_world_with_player(
     Ok(WorldSetup {
         runtime,
         initial_snapshot,
+        save_id,
+        world_id: manifest.world_id.clone(),
         #[cfg(test)]
         world_lock: test_world_lock,
         #[cfg(test)]
@@ -372,6 +465,37 @@ mod tests {
             setup.initial_snapshot.packages.world.world_id,
             setup.world_lock.world_id
         );
+    }
+
+    #[test]
+    fn root_world_can_be_inspected_without_configuring_a_provider() {
+        let world_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+
+        let content = inspect_world_with(&world_root, &[]).expect("inspect root world");
+
+        assert_eq!(content.world_id.as_str(), "games.loreloom.rainbound-inn");
+        assert_eq!(content.world_name.as_str(), "雨夜旅店");
+        assert!(matches!(content.player_creation, PlayerCreationMode::Fixed));
+        assert_eq!(content.packages.world.world_id, content.world_id);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn invalid_player_selection_fails_before_the_save_is_created() {
+        let temporary = tempfile::tempdir().expect("save parent");
+        let save_path = temporary.path().join("save");
+        let world_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let bootstrap = PlayerBootstrap::Preset {
+            character_id: ContentDefinitionId::parse(
+                "games.loreloom.rainbound-inn:character/missing",
+            )
+            .expect("missing Character ID"),
+        };
+
+        let result =
+            build_world_with_player(&world_root, &save_path, &[], configured(), &bootstrap).await;
+
+        assert!(result.is_err());
+        assert!(!save_path.exists());
     }
 
     #[tokio::test(flavor = "multi_thread")]

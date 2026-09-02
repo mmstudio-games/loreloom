@@ -196,6 +196,14 @@ impl ProductConfig {
         })
     }
 
+    #[must_use]
+    pub fn tui_config(&self) -> TuiConfig {
+        TuiConfig {
+            state_width_percent: self.tui.state_width_percent,
+            event_poll_interval: Duration::from_millis(self.tui.event_poll_ms),
+        }
+    }
+
     fn validate(&self) -> Result<(), AppError> {
         if self.schema_version != CONFIG_SCHEMA_V1 {
             return Err(AppError::ConfigPolicy("unsupported config schema"));

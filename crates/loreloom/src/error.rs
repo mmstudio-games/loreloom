@@ -176,6 +176,10 @@ pub enum AppError {
     ConfigPolicy(&'static str),
     #[error("world configuration is invalid: {0}")]
     WorldPolicy(&'static str),
+    #[error("save catalog is invalid: {0}")]
+    SaveCatalog(&'static str),
+    #[error("save catalog metadata could not be encoded")]
+    SaveCatalogCodec,
     #[error("provider setup failed: {0}")]
     ProviderSetup(ProviderSetupDiagnostic),
     #[error(transparent)]

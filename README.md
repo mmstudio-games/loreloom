@@ -37,13 +37,16 @@ The repository root is a playable world described by [world.toml](world.toml),
 or a referenced Secret file, and run:
 
 ```sh
-cargo run -p loreloom -- --config loreloom.toml --save .loreloom/world
+cargo run -p loreloom -- --config loreloom.toml
 ```
 
-Use `--world PATH` to select another game root, `--headless "your input"` for one non-TTY turn, and
-repeat `--mod PATH` to enable explicit directory Mod package roots. Merely placing a package below
-`mods/` does not enable it. Existing saves reopen only when both the root `WorldLock` and enabled
-extension `ModLock` match exactly.
+Interactive play opens the current world's launcher, where you can continue a compatible save,
+start a new game, inspect Mods and settings, or choose another save. Worlds may start with a fixed
+player, a preset character choice, or a deterministic UGC character form. Use `--save PATH` to open
+an existing save directly or create a new game at that exact path, `--world PATH` to select another
+game root, and `--headless "your input"` for one non-TTY turn. Repeat `--mod PATH` to enable explicit
+directory Mod package roots. Merely placing a package below `mods/` does not enable it. Existing
+saves reopen only when both the root `WorldLock` and enabled extension `ModLock` match exactly.
 
 The strict config rejects unknown fields and raw `api_key`/`token` values. Custom endpoints also
 require an exact `allowed_endpoint_hosts` entry; non-loopback custom endpoints require HTTPS.

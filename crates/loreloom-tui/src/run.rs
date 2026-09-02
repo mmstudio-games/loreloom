@@ -28,7 +28,7 @@ impl Default for TuiConfig {
 }
 
 impl TuiConfig {
-    fn validate(self) -> Result<Self, TuiError> {
+    pub(crate) fn validate(self) -> Result<Self, TuiError> {
         if !(25..=35).contains(&self.state_width_percent) || self.event_poll_interval.is_zero() {
             return Err(TuiError::InvalidConfig);
         }

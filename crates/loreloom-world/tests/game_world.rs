@@ -7,9 +7,11 @@ use loreloom_content::{
     AgentProfileDefinition, CONTENT_SCHEMA_V1, CharacterDefinition, ContainerDefinition,
     ContentDocument, ContentPackContext, Definition, DefinitionRegistry, EquipmentSlotDefinition,
     InitialCharacterController, InitialCharacterLifetime, InitialItem, InitialResource,
-    InitialSkill, ItemDefinition, PlayerBootstrap, ResourceCost, ResourceDefinition,
-    ResourceMaximumPolicy, SceneCharacterDefinition, SceneDefinition, SkillDefinition, SkillKind,
-    SkillTarget, parse_content_hash,
+    InitialSkill, ItemDefinition, PlayerBootstrap, PlayerCreationBinding, PlayerCreationDraft,
+    PlayerCreationFieldDefinition, PlayerCreationFieldType, PlayerCreationFieldValue,
+    PlayerCreationFormDefinition, ResourceCost, ResourceDefinition, ResourceMaximumPolicy,
+    SceneCharacterDefinition, SceneDefinition, SkillDefinition, SkillKind, SkillTarget,
+    parse_content_hash,
 };
 use loreloom_core::{
     ActionId, ActionState, ActorId, BaseAttributes, CharacterController, CharacterLifetime,
@@ -217,7 +219,7 @@ fn fixture() -> Fixture {
                 autonomy: loreloom_core::AutonomyMode::Directed,
             }),
             Definition::Character(CharacterDefinition {
-                id: player_definition,
+                id: player_definition.clone(),
                 display_name: name("Traveler"),
                 profile: CharacterProfile {
                     summary: text("A newly arrived traveler."),
@@ -284,6 +286,24 @@ fn fixture() -> Fixture {
                     maximum_skills: 0,
                     allowed_definitions: Default::default(),
                 },
+            }),
+            Definition::PlayerCreationForm(PlayerCreationFormDefinition {
+                id: definition_id("player_creation_form", "traveler"),
+                display_name: name("Create a traveler"),
+                description: text("Choose the traveler who enters the harbor."),
+                template: player_definition,
+                fields: vec![PlayerCreationFieldDefinition {
+                    id: definition_id("player_field", "name"),
+                    display_name: name("Name"),
+                    description: None,
+                    required: true,
+                    binding: Some(PlayerCreationBinding::DisplayName),
+                    value_type: PlayerCreationFieldType::Text {
+                        minimum_bytes: 1,
+                        maximum_bytes: 256,
+                        default: None,
+                    },
+                }],
             }),
         ],
     };
@@ -993,6 +1013,58 @@ fn preset_player_bootstrap_reuses_the_scene_factory_without_creating_an_agent() 
     assert_eq!(player.display_name.as_str(), "Harbor Warden");
     assert_eq!(player.controller, CharacterController::Player);
     assert!(player.agent_binding.is_none());
+}
+
+#[test]
+fn ugc_player_bootstrap_round_trips_only_final_domain_records() {
+    let fixture = fixture();
+    let plan = fixture
+        .registry
+        .compile_scene(&definition_id("scene", "harbor"))
+        .expect("compile scene plan");
+    let draft = PlayerCreationDraft {
+        form_id: definition_id("player_creation_form", "traveler"),
+        values: BTreeMap::from([(
+            definition_id("player_field", "name"),
+            PlayerCreationFieldValue::Text(
+                loreloom_core::LongText::new("Lin").expect("player name"),
+            ),
+        )]),
+    };
+    let mut ids = SystemIdGenerator;
+    let bootstrap = GameWorld::bootstrap_with_player(
+        &plan,
+        &PlayerBootstrap::Ugc { draft },
+        [7; 32],
+        &fixture.registry,
+        fixture.config.clone(),
+        &mut ids,
+    )
+    .expect("bootstrap UGC player");
+    let player = bootstrap
+        .records
+        .iter()
+        .find_map(|record| match record {
+            DomainRecord::Character(character) if character.id == bootstrap.player_actor => {
+                Some(character)
+            }
+            _ => None,
+        })
+        .expect("player record");
+
+    assert_eq!(player.display_name.as_str(), "Lin");
+    assert!(matches!(&player.origin, EntityOrigin::PlayerCreated { .. }));
+    let rebuilt = GameWorld::from_records(
+        Revision::ZERO,
+        bootstrap.records.clone(),
+        fixture.config,
+        &fixture.registry,
+    )
+    .expect("rebuild UGC world");
+    assert_eq!(
+        rebuilt.project_records().expect("reproject UGC world"),
+        bootstrap.records
+    );
 }
 
 #[test]
