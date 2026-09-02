@@ -112,6 +112,171 @@
       }
     },
     {
+      "type": "tag",
+      "id": "games.loreloom.rainbound-inn:tag/trait-cautious",
+      "display_name": "谨慎"
+    },
+    {
+      "type": "tag",
+      "id": "games.loreloom.rainbound-inn:tag/trait-candid",
+      "display_name": "坦率"
+    },
+    {
+      "type": "tag",
+      "id": "games.loreloom.rainbound-inn:tag/trait-curious",
+      "display_name": "好奇"
+    },
+    {
+      "type": "tag",
+      "id": "games.loreloom.rainbound-inn:tag/trait-resilient",
+      "display_name": "坚韧"
+    },
+    {
+      "type": "player_creation_form",
+      "id": "games.loreloom.rainbound-inn:player_creation_form/traveler",
+      "display_name": "创建你的旅人",
+      "description": "这些信息描述跨越不同地点与故事仍然属于你的角色。",
+      "template": "games.loreloom.rainbound-inn:character/traveler",
+      "fields": [
+        {
+          "id": "games.loreloom.rainbound-inn:player_field/name",
+          "display_name": "姓名",
+          "description": "别人如何称呼你。",
+          "required": true,
+          "binding": {
+            "type": "display_name"
+          },
+          "value_type": {
+            "type": "text",
+            "minimum_bytes": 1,
+            "maximum_bytes": 64,
+            "default": "旅人"
+          }
+        },
+        {
+          "id": "games.loreloom.rainbound-inn:player_field/background",
+          "display_name": "身世",
+          "description": "用一两句话描述你的过往与身份，不必解释为何来到当前地点。",
+          "required": true,
+          "binding": {
+            "type": "profile_summary"
+          },
+          "value_type": {
+            "type": "long_text",
+            "minimum_bytes": 1,
+            "maximum_bytes": 1024,
+            "default": "一名在广阔世界中旅行、仍在寻找自己道路的人。"
+          }
+        },
+        {
+          "id": "games.loreloom.rainbound-inn:player_field/speaking-style",
+          "display_name": "说话方式",
+          "description": "你的措辞、语气或交谈习惯。",
+          "required": true,
+          "binding": {
+            "type": "profile_speaking_style"
+          },
+          "value_type": {
+            "type": "text",
+            "minimum_bytes": 1,
+            "maximum_bytes": 256,
+            "default": "平静而坦率。"
+          }
+        },
+        {
+          "id": "games.loreloom.rainbound-inn:player_field/value",
+          "display_name": "信念",
+          "description": "无论身处何地，你仍然看重的事。",
+          "required": true,
+          "binding": {
+            "type": "profile_value"
+          },
+          "value_type": {
+            "type": "text",
+            "minimum_bytes": 1,
+            "maximum_bytes": 256,
+            "default": "在陌生人之间保留善意。"
+          }
+        },
+        {
+          "id": "games.loreloom.rainbound-inn:player_field/resolve",
+          "display_name": "意志",
+          "description": "面对压力、诱惑与未知时坚持行动的能力，范围为 0 到 20。",
+          "required": true,
+          "binding": {
+            "type": "attribute",
+            "attribute_id": "games.loreloom.rainbound-inn:attribute/resolve"
+          },
+          "value_type": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 20000000,
+            "default": 10000000
+          }
+        },
+        {
+          "id": "games.loreloom.rainbound-inn:player_field/traits",
+          "display_name": "性格印象",
+          "description": "选择一至两项长期性格特征。",
+          "required": true,
+          "value_type": {
+            "type": "multi_choice",
+            "minimum_selections": 1,
+            "maximum_selections": 2,
+            "options": [
+              {
+                "value": "games.loreloom.rainbound-inn:player_option/trait-cautious",
+                "display_name": "谨慎",
+                "description": "习惯先观察风险，再决定是否行动。",
+                "effects": [
+                  {
+                    "type": "add_narrative_tag",
+                    "tag_id": "games.loreloom.rainbound-inn:tag/trait-cautious"
+                  }
+                ]
+              },
+              {
+                "value": "games.loreloom.rainbound-inn:player_option/trait-candid",
+                "display_name": "坦率",
+                "description": "倾向清楚表达判断与感受。",
+                "effects": [
+                  {
+                    "type": "add_narrative_tag",
+                    "tag_id": "games.loreloom.rainbound-inn:tag/trait-candid"
+                  }
+                ]
+              },
+              {
+                "value": "games.loreloom.rainbound-inn:player_option/trait-curious",
+                "display_name": "好奇",
+                "description": "愿意接近陌生事物并追问缘由。",
+                "effects": [
+                  {
+                    "type": "add_narrative_tag",
+                    "tag_id": "games.loreloom.rainbound-inn:tag/trait-curious"
+                  }
+                ]
+              },
+              {
+                "value": "games.loreloom.rainbound-inn:player_option/trait-resilient",
+                "display_name": "坚韧",
+                "description": "即使受挫，也很少轻易放弃。",
+                "effects": [
+                  {
+                    "type": "add_narrative_tag",
+                    "tag_id": "games.loreloom.rainbound-inn:tag/trait-resilient"
+                  }
+                ]
+              }
+            ],
+            "default": [
+              "games.loreloom.rainbound-inn:player_option/trait-cautious"
+            ]
+          }
+        }
+      ]
+    },
+    {
       "type": "character",
       "id": "games.loreloom.rainbound-inn:character/mira",
       "display_name": "米拉",

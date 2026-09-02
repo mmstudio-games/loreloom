@@ -7,6 +7,7 @@ initial_scene = "games.loreloom.rainbound-inn:scene/rainy-inn"
 inventory_root_definition = "games.loreloom.rainbound-inn:item/inventory"
 spawn_system_definition = "games.loreloom.rainbound-inn:system/spawn"
 npc_generation_policy = "games.loreloom.rainbound-inn:generation_policy/default"
+player_creation = { type = "ugc", form_id = "games.loreloom.rainbound-inn:player_creation_form/traveler" }
 content = ["content/world.json"]
 rules = []
 resources = []
