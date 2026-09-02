@@ -159,6 +159,37 @@ mod tests {
 
     use super::*;
 
+    fn copy_root_world(parent: &Path, keep_player_creation: bool) -> std::path::PathBuf {
+        let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let world = parent.join("world");
+        std::fs::create_dir_all(world.join("content")).expect("content directory");
+        std::fs::create_dir_all(world.join("prompts")).expect("prompt directory");
+        std::fs::copy(
+            source.join("content/world.json"),
+            world.join("content/world.json"),
+        )
+        .expect("copy content");
+        std::fs::copy(
+            source.join("prompts/narrator.md"),
+            world.join("prompts/narrator.md"),
+        )
+        .expect("copy narrator prompt");
+        std::fs::copy(source.join("prompts/npc.md"), world.join("prompts/npc.md"))
+            .expect("copy NPC prompt");
+        let mut manifest =
+            std::fs::read_to_string(source.join("world.toml")).expect("read world manifest");
+        if !keep_player_creation {
+            manifest = manifest
+                .lines()
+                .filter(|line| !line.starts_with("player_creation = "))
+                .collect::<Vec<_>>()
+                .join("\n");
+            manifest.push('\n');
+        }
+        std::fs::write(world.join("world.toml"), manifest).expect("write world manifest");
+        world
+    }
+
     #[test]
     fn missing_provider_secret_fails_before_save_creation() {
         let directory = tempfile::tempdir().expect("application directory");
@@ -189,7 +220,7 @@ name = "LORELOOM_TEST_MISSING_NPC_SECRET_A70B67F1"
 "#,
         )
         .expect("write config");
-        let world_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let world_path = copy_root_world(directory.path(), false);
         let error = run_application_with([
             OsString::from("loreloom"),
             OsString::from("--world"),
@@ -243,7 +274,7 @@ name = "LORELOOM_TEST_MISSING_NPC_SECRET_D3C511BE"
 "#,
         )
         .expect("write config");
-        let world_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let world_path = copy_root_world(directory.path(), false);
         let error = run_application_with([
             OsString::from("loreloom"),
             OsString::from("--world"),
@@ -272,28 +303,7 @@ name = "LORELOOM_TEST_MISSING_NPC_SECRET_D3C511BE"
     #[test]
     fn headless_new_game_rejects_interactive_player_creation_before_provider_setup() {
         let directory = tempfile::tempdir().expect("application directory");
-        let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let world = directory.path().join("world");
-        std::fs::create_dir_all(world.join("content")).expect("content directory");
-        std::fs::create_dir_all(world.join("prompts")).expect("prompt directory");
-        std::fs::copy(
-            source.join("content/world.json"),
-            world.join("content/world.json"),
-        )
-        .expect("copy content");
-        std::fs::copy(
-            source.join("prompts/narrator.md"),
-            world.join("prompts/narrator.md"),
-        )
-        .expect("copy narrator prompt");
-        std::fs::copy(source.join("prompts/npc.md"), world.join("prompts/npc.md"))
-            .expect("copy NPC prompt");
-        let mut manifest =
-            std::fs::read_to_string(source.join("world.toml")).expect("read world manifest");
-        manifest.push_str(
-            "\n[player_creation]\ntype = \"preset\"\ncharacters = [\"games.loreloom.rainbound-inn:character/traveler\"]\n",
-        );
-        std::fs::write(world.join("world.toml"), manifest).expect("write world manifest");
+        let world = copy_root_world(directory.path(), true);
         let config_path = directory.path().join("loreloom.toml");
         std::fs::write(
             &config_path,

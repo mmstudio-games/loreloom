@@ -475,7 +475,17 @@ mod tests {
 
         assert_eq!(content.world_id.as_str(), "games.loreloom.rainbound-inn");
         assert_eq!(content.world_name.as_str(), "雨夜旅店");
-        assert!(matches!(content.player_creation, PlayerCreationMode::Fixed));
+        let PlayerCreationMode::Ugc { form_id } = &content.player_creation else {
+            panic!("root world must use UGC player creation");
+        };
+        assert_eq!(
+            form_id.as_str(),
+            "games.loreloom.rainbound-inn:player_creation_form/traveler"
+        );
+        assert!(matches!(
+            content.registry.get(form_id).map(|entry| &entry.definition),
+            Some(Definition::PlayerCreationForm(_))
+        ));
         assert_eq!(content.packages.world.world_id, content.world_id);
     }
 
