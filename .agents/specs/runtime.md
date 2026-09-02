@@ -1791,12 +1791,6 @@ NpcFactory/materialization 校验和创建。任一字段、引用、范围、Ef
 Condition/Parameter records，不保存 Form 答案副本或临时 Draft。创建流程不调用 Provider、Agent 或
 Tool，也不接受模型生成的结构化正文。
 
-Player Creation Form 只声明跨 Scene 长期成立的身份、背景、表达方式、价值取向和基础能力。开场地点
-的来意、当前任务、临时关系或场景选项不得为了复用表单 binding 而写成 Character profile、永久
-narrative tag 或 pack-global Parameter；它们属于运行时 Scene/Event/Goal 等有所有权和生命周期的
-状态。此类状态可以为中途退出恢复而持久化，但完成、失效或离开相关范围后必须退出活动上下文；
-“写入 Save”与“永久属于角色”是两条独立维度。
-
 ### 10.6 Agent Turn 与 Narrator 编排状态机
 
 单个 Narrator/NPC Turn 的逻辑状态：

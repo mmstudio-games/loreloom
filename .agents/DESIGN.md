@@ -288,10 +288,6 @@ Loreloom Runtime ───────────────► Persistence
     `CharacterSpawnSpec`、Parameter 初值及最终领域 records；创建过程不调用模型、不解析模型 JSON，
     临时 Draft 不进入存档。UGC 玩家保存 PlayerCreated provenance；首个公开版本前直接压平进初始
     v1。Launcher 的存档目录元数据是可重建的 Host 索引，不是 ECS/Store 权威事实，也不得包含 Secret。
-58. 玩家创建只承载跨场景长期成立的角色身份、背景、表达方式、价值取向和基础能力，不把开场地点、
-    当前场景动机或短期任务固化为 Character profile、永久 narrative tag 或全局 Parameter。场景局部
-    状态即使为了退出恢复而写入 Save，也必须由 Scene/Event/Goal 等带所有权和生命周期的领域对象
-    承载，并在完成、失效或离开相关范围后退出活动 Agent Context；存储耐久性不等于角色语义寿命。
 
 项目方已于 2026-08-29 明确确认第 18–23 项的 Mod 子系统方向。该确认把 Content Mod、Rule Mod、
 统一导入路径、类型化参数、结构化 Event Option、通用 Gameplay Tool、ModLock 和 Extension Mod
