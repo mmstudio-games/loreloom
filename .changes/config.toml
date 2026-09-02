@@ -32,49 +32,41 @@ changeset-template = """
 path = "crates/loreloom"
 resolver = "rust"
 channel = "alpha"
-channel-bump = "preserve"
 
 [packages.loreloom-agent]
 path = "crates/loreloom-agent"
 resolver = "rust"
 channel = "alpha"
-channel-bump = "preserve"
 
 [packages.loreloom-content]
 path = "crates/loreloom-content"
 resolver = "rust"
 channel = "alpha"
-channel-bump = "preserve"
 
 [packages.loreloom-core]
 path = "crates/loreloom-core"
 resolver = "rust"
 channel = "alpha"
-channel-bump = "preserve"
 
 [packages.loreloom-runtime]
 path = "crates/loreloom-runtime"
 resolver = "rust"
 channel = "alpha"
-channel-bump = "preserve"
 
 [packages.loreloom-store]
 path = "crates/loreloom-store"
 resolver = "rust"
 channel = "alpha"
-channel-bump = "preserve"
 
 [packages.loreloom-tui]
 path = "crates/loreloom-tui"
 resolver = "rust"
 channel = "alpha"
-channel-bump = "preserve"
 
 [packages.loreloom-world]
 path = "crates/loreloom-world"
 resolver = "rust"
 channel = "alpha"
-channel-bump = "preserve"
 
 [resolver.rust.pre-check]
 type = "http"

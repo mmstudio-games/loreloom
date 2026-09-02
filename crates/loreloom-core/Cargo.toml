@@ -1,6 +1,6 @@
 [package]
 name = "loreloom-core"
-version = "0.1.0"
+version = "0.1.0-alpha.0"
 edition = "2024"
 description = "Backend-neutral domain protocols and stable identities for Loreloom"
 license.workspace = true
