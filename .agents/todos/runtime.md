@@ -132,6 +132,8 @@ OPEN 项、后续 RFC 或 P0 Spike；空 crate 不代表相关协议已经实现
   CharacterSpawnSpec/Parameter 初值编译、PlayerCreated provenance 与创建前全量校验；
 - [x] 实现 preset/UGC TUI 选择与表单交互、预览、键盘导航、错误定位，并覆盖无 Provider 创建、失败
   不留存档、round-trip 和确定性渲染测试；
+- [ ] 为目录根“雨夜旅店”声明只包含长期角色信息的 UGC Player Creation Form，并验证 Launcher
+  投影、初始化编译和现有 Save 重开不把旅店局部动机固化进玩家档案；
 - [x] 完成 Active Spec 第 17 节实施审计：除显式 `UPSTREAM-GATED` 的第 47 条和上述分发许可选择外，
   其余验收均有自动化或可复现证据；当前门禁为 188 tests passed，目录根世界的创建、锁分离、
   Prompt 注入与存档内容锁重开拒绝均有确定性测试。macOS arm64 release 基线仍为 81.2 MiB。
