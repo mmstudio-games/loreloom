@@ -355,6 +355,11 @@ workspace、版本管理和仓库目录约定。尚未冻结的精确协议转�
 
 ## 6. 后续推进顺序
 
+跨世界玩家头像美化的待确认责任划分见 [RFC 0004](rfcs/0004-portable-player-appearance.md)：
+Content 校验 Mod 声明的玩家展示覆盖，Runtime 在玩家头像投影时应用，Appearance/TUI 继续承担合成与
+动画；不以替换某个世界的整张 Character Definition 实现通用美化。该提案为 Draft，尚未改变 Active
+Spec、角色持久状态或当前产品行为。
+
 1. 从 Active Runtime Spec 建立并维护 Runtime TODO；
 2. 初始化 Cargo workspace、Semifold 与不暴露公共领域 API 的空 crate；
 3. 完成 Store、Armillae/Bevy、TUI、Agent Loop、Content/NpcFactory 和 Mod/Rule P0 Spike；
