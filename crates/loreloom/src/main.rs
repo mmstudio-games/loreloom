@@ -2,21 +2,31 @@ mod cli;
 mod client;
 mod config;
 mod error;
+mod mod_selection;
 mod save_catalog;
 mod startup;
 mod world;
 
-use std::{path::Path, process::ExitCode};
+use std::{
+    collections::BTreeSet,
+    path::{Path, PathBuf},
+    process::ExitCode,
+};
 
 use cli::{Cli, HELP};
 use client::RuntimeAdapter;
 use config::{ProductConfig, ResolvedProductConfig};
 use error::AppError;
 use loreloom_content::PlayerBootstrap;
+use loreloom_core::{ModPackageStatus, ModPackageView};
 use loreloom_tui::{StartupAction, TuiTerminal};
+use mod_selection::{SelectedMod, load as load_mod_selection, save as save_mod_selection};
 use save_catalog::{new_save_path, register, scan};
 use startup::{player_bootstrap, project_startup_model};
-use world::{WorldSetup, build_world_with_player, inspect_world_with};
+use world::{
+    StartupContent, WorldSetup, build_world_with_player, inspect_world_with,
+    resolve_installed_mod_paths,
+};
 
 fn main() -> ExitCode {
     match run_application() {
@@ -51,6 +61,14 @@ fn run_application_with(
     let configured = ProductConfig::load(config_path)?;
     let launcher_tui_config = configured.tui_config();
     let mut tui_terminal = None;
+    let mut active_mod_paths = cli.mod_paths.clone();
+    if cli.headless_input.is_none() {
+        let persisted = load_mod_selection(&cli.world_path)?;
+        active_mod_paths.splice(
+            0..0,
+            resolve_installed_mod_paths(&cli.world_path, &persisted),
+        );
+    }
     let (save_path, save_display_name, bootstrap) = if cli.headless_input.is_some() {
         let save_path = cli
             .save_path
@@ -60,7 +78,7 @@ fn run_application_with(
         let bootstrap = if save_path.exists() {
             PlayerBootstrap::Fixed
         } else {
-            let content = inspect_world_with(&cli.world_path, &cli.mod_paths)?;
+            let content = inspect_world_with(&cli.world_path, &active_mod_paths)?;
             match content.player_creation {
                 loreloom_content::PlayerCreationMode::Fixed => PlayerBootstrap::Fixed,
                 loreloom_content::PlayerCreationMode::Preset { .. }
@@ -79,38 +97,66 @@ fn run_application_with(
             PlayerBootstrap::Fixed,
         )
     } else {
-        let content = inspect_world_with(&cli.world_path, &cli.mod_paths)?;
+        let mut content = inspect_world_with(&cli.world_path, &active_mod_paths)?;
         let entries = if cli.save_path.is_some() {
             Vec::new()
         } else {
             scan(&cli.world_path, &content.world_id)
         };
-        let model =
-            project_startup_model(&content, &entries, config_path, cli.save_path.is_some())?;
         let terminal = tui_terminal.insert(TuiTerminal::open()?);
-        let action = terminal.run_startup(model, launcher_tui_config)?;
-        match action {
-            StartupAction::OpenSave { index } => {
-                let entry = entries
-                    .get(index)
-                    .ok_or(AppError::SaveCatalog("selected save is unavailable"))?;
-                (
-                    entry.path.clone(),
-                    Some(entry.display_name.clone()),
-                    PlayerBootstrap::Fixed,
-                )
+        let mut open_mods = false;
+        let mut notice = None;
+        let mut draft_selection = None;
+        loop {
+            let mut model =
+                project_startup_model(&content, &entries, config_path, cli.save_path.is_some())?;
+            model.open_mods = open_mods;
+            model.notice = notice.take();
+            if let Some(selection) = draft_selection.take() {
+                project_mod_selection(&mut model.packages.mods, &selection);
             }
-            StartupAction::NewGame(selection) => {
-                let (path, display_name) = match cli.save_path.clone() {
-                    Some(path) => {
-                        let display_name = display_name_for_save(&path);
-                        (path, Some(display_name))
+            match terminal.run_startup(model, launcher_tui_config)? {
+                StartupAction::OpenSave { index } => {
+                    let entry = entries
+                        .get(index)
+                        .ok_or(AppError::SaveCatalog("selected save is unavailable"))?;
+                    break (
+                        entry.path.clone(),
+                        Some(entry.display_name.clone()),
+                        PlayerBootstrap::Fixed,
+                    );
+                }
+                StartupAction::NewGame(selection) => {
+                    let (path, display_name) = match cli.save_path.clone() {
+                        Some(path) => {
+                            let display_name = display_name_for_save(&path);
+                            (path, Some(display_name))
+                        }
+                        None => (new_save_path(&cli.world_path)?, None),
+                    };
+                    break (path, display_name, player_bootstrap(selection)?);
+                }
+                StartupAction::ApplyMods { enabled } => {
+                    let requested = selected_mods(&enabled);
+                    let mut candidate_selection = requested.clone();
+                    candidate_selection.extend(content.selected_mods_for_paths(&cli.mod_paths));
+                    let result =
+                        apply_mod_selection(&cli.world_path, &content, &candidate_selection);
+                    open_mods = true;
+                    match result {
+                        Ok((candidate_paths, candidate_content)) => {
+                            active_mod_paths = candidate_paths;
+                            content = candidate_content;
+                            notice = Some("Mod selection saved.".to_owned());
+                        }
+                        Err(error) => {
+                            draft_selection = Some(candidate_selection);
+                            notice = Some(format!("Mod selection could not be applied: {error}"));
+                        }
                     }
-                    None => (new_save_path(&cli.world_path)?, None),
-                };
-                (path, display_name, player_bootstrap(selection)?)
+                }
+                StartupAction::Quit => return Ok(()),
             }
-            StartupAction::Quit => return Ok(()),
         }
     };
     let ResolvedProductConfig {
@@ -127,7 +173,7 @@ fn run_application_with(
     } = tokio.block_on(build_world_with_player(
         &cli.world_path,
         &save_path,
-        &cli.mod_paths,
+        &active_mod_paths,
         providers,
         &bootstrap,
     ))?;
@@ -150,6 +196,40 @@ fn run_application_with(
         loreloom_tui::run_with_appearance(&mut client, initial_snapshot, tui_config, appearance)?;
     }
     Ok(())
+}
+
+fn selected_mods(packages: &[ModPackageView]) -> BTreeSet<SelectedMod> {
+    packages
+        .iter()
+        .map(|package| SelectedMod {
+            mod_id: package.mod_id.clone(),
+            version: package.version.clone(),
+        })
+        .collect()
+}
+
+fn project_mod_selection(packages: &mut [ModPackageView], selected: &BTreeSet<SelectedMod>) {
+    for package in packages {
+        package.status = if selected.contains(&SelectedMod {
+            mod_id: package.mod_id.clone(),
+            version: package.version.clone(),
+        }) {
+            ModPackageStatus::Enabled
+        } else {
+            ModPackageStatus::Installed
+        };
+    }
+}
+
+fn apply_mod_selection(
+    world_root: &Path,
+    current: &StartupContent,
+    selected: &BTreeSet<SelectedMod>,
+) -> Result<(Vec<PathBuf>, StartupContent), AppError> {
+    let candidate_paths = current.resolve_mod_paths(selected)?;
+    let candidate_content = inspect_world_with(world_root, &candidate_paths)?;
+    save_mod_selection(world_root, &current.persistent_mods(selected))?;
+    Ok((candidate_paths, candidate_content))
 }
 
 fn display_name_for_save(path: &Path) -> String {
@@ -195,6 +275,28 @@ mod tests {
         }
         std::fs::write(world.join("world.toml"), manifest).expect("write world manifest");
         world
+    }
+
+    #[test]
+    fn rejected_mod_selection_keeps_the_previous_persisted_loadout() {
+        let directory = tempfile::tempdir().expect("world parent");
+        let world = copy_root_world(directory.path(), false);
+        let previous = BTreeSet::from([SelectedMod {
+            mod_id: "games.loreloom.previous".parse().expect("Mod ID"),
+            version: "1.0.0".parse().expect("version"),
+        }]);
+        save_mod_selection(&world, &previous).expect("previous loadout");
+        let content = inspect_world_with(&world, &[]).expect("inspect world");
+        let unavailable = BTreeSet::from([SelectedMod {
+            mod_id: "games.loreloom.unavailable".parse().expect("Mod ID"),
+            version: "1.0.0".parse().expect("version"),
+        }]);
+
+        assert!(apply_mod_selection(&world, &content, &unavailable).is_err());
+        assert_eq!(
+            load_mod_selection(&world).expect("unchanged loadout"),
+            previous
+        );
     }
 
     #[test]

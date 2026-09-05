@@ -1677,10 +1677,18 @@ appearance/images/** # optional bounded PNG layers
 的 Package resource limit、symlink、Manifest、Engine compatibility、payload group、content hash
 与 Definition 文档解码/分组校验。只有通过上述独立 Package 校验的 candidate 才进入只读 installed
 catalog；依赖图、跨包引用和 Patch 目标只在显式启用闭包中解析。无效、不可读或符号链接 candidate
-只累计为 unavailable 数量，不能阻止未启用该包时启动。显式 `--mod` 仍是唯一启用入口；
-位于 `mods/` 外但通过 `--mod` 启用的目录包仍进入 enabled 列表。同一 Mod ID 与版本同时出现在目录
+只累计为 unavailable 数量，不能阻止未启用该包时启动。交互式启动从 `.loreloom/mods.toml` 读取最近
+一次成功的 package ID/version loadout，再与显式 `--mod` 合并为初始候选；Headless 只使用显式
+`--mod`。位于 `mods/` 外但通过 `--mod` 启用的目录包仍进入 enabled 列表，但其绝对路径不得写入
+loadout。同一 Mod ID 与版本同时出现在目录
 和当前 `ModLock` 时只显示为 enabled；不同版本分别显示。catalog 是启动期 Host 投影，运行中目录
 变化不热更新，重启后重新扫描。
+
+`.loreloom/mods.toml` Schema v1 只保存 schema version 与按 Mod ID/version 排序的 enabled package
+identity；拒绝未知字段、符号链接、超限文件、重复 identity 和同一 Mod ID 的多个版本。写入使用同目录
+临时文件与原子 rename；只有完整 `compile_world` 成功后才能替换旧 loadout。该文件可删除重建，不是
+World/Mod 内容、ECS 或 Save 的一部分，也不能替代存档 `ModLock`。Launcher 应用无效选择时保持旧
+loadout 与旧 Startup 内容投影，并显示安全错误；不创建 Runtime 或修改 Save。
 
 `mod.toml` 是 UTF-8 TOML，Manifest Schema v1 至少声明 reverse-DNS lowercase Mod ID、SemVer
 version、属于该 Mod 且 kind 为 `pack` 的 Pack ID、Engine SemVer requirement、Content Schema
@@ -2193,9 +2201,12 @@ checkpoint 是一个普通显式事务中的版本化 Snapshot/compaction record
 未显式提供 `--save` 的交互式运行先显示世界级 Launcher，默认焦点按可用性落在 Continue 或 New
 Game。固定入口顺序为 Continue、New Game、Load Save、Mods、Settings、Quit；不可用项必须可辨识且
 不能触发隐式 fallback。Continue/Load Save 选择后离开 Launcher 并按正常流程打开；Quit 在 Provider
-或 Store 创建前退出。Mods 页面显示当前世界启动扫描的 installed/enabled 摘要，但第一阶段不在
-Launcher 中热启停正在运行的 Mod；Settings 页面只显示或编辑明确允许的非敏感产品设置，绝不显示
-credential 值。
+或 Store 创建前退出。Launcher 的 Mods 页复用运行中 Mods overlay 的 WORLD、ENABLED、
+INSTALLED NOT ENABLED 分组和完整内容计数；`Up`/`Down` 选择扩展，`Space` 选择/反选，`Enter` 编译并
+应用，`Esc` 丢弃未应用修改。
+成功后原子保存世界本地 loadout 并重新投影依赖该候选 Registry 的玩家创建页面；失败时留在 Mods 页
+并保留可编辑选择。第一阶段不在运行中的游戏页面热启停 Mod；Settings 页面只显示或编辑明确允许的
+非敏感产品设置，绝不显示 credential 值。
 
 New Game 根据第 10.5 节进入 fixed、preset 或 UGC。preset 显示选中角色的安全 Character 预览；UGC
 宽屏采用左侧实时角色摘要、右侧字段，窄屏保持字段和确认操作可达。`Up`/`Down` 与
@@ -2701,7 +2712,7 @@ CI 使用最新 stable，不执行 MSRV Job，不允许 manifest 出现 `rust-ve
     显示主世界、enabled ModLock 与通过独立 Package 校验的 installed-but-disabled 目录包。每个 Mod
     显示顶层 Definition 总数、非零分类、Prompt 与 Patch 数量；无效 installed candidate 只显示汇总
     数量，列表不含 hash、路径、内容文本或字节数，滚动与关闭不产生 Runtime intent、WorldCommand
-    或持久化变化。
+    或持久化变化。Launcher Mods 页保持相同分组与摘要，增加启动前选择、反选、应用与取消交互。
 61. 未显式提供 `--save` 时先进入当前世界 Launcher；Continue 选择最近兼容存档，Load Save 可选其它
     兼容条目，New Game 按 fixed/preset/UGC 创建，Quit 在 Provider/Store 创建前退出。显式已有
     `--save` 直达加载，显式不存在 `--save` 进入该目标的新游戏流程，Headless 可确定性绕过。Launcher、
@@ -2710,6 +2721,9 @@ CI 使用最新 stable，不执行 MSRV Job，不允许 manifest 出现 `rust-ve
     玩家 Draft 无需 Provider 即可确定性编译为既有 SpawnSpec/records。无效 Draft 不创建 Save，成功
     UGC 玩家保留 PlayerCreated provenance，存档不包含临时答案 JSON。字段编辑时即时显示本地验证
     结果，当前字段无效时不得由 Enter 推进或提交。
+63. 交互式 loadout 按 package ID/version 持久保存到 `.loreloom/mods.toml`；只在完整候选编译成功后
+    原子替换，失败不改变旧配置或存档。显式 `--mod` 本次追加且外部路径不持久化，Headless 不隐式
+    读取 loadout。
 
 ## 18. Active Spec 下的范围化实施门禁
 

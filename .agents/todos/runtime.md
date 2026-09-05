@@ -143,6 +143,8 @@ OPEN 项、后续 RFC 或 P0 Spike；空 crate 不代表相关协议已经实现
   `Option+M` 的 Mods overlay；
 - [x] 从启用编译候选和未启用目录检查生成非持久化 `PackageContentView`，在 Mods overlay 展示每个
   Mod 的顶层 Definition 总数/分类以及 Prompt/Patch 数量，并覆盖 enabled 优先合并和滚动边界；
+- [x] 让 Launcher Mods 页复用运行中 overlay 的分组/详情，支持选择、反选、应用和取消；候选成功
+  编译后原子保存 `.loreloom/mods.toml`，失败保留旧 loadout 并返回可编辑列表；
 - [x] 实现默认世界 Launcher、兼容 Save catalog sidecar、Continue/New Game/Load Save/Mods/Settings/
   Quit 入口，并保留显式 `--save` 与 Headless 绕过语义；Launcher、初始化加载页和游戏页复用单一
   alternate-screen 终端会话，避免页面切换时露出原始终端；

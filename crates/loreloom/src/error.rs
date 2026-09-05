@@ -180,6 +180,10 @@ pub enum AppError {
     SaveCatalog(&'static str),
     #[error("save catalog metadata could not be encoded")]
     SaveCatalogCodec,
+    #[error("Mod loadout is invalid: {0}")]
+    ModSelection(&'static str),
+    #[error("Mod loadout could not be encoded")]
+    ModSelectionCodec,
     #[error("provider setup failed: {0}")]
     ProviderSetup(ProviderSetupDiagnostic),
     #[error(transparent)]

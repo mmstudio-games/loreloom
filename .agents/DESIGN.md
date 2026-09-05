@@ -280,13 +280,15 @@ Loreloom Runtime ───────────────► Persistence
     setup code 标识缺失、空或不可读取的 credential reference、endpoint policy、Provider 支持与
     Bridge 创建失败，并给出不含 Secret 的本地修复提示。环境变量名可以作为安全配置引用显示；
     Secret 值、凭证文件内容和 Armillae 原始错误正文不得进入 Display、Debug、日志或测试输出。
-56. TUI 提供只读 Mods overlay，分别显示唯一主世界、当前 `ModLock` 中已启用的扩展，以及世界根
+56. 运行中 TUI 提供只读 Mods overlay，分别显示唯一主世界、当前 `ModLock` 中已启用的扩展，以及世界根
     `mods/` 下通过 Package 安全校验但未启用的目录包；内置 engine package 不作为 Mod 展示。每个
     Mod 同时显示由 Content 编译/检查路径生成的顶层 Definition 分类计数，以及 Manifest 声明的
     Prompt 文件和 Patch 数量；摘要不包含包内正文、路径、字节数或嵌套 Event/Effect 数量。`Ctrl+O`
     与 `F2` 是可靠入口，继续兼容终端可区分的 `Alt+M` 和 macOS 默认 `Option+M`；`Esc` 只关闭
-    overlay，方向键、PageUp/PageDown 与滚轮滚动。安装目录和摘要只在启动时扫描，展示不启用 Mod、
-    不修改存档，也不进入 ECS、Agent Context 或 Transcript。
+    overlay，方向键、PageUp/PageDown 与滚轮滚动。Launcher 的 Mods 页复用同一分组与摘要展示，允许
+    在 Runtime 创建前选择/反选已安装 Mod；成功候选必须重新经过完整依赖、Patch、内容与外观编译，
+    并把 loadout 原子保存到不参与内容哈希的 `.loreloom/mods.toml`。运行中不热启停 Mod；摘要、路径
+    与本地 loadout 都不进入 ECS、Agent Context 或 Transcript，存档仍以实际采用的 `ModLock` 为准。
 57. 未显式提供 `--save` 的交互式启动默认进入世界级 Launcher，而不是静默打开固定存档：入口提供
     Continue、New Game、Load Save、Mods、Settings 与 Quit；Continue 只选择当前 `world_id` 最近使用
     的可用存档。显式 `--save` 保留自动化/高级用户直达语义，已存在路径直接加载，不存在路径进入该

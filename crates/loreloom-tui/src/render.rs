@@ -733,7 +733,7 @@ fn render_mods_overlay(frame: &mut Frame<'_>, app: &mut TuiApp, area: Rect) {
         )));
     } else {
         for package in enabled {
-            push_mod_package(&mut lines, package, true);
+            push_mod_package(&mut lines, package, true, None);
         }
     }
     lines.extend([
@@ -750,7 +750,7 @@ fn render_mods_overlay(frame: &mut Frame<'_>, app: &mut TuiApp, area: Rect) {
         )));
     } else {
         for package in installed {
-            push_mod_package(&mut lines, package, false);
+            push_mod_package(&mut lines, package, false, None);
         }
     }
     if catalog.unavailable_installed > 0 {
@@ -775,21 +775,35 @@ fn render_mods_overlay(frame: &mut Frame<'_>, app: &mut TuiApp, area: Rect) {
     frame.render_widget(Paragraph::new(lines).scroll((app.mods_scroll, 0)), body);
 }
 
-fn push_mod_package(
+pub(crate) fn push_mod_package(
     lines: &mut Vec<Line<'static>>,
     package: &loreloom_core::ModPackageView,
     enabled: bool,
+    selected: Option<bool>,
 ) {
-    lines.push(Line::from(vec![
+    let mut heading = Vec::new();
+    if let Some(selected) = selected {
+        heading.push(Span::styled(
+            if selected { "› " } else { "  " },
+            Style::default().fg(ACCENT),
+        ));
+    }
+    heading.extend([
         Span::styled(
             if enabled { "● " } else { "○ " },
             Style::default().fg(if enabled { Color::Green } else { ACCENT }),
         ),
         Span::styled(
             package.mod_id.to_string(),
-            Style::default().add_modifier(Modifier::BOLD),
+            if selected == Some(true) {
+                Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().add_modifier(Modifier::BOLD)
+            },
         ),
-    ]));
+    ]);
+    lines.push(Line::from(heading));
+    let indent = if selected.is_some() { "    " } else { "  " };
     let dependency_label = if package.dependency_count == 1 {
         "dependency"
     } else {
@@ -797,14 +811,14 @@ fn push_mod_package(
     };
     lines.push(Line::from(Span::styled(
         format!(
-            "  v{} · {} {}",
+            "{indent}v{} · {} {}",
             package.version, package.dependency_count, dependency_label
         ),
         Style::default().fg(MUTED),
     )));
     lines.push(Line::from(Span::styled(
         format!(
-            "  {} · {} · {}",
+            "{indent}{} · {} · {}",
             content_count(
                 package.content.definition_count(),
                 "definition",
@@ -822,6 +836,7 @@ fn push_mod_package(
             (package.content.scenes, "scene", "scenes"),
             (package.content.places, "place", "places"),
         ],
+        indent,
     );
     push_content_counts(
         lines,
@@ -830,6 +845,7 @@ fn push_mod_package(
             (package.content.skills, "skill", "skills"),
             (package.content.conditions, "condition", "conditions"),
         ],
+        indent,
     );
     push_content_counts(
         lines,
@@ -839,6 +855,7 @@ fn push_mod_package(
             (package.content.rules, "rule", "rules"),
             (package.content.parameters, "parameter", "parameters"),
         ],
+        indent,
     );
     push_content_counts(
         lines,
@@ -847,12 +864,14 @@ fn push_mod_package(
             "support definition",
             "support definitions",
         )],
+        indent,
     );
 }
 
 fn push_content_counts(
     lines: &mut Vec<Line<'static>>,
     counts: &[(u32, &'static str, &'static str)],
+    indent: &str,
 ) {
     let labels = counts
         .iter()
@@ -861,7 +880,7 @@ fn push_content_counts(
         .collect::<Vec<_>>();
     if !labels.is_empty() {
         lines.push(Line::from(Span::styled(
-            format!("  {}", labels.join(" · ")),
+            format!("{indent}{}", labels.join(" · ")),
             Style::default().fg(MUTED),
         )));
     }

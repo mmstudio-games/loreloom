@@ -21,7 +21,7 @@ use loreloom_store::SaveStore;
 use loreloom_world::WorldConfig;
 use semver::{Version, VersionReq};
 
-use crate::{config::ConfiguredProviders, error::AppError};
+use crate::{config::ConfiguredProviders, error::AppError, mod_selection::SelectedMod};
 
 pub struct WorldSetup {
     pub runtime: GameRuntime,
@@ -41,6 +41,52 @@ pub struct StartupContent {
     pub player_creation: PlayerCreationMode,
     pub registry: DefinitionRegistry,
     pub packages: PackageCatalogView,
+    mod_sources: BTreeMap<SelectedMod, PathBuf>,
+    installed_mods: BTreeSet<SelectedMod>,
+}
+
+impl StartupContent {
+    pub fn resolve_mod_paths(
+        &self,
+        enabled: &BTreeSet<SelectedMod>,
+    ) -> Result<Vec<PathBuf>, AppError> {
+        enabled
+            .iter()
+            .map(|selected| {
+                self.mod_sources
+                    .get(selected)
+                    .cloned()
+                    .ok_or(AppError::ModSelection("selected Mod is unavailable"))
+            })
+            .collect()
+    }
+
+    pub fn persistent_mods(&self, enabled: &BTreeSet<SelectedMod>) -> BTreeSet<SelectedMod> {
+        enabled
+            .intersection(&self.installed_mods)
+            .cloned()
+            .collect()
+    }
+
+    pub fn selected_mods_for_paths(&self, paths: &[PathBuf]) -> BTreeSet<SelectedMod> {
+        self.mod_sources
+            .iter()
+            .filter(|(_, source)| paths.contains(source))
+            .map(|(selected, _)| selected.clone())
+            .collect()
+    }
+}
+
+pub fn resolve_installed_mod_paths(
+    world_root: &Path,
+    selected: &BTreeSet<SelectedMod>,
+) -> Vec<PathBuf> {
+    discover_installed_mod_candidates(world_root, &PackageCompiler::default())
+        .0
+        .into_iter()
+        .filter(|candidate| selected.contains(&candidate.selection))
+        .map(|candidate| candidate.path)
+        .collect()
 }
 
 pub fn inspect_world_with(
@@ -51,12 +97,28 @@ pub fn inspect_world_with(
     let core_id = ModId::parse("games.loreloom.core")?;
     let engine_namespaces = BTreeSet::from([core_id]);
     let compiler = PackageCompiler::default();
-    let (mut installed_mods, unavailable_installed) =
-        discover_installed_mods(world_root, &compiler);
+    let (installed_candidates, unavailable_installed) =
+        discover_installed_mod_candidates(world_root, &compiler);
+    let mut installed_mods = installed_candidates
+        .iter()
+        .map(|candidate| candidate.package.clone())
+        .collect::<Vec<_>>();
+    let installed_selection = installed_candidates
+        .iter()
+        .map(|candidate| candidate.selection.clone())
+        .collect::<BTreeSet<_>>();
+    let mut mod_sources = installed_candidates
+        .into_iter()
+        .map(|candidate| (candidate.selection, candidate.path))
+        .collect::<BTreeMap<_, _>>();
+    let active_sources = inspect_active_mod_sources(&compiler, mod_paths)?;
+    for (selection, path) in &active_sources {
+        mod_sources.insert(selection.clone(), path.clone());
+    }
     let compiled = compiler.compile_world(
         &world_source,
         [PackageSource::Builtin(core_package()?)],
-        mod_paths.iter().cloned().map(PackageSource::Directory),
+        active_sources.into_values().map(PackageSource::Directory),
         &engine_namespaces,
     )?;
     let manifest = world_source.manifest();
@@ -116,6 +178,8 @@ pub fn inspect_world_with(
         player_creation: manifest.player_creation.clone(),
         registry,
         packages,
+        mod_sources,
+        installed_mods: installed_selection,
     })
 }
 
@@ -147,11 +211,17 @@ pub async fn build_world_with_player(
     let core_id = ModId::parse("games.loreloom.core")?;
     let engine_namespaces = BTreeSet::from([core_id]);
     let compiler = PackageCompiler::default();
-    let (installed_mods, unavailable_installed) = discover_installed_mods(world_root, &compiler);
+    let (installed_candidates, unavailable_installed) =
+        discover_installed_mod_candidates(world_root, &compiler);
+    let installed_mods = installed_candidates
+        .into_iter()
+        .map(|candidate| candidate.package)
+        .collect::<Vec<_>>();
+    let active_sources = inspect_active_mod_sources(&compiler, mod_paths)?;
     let compiled = compiler.compile_world(
         &world_source,
         [PackageSource::Builtin(core_package()?)],
-        mod_paths.iter().cloned().map(PackageSource::Directory),
+        active_sources.into_values().map(PackageSource::Directory),
         &engine_namespaces,
     )?;
     let prompts = compiled.prompts().clone();
@@ -263,10 +333,34 @@ pub async fn build_world_with_player(
     })
 }
 
-fn discover_installed_mods(
+struct InstalledModCandidate {
+    selection: SelectedMod,
+    path: PathBuf,
+    package: ModPackageView,
+}
+
+fn inspect_active_mod_sources(
+    compiler: &PackageCompiler,
+    paths: &[PathBuf],
+) -> Result<BTreeMap<SelectedMod, PathBuf>, AppError> {
+    let mut active = BTreeMap::new();
+    for path in paths {
+        let (manifest, _) = compiler.inspect_directory(path)?.into_parts();
+        active.insert(
+            SelectedMod {
+                mod_id: manifest.mod_id,
+                version: manifest.version,
+            },
+            path.clone(),
+        );
+    }
+    Ok(active)
+}
+
+fn discover_installed_mod_candidates(
     world_root: &Path,
     compiler: &PackageCompiler,
-) -> (Vec<ModPackageView>, u32) {
+) -> (Vec<InstalledModCandidate>, u32) {
     let mods_root = world_root.join("mods");
     match fs::symlink_metadata(&mods_root) {
         Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
@@ -312,6 +406,10 @@ fn discover_installed_mods(
             }
         };
         let (manifest, content) = inspected.into_parts();
+        let selection = SelectedMod {
+            mod_id: manifest.mod_id.clone(),
+            version: manifest.version.clone(),
+        };
         let package = ModPackageView {
             mod_id: manifest.mod_id,
             version: manifest.version,
@@ -319,9 +417,31 @@ fn discover_installed_mods(
             dependency_count: u32::try_from(manifest.dependencies.len()).unwrap_or(u32::MAX),
             content,
         };
-        installed.insert((package.mod_id.clone(), package.version.clone()), package);
+        installed.insert(
+            selection.clone(),
+            InstalledModCandidate {
+                selection,
+                path: candidate,
+                package,
+            },
+        );
     }
     (installed.into_values().collect(), unavailable)
+}
+
+#[cfg(test)]
+fn discover_installed_mods(
+    world_root: &Path,
+    compiler: &PackageCompiler,
+) -> (Vec<ModPackageView>, u32) {
+    let (candidates, unavailable) = discover_installed_mod_candidates(world_root, compiler);
+    (
+        candidates
+            .into_iter()
+            .map(|candidate| candidate.package)
+            .collect(),
+        unavailable,
+    )
 }
 
 fn core_package() -> Result<VirtualPackage, AppError> {
@@ -554,5 +674,37 @@ mod tests {
         assert_eq!(installed[0].content.definition_count(), 1);
         assert_eq!(installed[0].content.support_definitions, 1);
         assert_eq!(unavailable, 1);
+    }
+
+    #[test]
+    fn persisted_identity_resolves_to_its_installed_directory() {
+        let temporary = tempfile::tempdir().expect("world root");
+        let mod_path = temporary.path().join("mods/weather");
+        write_installed_package(&mod_path, &installed_package());
+        let selected = BTreeSet::from([SelectedMod {
+            mod_id: ModId::parse("games.loreloom.weather").expect("Mod ID"),
+            version: Version::new(1, 2, 3),
+        }]);
+
+        assert_eq!(
+            resolve_installed_mod_paths(temporary.path(), &selected),
+            vec![mod_path]
+        );
+    }
+
+    #[test]
+    fn duplicate_sources_for_one_package_identity_use_the_last_path() {
+        let temporary = tempfile::tempdir().expect("Mod parent");
+        let installed = temporary.path().join("installed");
+        let explicit = temporary.path().join("explicit");
+        write_installed_package(&installed, &installed_package());
+        write_installed_package(&explicit, &installed_package());
+
+        let sources =
+            inspect_active_mod_sources(&PackageCompiler::default(), &[installed, explicit.clone()])
+                .expect("inspect duplicate sources");
+
+        assert_eq!(sources.len(), 1);
+        assert_eq!(sources.into_values().next(), Some(explicit));
     }
 }

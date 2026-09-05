@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
-use loreloom_core::{ContentDefinitionId, Fixed, ModPackageStatus, PackageCatalogView};
+use loreloom_core::{ContentDefinitionId, Fixed, ModId, ModPackageStatus, PackageCatalogView};
 use ratatui::{
     Frame,
     layout::{Alignment, Constraint, Direction, Layout, Rect},
@@ -10,7 +10,10 @@ use ratatui::{
     widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap},
 };
 
-use crate::{InputEditor, TuiConfig, TuiError, TuiTerminal, render::format_fixed};
+use crate::{
+    InputEditor, TuiConfig, TuiError, TuiTerminal,
+    render::{format_fixed, push_mod_package},
+};
 
 const ACCENT: Color = Color::Cyan;
 const MUTED: Color = Color::DarkGray;
@@ -24,6 +27,8 @@ pub struct StartupModel {
     pub settings: Vec<String>,
     pub player_creation: StartupPlayerCreationView,
     pub new_game_only: bool,
+    pub open_mods: bool,
+    pub notice: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -110,8 +115,13 @@ pub struct StartupChoiceView {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StartupAction {
-    OpenSave { index: usize },
+    OpenSave {
+        index: usize,
+    },
     NewGame(StartupPlayerSelection),
+    ApplyMods {
+        enabled: Vec<loreloom_core::ModPackageView>,
+    },
     Quit,
 }
 
@@ -265,12 +275,15 @@ pub struct StartupApp {
     pub selected: usize,
     pub notice: Option<String>,
     form: Option<StartupFormState>,
+    initial_enabled_mods: BTreeSet<(ModId, String)>,
 }
 
 impl StartupApp {
     #[must_use]
     pub fn new(model: StartupModel) -> Self {
-        let page = if model.new_game_only {
+        let page = if model.open_mods {
+            StartupPage::Mods
+        } else if model.new_game_only {
             match model.player_creation {
                 StartupPlayerCreationView::Fixed => StartupPage::Main,
                 StartupPlayerCreationView::Preset { .. } => StartupPage::Presets,
@@ -285,15 +298,23 @@ impl StartupApp {
         };
         let selected = if page == StartupPage::Main {
             usize::from(model.saves.is_empty())
+        } else if page == StartupPage::Mods {
+            mod_visual_order(&model.packages)
+                .first()
+                .copied()
+                .unwrap_or(0)
         } else {
             0
         };
+        let initial_enabled_mods = enabled_mod_keys(&model.packages);
+        let notice = model.notice.clone();
         Self {
             model,
             page,
             selected,
-            notice: None,
+            notice,
             form,
+            initial_enabled_mods,
         }
     }
 
@@ -310,7 +331,10 @@ impl StartupApp {
 }
 
 pub fn run_startup(model: StartupModel, config: TuiConfig) -> Result<StartupAction, TuiError> {
-    if model.new_game_only && matches!(&model.player_creation, StartupPlayerCreationView::Fixed) {
+    if model.new_game_only
+        && !model.open_mods
+        && matches!(&model.player_creation, StartupPlayerCreationView::Fixed)
+    {
         return Ok(StartupAction::NewGame(StartupPlayerSelection::Fixed));
     }
     let mut terminal = TuiTerminal::open()?;
@@ -323,7 +347,9 @@ impl TuiTerminal {
         model: StartupModel,
         config: TuiConfig,
     ) -> Result<StartupAction, TuiError> {
-        if model.new_game_only && matches!(&model.player_creation, StartupPlayerCreationView::Fixed)
+        if model.new_game_only
+            && !model.open_mods
+            && matches!(&model.player_creation, StartupPlayerCreationView::Fixed)
         {
             self.show_loading(&model.world_name)?;
             return Ok(StartupAction::NewGame(StartupPlayerSelection::Fixed));
@@ -340,7 +366,9 @@ impl TuiTerminal {
             match event::read()? {
                 Event::Key(key) => {
                     if let Some(action) = handle_startup_key(&mut app, key) {
-                        if action != StartupAction::Quit {
+                        if action != StartupAction::Quit
+                            && !matches!(&action, StartupAction::ApplyMods { .. })
+                        {
                             self.show_loading(&app.model.world_name)?;
                         }
                         return Ok(action);
@@ -363,7 +391,8 @@ pub fn handle_startup_key(app: &mut StartupApp, key: KeyEvent) -> Option<Startup
     match app.page {
         StartupPage::Main => handle_main_key(app, key),
         StartupPage::Saves => handle_saves_key(app, key),
-        StartupPage::Mods | StartupPage::Settings => handle_information_key(app, key),
+        StartupPage::Mods => handle_mods_key(app, key),
+        StartupPage::Settings => handle_information_key(app, key),
         StartupPage::Presets => handle_presets_key(app, key),
         StartupPage::Form => handle_form_key(app, key),
     }
@@ -464,6 +493,120 @@ fn handle_information_key(app: &mut StartupApp, key: KeyEvent) -> Option<Startup
         _ => {}
     }
     None
+}
+
+fn handle_mods_key(app: &mut StartupApp, key: KeyEvent) -> Option<StartupAction> {
+    let package_count = app.model.packages.mods.len();
+    match key.code {
+        KeyCode::Esc | KeyCode::Backspace => {
+            restore_initial_mod_selection(app);
+            return app.return_to_main();
+        }
+        KeyCode::Up => {
+            move_mod_selection(app, 1, false);
+            app.notice = None;
+        }
+        KeyCode::Down => {
+            move_mod_selection(app, 1, true);
+            app.notice = None;
+        }
+        KeyCode::PageUp => {
+            move_mod_selection(app, 5, false);
+            app.notice = None;
+        }
+        KeyCode::PageDown => {
+            move_mod_selection(app, 5, true);
+            app.notice = None;
+        }
+        KeyCode::Char(' ') if package_count > 0 => {
+            toggle_selected_mod(app);
+            app.notice = None;
+        }
+        KeyCode::Enter => {
+            let enabled = app
+                .model
+                .packages
+                .mods
+                .iter()
+                .filter(|package| package.status == ModPackageStatus::Enabled)
+                .cloned()
+                .collect();
+            return Some(StartupAction::ApplyMods { enabled });
+        }
+        _ => {}
+    }
+    None
+}
+
+fn move_mod_selection(app: &mut StartupApp, distance: usize, forward: bool) {
+    let order = mod_visual_order(&app.model.packages);
+    let Some(position) = order.iter().position(|index| *index == app.selected) else {
+        app.selected = order.first().copied().unwrap_or(0);
+        return;
+    };
+    let next = if forward {
+        position
+            .saturating_add(distance)
+            .min(order.len().saturating_sub(1))
+    } else {
+        position.saturating_sub(distance)
+    };
+    app.selected = order[next];
+}
+
+fn mod_visual_order(packages: &PackageCatalogView) -> Vec<usize> {
+    [ModPackageStatus::Enabled, ModPackageStatus::Installed]
+        .into_iter()
+        .flat_map(|status| {
+            packages
+                .mods
+                .iter()
+                .enumerate()
+                .filter_map(move |(index, package)| (package.status == status).then_some(index))
+        })
+        .collect()
+}
+
+fn toggle_selected_mod(app: &mut StartupApp) {
+    let Some(selected) = app.model.packages.mods.get(app.selected) else {
+        return;
+    };
+    let mod_id = selected.mod_id.clone();
+    let enable = selected.status == ModPackageStatus::Installed;
+    for (index, package) in app.model.packages.mods.iter_mut().enumerate() {
+        if index == app.selected {
+            package.status = if enable {
+                ModPackageStatus::Enabled
+            } else {
+                ModPackageStatus::Installed
+            };
+        } else if enable && package.mod_id == mod_id {
+            package.status = ModPackageStatus::Installed;
+        }
+    }
+}
+
+fn restore_initial_mod_selection(app: &mut StartupApp) {
+    for package in &mut app.model.packages.mods {
+        package.status = if app.initial_enabled_mods.contains(&mod_package_key(package)) {
+            ModPackageStatus::Enabled
+        } else {
+            ModPackageStatus::Installed
+        };
+    }
+}
+
+fn enabled_mod_keys(packages: &PackageCatalogView) -> BTreeSet<(ModId, String)> {
+    packages
+        .mods
+        .iter()
+        .filter(|package| package.status == ModPackageStatus::Enabled)
+        .map(mod_package_key)
+        .collect()
+}
+
+fn mod_package_key(package: &loreloom_core::ModPackageView) -> (ModId, String) {
+    (package.mod_id.clone(), package.version.to_string())
 }
 
 fn handle_presets_key(app: &mut StartupApp, key: KeyEvent) -> Option<StartupAction> {
@@ -1051,46 +1194,108 @@ fn render_saves(frame: &mut Frame<'_>, app: &StartupApp, area: Rect) {
     frame.render_widget(Paragraph::new(lines), inset(area, 2, 1));
 }
 
-fn render_mods(frame: &mut Frame<'_>, app: &StartupApp, area: Rect) {
-    let mut lines = vec![Line::from(Span::styled(
-        "MODS",
-        Style::default().fg(MUTED).add_modifier(Modifier::BOLD),
-    ))];
-    lines.push(Line::from(format!(
-        "World  {}  v{}",
-        app.model.packages.world.world_id, app.model.packages.world.version
-    )));
-    for package in &app.model.packages.mods {
-        lines.push(Line::from(format!(
-            "{}  v{}  {}  {} definitions",
-            package.mod_id,
-            package.version,
-            mod_status_label(package.status),
-            package.content.definition_count()
-        )));
-    }
-    if app.model.packages.unavailable_installed > 0 {
-        lines.push(Line::from(Span::styled(
-            format!(
-                "{} installed package(s) unavailable",
-                app.model.packages.unavailable_installed
+fn render_mods(frame: &mut Frame<'_>, app: &mut StartupApp, area: Rect) {
+    let body = inset(area, 2, 1);
+    let catalog = &app.model.packages;
+    let enabled = catalog
+        .mods
+        .iter()
+        .enumerate()
+        .filter(|(_, package)| package.status == ModPackageStatus::Enabled)
+        .collect::<Vec<_>>();
+    let installed = catalog
+        .mods
+        .iter()
+        .enumerate()
+        .filter(|(_, package)| package.status == ModPackageStatus::Installed)
+        .collect::<Vec<_>>();
+    let mut selected_row = None;
+    let mut lines = vec![
+        Line::from(Span::styled(
+            "WORLD",
+            Style::default().fg(MUTED).add_modifier(Modifier::BOLD),
+        )),
+        Line::from(vec![
+            Span::styled("◆ ", Style::default().fg(ACCENT)),
+            Span::styled(
+                catalog.world.world_id.to_string(),
+                Style::default().add_modifier(Modifier::BOLD),
             ),
-            Style::default().fg(Color::Yellow),
+        ]),
+        Line::from(Span::styled(
+            format!("  v{} · main world", catalog.world.version),
+            Style::default().fg(MUTED),
+        )),
+        Line::from(""),
+        Line::from(Span::styled(
+            format!("ENABLED ({})", enabled.len()),
+            Style::default().fg(MUTED).add_modifier(Modifier::BOLD),
+        )),
+    ];
+    if enabled.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "No enabled extension Mods.",
+            Style::default().fg(MUTED),
         )));
+    } else {
+        for (index, package) in enabled {
+            if index == app.selected {
+                selected_row = Some(lines.len());
+            }
+            push_mod_package(&mut lines, package, true, Some(index == app.selected));
+        }
     }
+    lines.extend([
+        Line::from(""),
+        Line::from(Span::styled(
+            format!("INSTALLED, NOT ENABLED ({})", installed.len()),
+            Style::default().fg(MUTED).add_modifier(Modifier::BOLD),
+        )),
+    ]);
+    if installed.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "No valid inactive Mods found in mods/.",
+            Style::default().fg(MUTED),
+        )));
+    } else {
+        for (index, package) in installed {
+            if index == app.selected {
+                selected_row = Some(lines.len());
+            }
+            push_mod_package(&mut lines, package, false, Some(index == app.selected));
+        }
+    }
+    if catalog.unavailable_installed > 0 {
+        lines.extend([
+            Line::from(""),
+            Line::from(Span::styled(
+                format!(
+                    "! {} installed candidate(s) unavailable",
+                    catalog.unavailable_installed
+                ),
+                Style::default().fg(Color::Yellow),
+            )),
+        ]);
+    }
+    if let Some(notice) = &app.notice {
+        lines.extend([
+            Line::from(""),
+            Line::from(Span::styled(
+                notice.clone(),
+                Style::default().fg(Color::Yellow),
+            )),
+        ]);
+    }
+    let page_rows = usize::from(body.height.max(1));
+    let scroll = selected_row
+        .map(|row| row.saturating_sub(page_rows.saturating_sub(1)))
+        .unwrap_or(0);
     frame.render_widget(
         Paragraph::new(lines)
-            .scroll((u16::try_from(app.selected).unwrap_or(u16::MAX), 0))
+            .scroll((u16::try_from(scroll).unwrap_or(u16::MAX), 0))
             .wrap(Wrap { trim: false }),
-        inset(area, 2, 1),
+        body,
     );
-}
-
-fn mod_status_label(status: ModPackageStatus) -> &'static str {
-    match status {
-        ModPackageStatus::Enabled => "enabled",
-        ModPackageStatus::Installed => "installed",
-    }
 }
 
 fn render_settings(frame: &mut Frame<'_>, app: &StartupApp, area: Rect) {
@@ -1382,7 +1587,8 @@ fn render_startup_footer(frame: &mut Frame<'_>, app: &StartupApp, area: Rect) {
     let hint = match app.page {
         StartupPage::Main => "↑↓ select  Enter open  Esc quit",
         StartupPage::Saves | StartupPage::Presets => "↑↓ select  Enter confirm  Esc back",
-        StartupPage::Mods | StartupPage::Settings => "↑↓ scroll  Esc back",
+        StartupPage::Mods => "↑↓ select  Space toggle  Enter apply  Esc cancel",
+        StartupPage::Settings => "↑↓ scroll  Esc back",
         StartupPage::Form => "↑↓/Tab field  ←→ choose  Space toggle  Enter next/confirm  Esc back",
     };
     frame.render_widget(
@@ -1403,7 +1609,7 @@ fn inset(area: Rect, horizontal: u16, vertical: u16) -> Rect {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use loreloom_core::{PackageCatalogView, WorldPackageView};
+    use loreloom_core::{ModPackageView, PackageCatalogView, PackageContentView, WorldPackageView};
     use ratatui::{Terminal, backend::TestBackend};
 
     fn id(kind: &str, key: &str) -> ContentDefinitionId {
@@ -1428,6 +1634,23 @@ mod tests {
             settings: vec!["Configuration  loreloom.toml".to_owned()],
             player_creation: StartupPlayerCreationView::Fixed,
             new_game_only: false,
+            open_mods: false,
+            notice: None,
+        }
+    }
+
+    fn mod_package(id: &str, status: ModPackageStatus) -> ModPackageView {
+        ModPackageView {
+            mod_id: id.parse().expect("Mod ID"),
+            version: "1.0.0".parse().expect("version"),
+            status,
+            dependency_count: 0,
+            content: PackageContentView {
+                characters: 1,
+                narrator_prompts: 1,
+                patches: 1,
+                ..PackageContentView::default()
+            },
         }
     }
 
@@ -1457,6 +1680,90 @@ mod tests {
             action,
             Some(StartupAction::NewGame(StartupPlayerSelection::Fixed))
         );
+    }
+
+    #[test]
+    fn launcher_mods_toggle_apply_and_cancel_use_visual_section_order() {
+        let mut model = fixed_model();
+        model.open_mods = true;
+        model.packages.mods = vec![
+            mod_package("games.loreloom.alpha", ModPackageStatus::Enabled),
+            mod_package("games.loreloom.beta", ModPackageStatus::Installed),
+        ];
+        let mut app = StartupApp::new(model);
+
+        handle_startup_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE),
+        );
+        handle_startup_key(&mut app, KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(app.selected, 1);
+        handle_startup_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE),
+        );
+
+        let action =
+            handle_startup_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        let Some(StartupAction::ApplyMods { enabled }) = action else {
+            panic!("Enter must apply the current Mod selection");
+        };
+        assert_eq!(enabled.len(), 1);
+        assert_eq!(enabled[0].mod_id.as_str(), "games.loreloom.beta");
+
+        let mut cancel_model = fixed_model();
+        cancel_model.open_mods = true;
+        cancel_model.packages.mods = vec![mod_package(
+            "games.loreloom.alpha",
+            ModPackageStatus::Enabled,
+        )];
+        let mut cancel_app = StartupApp::new(cancel_model);
+        handle_startup_key(
+            &mut cancel_app,
+            KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE),
+        );
+        assert_eq!(
+            handle_startup_key(
+                &mut cancel_app,
+                KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+            ),
+            None
+        );
+        assert_eq!(cancel_app.page, StartupPage::Main);
+        assert_eq!(
+            cancel_app.model.packages.mods[0].status,
+            ModPackageStatus::Enabled
+        );
+    }
+
+    #[test]
+    fn launcher_mods_render_matches_runtime_catalog_details() {
+        let mut model = fixed_model();
+        model.open_mods = true;
+        model.packages.mods = vec![
+            mod_package("games.loreloom.alpha", ModPackageStatus::Enabled),
+            mod_package("games.loreloom.beta", ModPackageStatus::Installed),
+        ];
+        let backend = TestBackend::new(90, 32);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        let mut app = StartupApp::new(model);
+
+        terminal
+            .draw(|frame| render_startup(frame, &mut app))
+            .expect("render Mods");
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+
+        assert!(rendered.contains("WORLD"));
+        assert!(rendered.contains("ENABLED (1)"));
+        assert!(rendered.contains("INSTALLED, NOT ENABLED (1)"));
+        assert!(rendered.contains("1 definition · 1 prompt · 1 patch"));
+        assert!(rendered.contains("Space toggle  Enter apply  Esc cancel"));
     }
 
     #[test]

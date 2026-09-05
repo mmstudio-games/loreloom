@@ -107,6 +107,8 @@ pub fn project_startup_model(
         ],
         player_creation,
         new_game_only,
+        open_mods: false,
+        notice: None,
     })
 }
 

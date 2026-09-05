@@ -67,9 +67,15 @@ NPC 的消息依次包含内容拥有的 `AgentProfile.system_style`、可选根
 
 ## 4. Mod 语义
 
-`mods/` 是已安装扩展的约定目录；第一阶段不会仅因目录存在就自动启用。可重复 `--mod PATH` 明确
-选择本次候选闭包，存档以 `ModLock` 记录最后成功采用的 Mod、版本、哈希、依赖与 Patch。未来本地
-`.loreloom/` loadout 可以提供等价选择，但不能进入主世界内容哈希。
+`mods/` 是已安装扩展的约定目录；第一阶段不会仅因目录存在就自动启用。交互式 Launcher 允许选择或
+反选通过独立 Package 检查的 installed candidate，并把最近一次成功编译的 package ID/version 集合
+原子保存到世界本地 `.loreloom/mods.toml`。该 loadout 是可删除、可重建的 Host 偏好，不保存绝对
+路径、不进入主世界内容哈希或存档；存档仍以 `ModLock` 记录真正采用的 Mod、版本、哈希、依赖与
+Patch。Launcher 每次应用选择都重新执行完整依赖、Patch、跨引用、内容和外观校验，失败时保留上一个
+有效 loadout 并返回可继续修改的 Mods 页。运行中的世界不热启停 Mod。
+
+可重复 `--mod PATH` 仍可为本次进程追加目录包，包括 `mods/` 外的开发包；外部路径不写入本地
+loadout。Headless 为保持显式可复现，只使用 `--mod`，不读取交互式 loadout。
 
 Mod 可以增加或受约束地替换 NPC、Scene、Item、Skill、Event、Parameter、声明式 Rule、Prompt 与
 展示资源；它不能改变引擎代码级协议、扩大 Tool Capability、访问 Secret、网络、Shell 或注入本机
@@ -81,6 +87,8 @@ Mod 可以增加或受约束地替换 NPC、Scene、Item、Skill、Event、Param
 同样直接压平进初始 Manifest v1，不保留 `narrator.response_language` 兼容。
 项目方于 2026-09-06 进一步确认根世界不承担必需的默认 Prompt；`[prompts]` 可整体缺省或两类列表
 为空，由启用 Mod 单独提供 Prompt 仍是合法装配。引擎不再注入自然语言协议 System Message。
+项目方同日确认 Launcher Mods 页应复用运行中 overlay 的分组与内容摘要，增加选择/反选，并把成功
+loadout 持久保存在 `.loreloom/mods.toml`；运行中 overlay 继续只读。
 
 ## 5. 持久化
 
@@ -125,7 +133,9 @@ Schema：当前结构直接成为初始 v1，不分配开发期 v2 或注册 leg
 7. Tool Schema、ECS 与代码级安全边界不能被根世界或 Mod 覆盖；
 8. 删除未被使用的 Mod 可以重开；删除仍被持久状态引用的内容会列出缺失 ID，且存档与原 Lock 不变；
 9. 旧开发期 Manifest 不会引入 Schema 兼容分支或被无依据地升级，新的初始 v1 Schema 直接要求
-   WorldLock。
+   WorldLock；
+10. Launcher 可以选择/反选 installed Mod，成功选择重启 Startup 内容投影并原子保存本地 loadout；
+    依赖或内容编译失败不覆盖旧 loadout，Headless 不隐式读取它。
 
 项目方于 2026-09-01 进一步确认 Loreloom 是允许玩家持续编辑 Prompt、增删 Mod 以及添加角色卡和
 Scene 的叙事平台，因此撤销“candidate Lock 必须与存档精确相等才能打开”的产品行为。完整 hash
