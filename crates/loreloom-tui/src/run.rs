@@ -9,9 +9,9 @@ use ratatui_image::picker::Picker;
 use thiserror::Error;
 
 use crate::{
-    CrosstermTerminalOps, ImageProtocolPreference, RuntimeUiEvent, TerminalSession, TuiApp,
-    UiClientError, UiIntent, appearance::AppearancePresenter, handle_key, handle_mouse,
-    handle_paste, render::render_ui_with_appearance,
+    ImageProtocolPreference, RuntimeUiEvent, TuiApp, TuiTerminal, UiClientError, UiIntent,
+    appearance::AppearancePresenter, handle_key, handle_mouse, handle_paste,
+    render::render_ui_with_appearance,
 };
 
 const MAX_RUNTIME_EVENTS_PER_FRAME: usize = 1_024;
@@ -78,10 +78,21 @@ pub fn run_with_appearance(
     config: TuiConfig,
     appearance: AppearanceCatalog,
 ) -> Result<(), TuiError> {
-    let config = config.validate()?;
-    let session = TerminalSession::open(CrosstermTerminalOps)?;
-    let mut presenter =
-        if config.image_protocol == ImageProtocolPreference::Disabled || appearance.is_empty() {
+    TuiTerminal::open()?.run_with_appearance(client, initial_snapshot, config, appearance)
+}
+
+impl TuiTerminal {
+    pub fn run_with_appearance(
+        mut self,
+        client: &mut impl RuntimeClient,
+        initial_snapshot: UiSnapshot,
+        config: TuiConfig,
+        appearance: AppearanceCatalog,
+    ) -> Result<(), TuiError> {
+        let config = config.validate()?;
+        let mut presenter = if config.image_protocol == ImageProtocolPreference::Disabled
+            || appearance.is_empty()
+        {
             None
         } else {
             let mut picker = Picker::from_query_stdio().unwrap_or_else(|_| Picker::halfblocks());
@@ -90,18 +101,24 @@ pub fn run_with_appearance(
             }
             Some(AppearancePresenter::new(appearance, picker)?)
         };
-    let backend = CrosstermBackend::new(io::stdout());
-    let mut terminal = Terminal::new(backend)?;
-    terminal.clear()?;
-    let mut app = TuiApp::new(initial_snapshot);
+        self.terminal.clear()?;
+        let mut app = TuiApp::new(initial_snapshot);
 
-    let loop_result = run_loop(client, &mut terminal, &mut app, config, presenter.as_mut());
-    let shutdown_result = client.shutdown().map_err(TuiError::Client);
-    drop(terminal);
-    drop(session);
-    // A bounded compositor job may still be finishing. Restore the terminal before joining it.
-    drop(presenter);
-    loop_result.and(shutdown_result)
+        let loop_result = run_loop(
+            client,
+            &mut self.terminal,
+            &mut app,
+            config,
+            presenter.as_mut(),
+        );
+        let shutdown_result = client.shutdown().map_err(TuiError::Client);
+        let Self { terminal, session } = self;
+        drop(terminal);
+        drop(session);
+        // A bounded compositor job may still be finishing. Restore the terminal before joining it.
+        drop(presenter);
+        loop_result.and(shutdown_result)
+    }
 }
 
 fn run_loop(

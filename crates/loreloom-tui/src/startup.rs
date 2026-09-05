@@ -1,19 +1,16 @@
-use std::{collections::BTreeSet, io};
+use std::collections::BTreeSet;
 
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use loreloom_core::{ContentDefinitionId, Fixed, ModPackageStatus, PackageCatalogView};
 use ratatui::{
-    Frame, Terminal,
-    backend::CrosstermBackend,
+    Frame,
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap},
 };
 
-use crate::{
-    CrosstermTerminalOps, InputEditor, TerminalSession, TuiConfig, TuiError, render::format_fixed,
-};
+use crate::{InputEditor, TuiConfig, TuiError, TuiTerminal, render::format_fixed};
 
 const ACCENT: Color = Color::Cyan;
 const MUTED: Color = Color::DarkGray;
@@ -313,28 +310,45 @@ impl StartupApp {
 }
 
 pub fn run_startup(model: StartupModel, config: TuiConfig) -> Result<StartupAction, TuiError> {
-    if model.new_game_only && matches!(model.player_creation, StartupPlayerCreationView::Fixed) {
+    if model.new_game_only && matches!(&model.player_creation, StartupPlayerCreationView::Fixed) {
         return Ok(StartupAction::NewGame(StartupPlayerSelection::Fixed));
     }
-    let config = config.validate()?;
-    let _session = TerminalSession::open(CrosstermTerminalOps)?;
-    let backend = CrosstermBackend::new(io::stdout());
-    let mut terminal = Terminal::new(backend)?;
-    terminal.clear()?;
-    let mut app = StartupApp::new(model);
-    loop {
-        terminal.draw(|frame| render_startup(frame, &mut app))?;
-        if !event::poll(config.event_poll_interval)? {
-            continue;
+    let mut terminal = TuiTerminal::open()?;
+    terminal.run_startup(model, config)
+}
+
+impl TuiTerminal {
+    pub fn run_startup(
+        &mut self,
+        model: StartupModel,
+        config: TuiConfig,
+    ) -> Result<StartupAction, TuiError> {
+        if model.new_game_only && matches!(&model.player_creation, StartupPlayerCreationView::Fixed)
+        {
+            self.show_loading(&model.world_name)?;
+            return Ok(StartupAction::NewGame(StartupPlayerSelection::Fixed));
         }
-        match event::read()? {
-            Event::Key(key) => {
-                if let Some(action) = handle_startup_key(&mut app, key) {
-                    return Ok(action);
-                }
+        let config = config.validate()?;
+        self.terminal.clear()?;
+        let mut app = StartupApp::new(model);
+        loop {
+            self.terminal
+                .draw(|frame| render_startup(frame, &mut app))?;
+            if !event::poll(config.event_poll_interval)? {
+                continue;
             }
-            Event::Paste(text) => handle_startup_paste(&mut app, &text),
-            Event::Resize(_, _) | Event::FocusGained | Event::FocusLost | Event::Mouse(_) => {}
+            match event::read()? {
+                Event::Key(key) => {
+                    if let Some(action) = handle_startup_key(&mut app, key) {
+                        if action != StartupAction::Quit {
+                            self.show_loading(&app.model.world_name)?;
+                        }
+                        return Ok(action);
+                    }
+                }
+                Event::Paste(text) => handle_startup_paste(&mut app, &text),
+                Event::Resize(_, _) | Event::FocusGained | Event::FocusLost | Event::Mouse(_) => {}
+            }
         }
     }
 }
@@ -1390,7 +1404,7 @@ fn inset(area: Rect, horizontal: u16, vertical: u16) -> Rect {
 mod tests {
     use super::*;
     use loreloom_core::{PackageCatalogView, WorldPackageView};
-    use ratatui::backend::TestBackend;
+    use ratatui::{Terminal, backend::TestBackend};
 
     fn id(kind: &str, key: &str) -> ContentDefinitionId {
         format!("games.loreloom.test:{kind}/{key}")

@@ -174,7 +174,9 @@ Runtime 可以依赖 Core、Content、World、Agent 和 Store，是应用策略�
 
 ### 3.8 `loreloom-tui` 与 `loreloom`
 
-TUI 拥有终端初始化/恢复、Launcher、玩家创建表单交互、事件映射、布局、输入编辑、滚动与渲染。
+TUI 拥有终端初始化/恢复、Launcher、玩家创建表单交互、加载页、事件映射、布局、输入编辑、滚动与
+渲染。一次交互式 Launcher -> 初始化 -> 游戏流程必须共享一个终端会话，不得在页面切换时退出并
+重新进入 alternate screen。
 它只依赖 Core 暴露的 View Model、Appearance 的不可变 Catalog/compositor 和 Runtime Client；Content 的玩家创建 Schema 必须先由应用装配层
 投影成无执行能力的 Startup View Model，TUI 不依赖 Content/World/Agent/Store 实现。
 
@@ -2196,10 +2198,16 @@ Launcher 中热启停正在运行的 Mod；Settings 页面只显示或编辑明�
 credential 值。
 
 New Game 根据第 10.5 节进入 fixed、preset 或 UGC。preset 显示选中角色的安全 Character 预览；UGC
-宽屏采用左侧实时角色摘要、右侧字段，窄屏保持字段和确认操作可达。`Tab`/`Shift+Tab` 切换字段，
-方向键调整选项或数值，`Space` 切换 boolean/multi-choice，文本字段复用 grapheme editor，`Enter`
-进入/确认当前步骤，最终确认前执行完整本地校验。`Esc` 返回上一页且不创建 Save。表单错误必须定位
-到 field ID/安全类别，不回显 Secret，也不启动 Agent 重试。
+宽屏采用左侧实时角色摘要、右侧字段，窄屏保持字段和确认操作可达。`Up`/`Down` 与
+`Tab`/`Shift+Tab` 切换字段，`Left`/`Right` 调整选项或数值，`Space` 切换 boolean/multi-choice，
+文本字段复用 grapheme editor。字段在输入、删除、粘贴、选项变更和离开时执行本地校验并保留可见
+错误标记；`Enter` 只在当前字段有效时进入下一字段或最终确认。`Esc` 返回上一页且不创建 Save。
+表单错误必须定位到 field ID/安全类别，不回显 Secret，也不启动 Agent 重试。
+
+Launcher 产生 Open Save 或 New Game 动作后，TUI 必须在同一个 alternate screen 中立即渲染加载态，
+应用装配层随后解析 Provider 并创建/打开 World 与 Store；首个游戏 `UiSnapshot` 就绪后在原会话内
+替换加载态。该边界不得把 Provider/Store 初始化放进 Ratatui draw，也不得让 TUI 持有 ECS 可变访问。
+Quit、初始化错误、panic 和正常游戏退出均须按终端会话既有逆序清理契约恢复原终端。
 
 ### 12.1 布局
 
@@ -2696,10 +2704,12 @@ CI 使用最新 stable，不执行 MSRV Job，不允许 manifest 出现 `rust-ve
     或持久化变化。
 61. 未显式提供 `--save` 时先进入当前世界 Launcher；Continue 选择最近兼容存档，Load Save 可选其它
     兼容条目，New Game 按 fixed/preset/UGC 创建，Quit 在 Provider/Store 创建前退出。显式已有
-    `--save` 直达加载，显式不存在 `--save` 进入该目标的新游戏流程，Headless 可确定性绕过。
+    `--save` 直达加载，显式不存在 `--save` 进入该目标的新游戏流程，Headless 可确定性绕过。Launcher、
+    初始化加载态与游戏页共享一个可恢复的终端会话，切换期间不显示原始终端。
 62. UGC 表单的七种字段、固定 binding/effect、跨引用和范围验证均可由外部 World/Mod 内容声明；
     玩家 Draft 无需 Provider 即可确定性编译为既有 SpawnSpec/records。无效 Draft 不创建 Save，成功
-    UGC 玩家保留 PlayerCreated provenance，存档不包含临时答案 JSON。
+    UGC 玩家保留 PlayerCreated provenance，存档不包含临时答案 JSON。字段编辑时即时显示本地验证
+    结果，当前字段无效时不得由 Enter 推进或提交。
 
 ## 18. Active Spec 下的范围化实施门禁
 

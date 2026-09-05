@@ -13,7 +13,7 @@ use client::RuntimeAdapter;
 use config::{ProductConfig, ResolvedProductConfig};
 use error::AppError;
 use loreloom_content::PlayerBootstrap;
-use loreloom_tui::StartupAction;
+use loreloom_tui::{StartupAction, TuiTerminal};
 use save_catalog::{new_save_path, register, scan};
 use startup::{player_bootstrap, project_startup_model};
 use world::{WorldSetup, build_world_with_player, inspect_world_with};
@@ -50,6 +50,7 @@ fn run_application_with(
     ))?;
     let configured = ProductConfig::load(config_path)?;
     let launcher_tui_config = configured.tui_config();
+    let mut tui_terminal = None;
     let (save_path, save_display_name, bootstrap) = if cli.headless_input.is_some() {
         let save_path = cli
             .save_path
@@ -86,7 +87,8 @@ fn run_application_with(
         };
         let model =
             project_startup_model(&content, &entries, config_path, cli.save_path.is_some())?;
-        let action = loreloom_tui::run_startup(model, launcher_tui_config)?;
+        let terminal = tui_terminal.insert(TuiTerminal::open()?);
+        let action = terminal.run_startup(model, launcher_tui_config)?;
         match action {
             StartupAction::OpenSave { index } => {
                 let entry = entries
@@ -142,7 +144,11 @@ fn run_application_with(
     }
 
     let mut client = RuntimeAdapter::spawn(runtime)?;
-    loreloom_tui::run_with_appearance(&mut client, initial_snapshot, tui_config, appearance)?;
+    if let Some(terminal) = tui_terminal {
+        terminal.run_with_appearance(&mut client, initial_snapshot, tui_config, appearance)?;
+    } else {
+        loreloom_tui::run_with_appearance(&mut client, initial_snapshot, tui_config, appearance)?;
+    }
     Ok(())
 }
 

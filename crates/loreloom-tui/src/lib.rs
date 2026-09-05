@@ -7,6 +7,7 @@ mod run;
 mod session;
 mod startup;
 mod state;
+mod terminal;
 
 pub use appearance::ImageProtocolPreference;
 pub use editor::{EditorError, InputEditor, MAX_INPUT_BYTES};
@@ -23,3 +24,4 @@ pub use state::{
     NarrowPage, RuntimeUiEvent, TuiApp, TuiOverlay, UiClientError, UiIntent, handle_key,
     handle_mouse, handle_paste,
 };
+pub use terminal::TuiTerminal;
