@@ -46,22 +46,22 @@ WorldCommand 管线；“根世界不是 Mod”不能产生跳过 Schema、哈�
 
 ## 3. Agent Prompt 所有权
 
-引擎只保留不可覆盖的协议约束：ECS/Tool 权威边界、结构化控制不得来自模型正文、Capability、
-Secret 与日志策略。回复语言、世界背景、Narrator 人格和文风由根世界 Narrator Prompt 拥有；NPC
-共享的世界观、行为基调和叙事协作约束由根世界 NPC Prompt 拥有。`world.toml` 与 `mod.toml` 使用
-相同的 `[prompts] narrator = [...]`、`npc = [...]` 结构：根世界提供基础列表，启用 Mod 只能追加。
+引擎不注入硬编码自然语言 System Prompt。ECS/Tool 权威边界、结构化控制、Capability、Secret 与
+日志策略必须由代码和 Tool Schema 强制，而不是依赖模型遵循提示词。回复语言、世界背景、Narrator
+人格和文风可以由根世界或启用 Mod 的 Narrator Prompt 提供；NPC 共享的世界观、行为基调和叙事
+协作约束可以由根世界或启用 Mod 的 NPC Prompt 提供。`world.toml` 与 `mod.toml` 使用相同的可选
+`[prompts] narrator = [...]`、`npc = [...]` 结构；两类列表都可缺省或为空，启用 Mod 只能按顺序追加。
 Manifest、Agent 协议和 Runtime 不提供 `follow_player`、固定语言标签、语言检测、翻译或额外语言
-System Message；需要固定或跟随语言时由两类 Prompt 用自然语言分别声明。
+System Message；没有任何 World/Mod Prompt 时也必须能构造合法 Model Call。
 
 Narrator Model Call 的消息顺序固定为：
 
-1. Engine-owned protocol instruction；
-2. World-owned Narrator Prompt，按声明顺序；
-3. Mod-owned Narrator Prompt，按依赖拓扑、再按声明顺序；
-4. Runtime 投影的 ECS Observation、结果与玩家输入。
+1. 可选 World-owned Narrator Prompt，按声明顺序；
+2. 可选 Mod-owned Narrator Prompt，按依赖拓扑、再按声明顺序；
+3. Runtime 投影的 ECS Observation、结果与玩家输入。
 
-NPC 的消息依次包含 Engine 协议、`AgentProfile.system_style`、根世界 NPC Prompt、按依赖拓扑与声明
-顺序追加的 Mod NPC Prompt 和 Runtime Context。Prompt 是不可信叙事输入，不能注册 Tool、
+NPC 的消息依次包含内容拥有的 `AgentProfile.system_style`、可选根世界 NPC Prompt、按依赖拓扑与声明
+顺序追加的可选 Mod NPC Prompt 和 Runtime Context。Prompt 是不可信叙事输入，不能注册 Tool、
 扩大 Capability 或覆盖 ECS/Tool 的代码级校验。JSON Observation 的字段名属于稳定机器协议，不作为
 可本地化叙事文本。
 
@@ -72,13 +72,15 @@ NPC 的消息依次包含 Engine 协议、`AgentProfile.system_style`、根世�
 `.loreloom/` loadout 可以提供等价选择，但不能进入主世界内容哈希。
 
 Mod 可以增加或受约束地替换 NPC、Scene、Item、Skill、Event、Parameter、声明式 Rule、Prompt 与
-展示资源；它不能替换引擎协议 Prompt、扩大 Tool Capability、访问 Secret、网络、Shell 或注入本机
+展示资源；它不能改变引擎代码级协议、扩大 Tool Capability、访问 Secret、网络、Shell 或注入本机
 代码。Extension Mod 仍由后续独立 RFC 决定。
 
 项目方于 2026-09-01 确认根世界和 Mod 统一使用 `[prompts]`，其中 `narrator` 与 `npc` 均为有序路径
 列表；项目尚未发布，因此直接更新 Manifest Schema v1，不保留旧 `narrator.prompt` 字段兼容。
 项目方随后确认删除 Manifest/Runtime 的独立响应语言策略，由 World/Mod Prompt 完全负责语言取向；
 同样直接压平进初始 Manifest v1，不保留 `narrator.response_language` 兼容。
+项目方于 2026-09-06 进一步确认根世界不承担必需的默认 Prompt；`[prompts]` 可整体缺省或两类列表
+为空，由启用 Mod 单独提供 Prompt 仍是合法装配。引擎不再注入自然语言协议 System Message。
 
 ## 5. 持久化
 
@@ -114,14 +116,15 @@ Schema：当前结构直接成为初始 v1，不分配开发期 v2 或注册 leg
 ## 7. 验收
 
 1. 修改根世界 Prompt 会改变 WorldLock provenance，但不阻止存档打开，下一次 Agent 调用使用新 Prompt；
-2. 修改未启用的 `mods/` 目录不改变 WorldLock/ModLock；
-3. 添加兼容 Mod 或纯增量角色/Scene Definition 后可以重开并原子更新 ModLock，主世界仍不出现在
+2. 缺省根世界 `[prompts]` 时可以无 Prompt 运行，或把启用 Mod Prompt 作为首个全局 System Message；
+3. 修改未启用的 `mods/` 目录不改变 WorldLock/ModLock；
+4. 添加兼容 Mod 或纯增量角色/Scene Definition 后可以重开并原子更新 ModLock，主世界仍不出现在
    `ModLock.mods`；
-4. 新建世界完全从目录内容物化，删除 Rust 内的 Rainbound Inn Definition 后仍可运行；
-5. 中文根世界 Prompt 与中文玩家输入会把明确中文响应约束传给 Narrator/NPC；
-6. Engine Prompt、Tool Schema、ECS 与安全边界不能被根世界或 Mod 覆盖；
-7. 删除未被使用的 Mod 可以重开；删除仍被持久状态引用的内容会列出缺失 ID，且存档与原 Lock 不变；
-8. 旧开发期 Manifest 不会引入 Schema 兼容分支或被无依据地升级，新的初始 v1 Schema 直接要求
+5. 新建世界完全从目录内容物化，删除 Rust 内的 Rainbound Inn Definition 后仍可运行；
+6. 中文根世界 Prompt 与中文玩家输入会把明确中文响应约束传给 Narrator/NPC；
+7. Tool Schema、ECS 与代码级安全边界不能被根世界或 Mod 覆盖；
+8. 删除未被使用的 Mod 可以重开；删除仍被持久状态引用的内容会列出缺失 ID，且存档与原 Lock 不变；
+9. 旧开发期 Manifest 不会引入 Schema 兼容分支或被无依据地升级，新的初始 v1 Schema 直接要求
    WorldLock。
 
 项目方于 2026-09-01 进一步确认 Loreloom 是允许玩家持续编辑 Prompt、增删 Mod 以及添加角色卡和

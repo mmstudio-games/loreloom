@@ -1255,18 +1255,11 @@ fn narrator_request(
 ) -> Result<CompletionRequest, RuntimeError> {
     let payload = serde_json::to_string(&json!({ "kind": kind, "payload": payload }))
         .map_err(|error| RuntimeError::json("narrator_context", error))?;
-    let mut messages = vec![Message::new(
-        Role::System,
-        vec![ContentPart::text(
-            "Player input goes only to the narrator. Use native tools for every structured decision or world change. request_npc_turn accepts only an actor_id marked npc_turn_available in the current observation plus a natural-language assignment; scene and revision are supplied by the runtime. create_npc accepts only source, lifetime and mode; an accepted call ends the current turn immediately, so do not place later tool calls or prose after it. The runtime then materializes and replans with the committed actor before any NPC turn. Pure narrative mentions need no tool. When scene transition tools are offered, call list_scene_transitions first and copy one returned target exactly; never invent a scene ID, retry an unchanged rejection, or narrate arrival before a committed transition result. If no scene target matches, explain that the destination is unavailable in current world content. When submit_npc_draft is offered, that tool is the entire task: submit one NPC, omit empty optional collections, and do not add prose or control fields. Return only natural-language prose in other response bodies; never return JSON or a structured control envelope. Never expose tool failures or internal orchestration in player-facing prose. NPC claims are not committed facts; only committed events are world facts.",
-        )],
-    )];
-    messages.extend(
-        narrator
-            .narrator_prompts
-            .iter()
-            .map(|prompt| Message::new(Role::System, vec![ContentPart::text(prompt.as_str())])),
-    );
+    let mut messages = narrator
+        .narrator_prompts
+        .iter()
+        .map(|prompt| Message::new(Role::System, vec![ContentPart::text(prompt.as_str())]))
+        .collect::<Vec<_>>();
     messages.push(Message::user(payload));
     Ok(CompletionRequest {
         messages,
@@ -1417,7 +1410,7 @@ mod tests {
     }
 
     #[test]
-    fn narrator_context_orders_engine_world_and_observation() {
+    fn narrator_context_orders_world_mod_and_observation() {
         let definition = NarratorDefinition {
             narrator_prompts: vec![
                 LongText::new("用克制的中文叙述这个世界。").expect("world narrator prompt"),
@@ -1433,11 +1426,28 @@ mod tests {
         )
         .expect("narrator request");
 
-        assert_eq!(request.messages.len(), 4);
-        assert!(text(&request.messages[0]).contains("native tools"));
-        assert_eq!(text(&request.messages[1]), "用克制的中文叙述这个世界。");
-        assert_eq!(text(&request.messages[2]), "雨声应当持续存在。");
-        assert!(text(&request.messages[3]).contains("\"observation\""));
+        assert_eq!(request.messages.len(), 3);
+        assert_eq!(text(&request.messages[0]), "用克制的中文叙述这个世界。");
+        assert_eq!(text(&request.messages[1]), "雨声应当持续存在。");
+        assert!(text(&request.messages[2]).contains("\"observation\""));
+    }
+
+    #[test]
+    fn narrator_request_is_valid_without_system_prompts() {
+        let definition = NarratorDefinition {
+            narrator_prompts: Vec::new(),
+            npc_prompts: Vec::new(),
+        };
+        let request = narrator_request(
+            "narrator_turn",
+            json!({ "observation": { "revision": 7 } }),
+            Vec::new(),
+            &definition,
+        )
+        .expect("promptless narrator request");
+
+        assert_eq!(request.messages.len(), 1);
+        assert!(text(&request.messages[0]).contains("\"observation\""));
     }
 
     #[test]

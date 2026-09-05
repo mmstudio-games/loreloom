@@ -1,11 +1,16 @@
 use std::{fs, path::Path};
 
+use image::{ImageEncoder, Rgba, RgbaImage};
 use loreloom_content::{
-    CONTENT_SCHEMA_V1, ContentDocument, ContentError, Definition, MOD_MANIFEST_SCHEMA_V1,
-    ModCapability, ModDependency, ModManifestDraft, PackageCompiler, PackageError, PackageLimits,
-    PackagePayload, PackageSource, PatchDeclaration, PromptManifest, TagDefinition, VirtualPackage,
+    CONTENT_SCHEMA_V1, CharacterDefinition, ContentDocument, ContentError, Definition,
+    MOD_MANIFEST_SCHEMA_V1, ModCapability, ModDependency, ModManifestDraft, PackageCompiler,
+    PackageError, PackageLimits, PackagePayload, PackageSource, PatchDeclaration, PromptManifest,
+    TagDefinition, VirtualPackage,
 };
-use loreloom_core::{ContentDefinitionId, DisplayName, ModId, ModSourceKind};
+use loreloom_core::{
+    AppearanceValue, BaseAttributes, CharacterAppearance, CharacterProfile, ContentDefinitionId,
+    DisplayName, ModId, ModSourceKind, ShortText, SpawnConstraints,
+};
 use semver::{Version, VersionReq};
 use tempfile::TempDir;
 
@@ -53,6 +58,19 @@ fn document_payload(path: &str, definitions: Vec<Definition>) -> PackagePayload 
         })
         .expect("fixture Content Document"),
     )
+}
+
+fn png(image: &RgbaImage) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    image::codecs::png::PngEncoder::new(&mut bytes)
+        .write_image(
+            image.as_raw(),
+            image.width(),
+            image.height(),
+            image::ExtendedColorType::Rgba8,
+        )
+        .expect("encode PNG fixture");
+    bytes
 }
 
 fn base_package() -> VirtualPackage {
@@ -489,6 +507,141 @@ fn prompt_declarations_require_unique_present_non_empty_prompt_files() {
         compiled.mod_lock().mods[0].content_hash.clone()
     };
     assert_ne!(prompt_hash("First prompt."), prompt_hash("Second prompt."));
+}
+
+#[test]
+fn appearance_directory_requires_capability_and_compiles_before_activation() {
+    let pack = PackagePayload::new(
+        "appearance/pack.toml",
+        b"schema_version = 1\npack_id = \"games.loreloom.look:appearance_pack/main\"\nmodels = []\n"
+            .to_vec(),
+    );
+    let missing_capability = VirtualPackage::builtin(
+        draft("games.loreloom.look", vec![ModCapability::Content]),
+        vec![pack.clone()],
+    )
+    .expect("seal missing capability package");
+    assert!(matches!(
+        PackageCompiler::default().compile([PackageSource::Builtin(missing_capability)]),
+        Err(PackageError::UnsafePath)
+    ));
+
+    let missing_pack = VirtualPackage::builtin(
+        draft("games.loreloom.look", vec![ModCapability::Appearance]),
+        Vec::new(),
+    )
+    .expect("seal missing pack package");
+    assert!(matches!(
+        PackageCompiler::default().compile([PackageSource::Builtin(missing_pack)]),
+        Err(PackageError::InvalidManifest {
+            field: "appearance"
+        })
+    ));
+
+    let invalid_pack = VirtualPackage::builtin(
+        draft("games.loreloom.look", vec![ModCapability::Appearance]),
+        vec![pack],
+    )
+    .expect("seal invalid appearance package");
+    assert!(matches!(
+        PackageCompiler::default().compile([PackageSource::Builtin(invalid_pack)]),
+        Err(PackageError::Appearance(
+            loreloom_appearance::AppearanceError::ResourceLimit
+        ))
+    ));
+}
+
+#[test]
+fn appearance_catalog_and_character_reference_activate_as_one_candidate() {
+    let namespace = "games.loreloom.look";
+    let model_id = definition_id(&format!("{namespace}:appearance_model/player"));
+    let color_id = definition_id(&format!("{namespace}:appearance_parameter/eyes"));
+    let mut manifest = draft(
+        namespace,
+        vec![ModCapability::Content, ModCapability::Appearance],
+    );
+    manifest.content_schema = CONTENT_SCHEMA_V1;
+    let document = ContentDocument {
+        schema_version: CONTENT_SCHEMA_V1,
+        definitions: vec![Definition::Character(CharacterDefinition {
+            id: definition_id(&format!("{namespace}:character/player")),
+            display_name: DisplayName::new("Traveler").expect("display name"),
+            profile: CharacterProfile {
+                summary: ShortText::new("A traveler.").expect("summary"),
+                values: Vec::new(),
+                speaking_style: ShortText::new("Direct.").expect("style"),
+                narrative_tags: Default::default(),
+            },
+            appearance: Some(Box::new(CharacterAppearance {
+                model_id: model_id.clone(),
+                parameters: std::collections::BTreeMap::from([(
+                    color_id,
+                    AppearanceValue::Color { rgb: [30, 80, 120] },
+                )]),
+            })),
+            agent_profile: None,
+            base_attributes: BaseAttributes::default(),
+            resources: Vec::new(),
+            conditions: Vec::new(),
+            inventory: Vec::new(),
+            skills: Vec::new(),
+            knowledge: Vec::new(),
+            goals: Vec::new(),
+            spawn_constraints: SpawnConstraints {
+                minimum_attributes: Default::default(),
+                maximum_attributes: Default::default(),
+                maximum_attribute_points: Default::default(),
+                maximum_items: 0,
+                maximum_skills: 0,
+                allowed_definitions: Default::default(),
+            },
+        })],
+    };
+    let pack = format!(
+        r#"
+schema_version = 1
+pack_id = "{namespace}:appearance_pack/main"
+
+[[models]]
+id = "{namespace}:appearance_model/player"
+canvas_width = 1
+canvas_height = 1
+
+[[models.parameters]]
+id = "{namespace}:appearance_parameter/eyes"
+value = {{ type = "color", rgb = [20, 40, 60] }}
+
+[[models.frames]]
+name = "awake"
+duration_ms = 1000
+
+[[models.frames.layers]]
+name = "eyes"
+z_index = 1
+source = "appearance/images/eyes.png"
+tint = {{ type = "parameter", id = "{namespace}:appearance_parameter/eyes" }}
+"#
+    );
+    let package = VirtualPackage::builtin(
+        manifest,
+        vec![
+            PackagePayload::new(
+                "content/character.json",
+                serde_json::to_vec(&document).expect("encode content fixture"),
+            ),
+            PackagePayload::new("appearance/pack.toml", pack.into_bytes()),
+            PackagePayload::new(
+                "appearance/images/eyes.png",
+                png(&RgbaImage::from_pixel(1, 1, Rgba([255; 4]))),
+            ),
+        ],
+    )
+    .expect("seal appearance package");
+
+    let compiled = PackageCompiler::default()
+        .compile([PackageSource::Builtin(package)])
+        .expect("activate registry and appearance catalog together");
+    assert!(compiled.appearance().contains_model(&model_id));
 }
 
 #[cfg(unix)]

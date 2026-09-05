@@ -403,6 +403,7 @@ fn fixture(limits: RuleLimits) -> Fixture {
                     speaking_style: text("Quiet."),
                     narrative_tags: Default::default(),
                 },
+                appearance: None,
                 agent_profile: None,
                 base_attributes: BaseAttributes::default(),
                 resources: vec![loreloom_content::InitialResource {

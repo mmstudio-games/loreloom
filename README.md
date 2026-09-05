@@ -47,6 +47,10 @@ an existing save directly or create a new game at that exact path, `--world PATH
 game root, and `--headless "your input"` for one non-TTY turn. Repeat `--mod PATH` to enable explicit
 directory Mod package roots. Merely placing a package below `mods/` does not enable it. Existing
 saves reopen only when both the root `WorldLock` and enabled extension `ModLock` match exactly.
+Worlds and Mods can also provide dynamic layered character appearances under `appearance/`; see the
+[Mod authoring guide](mods/README.md#dynamic-appearance). On a wide terminal the TUI renders the
+player portrait through the detected Kitty/iTerm2/Sixel protocol, with half-block and text-only
+fallbacks.
 
 The strict config rejects unknown fields and raw `api_key`/`token` values. Custom endpoints also
 require an exact `allowed_endpoint_hosts` entry; non-loopback custom endpoints require HTTPS.

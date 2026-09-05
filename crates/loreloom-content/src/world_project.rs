@@ -39,6 +39,7 @@ pub struct WorldManifest {
     pub rules: Vec<String>,
     #[serde(default)]
     pub resources: Vec<String>,
+    #[serde(default)]
     pub prompts: PromptManifest,
 }
 
@@ -118,6 +119,13 @@ impl WorldProjectSource {
         let mut capabilities = vec![ModCapability::Content];
         if !manifest.rules.is_empty() {
             capabilities.push(ModCapability::Rules);
+        }
+        if manifest
+            .resources
+            .iter()
+            .any(|path| path.starts_with("appearance/"))
+        {
+            capabilities.push(ModCapability::Appearance);
         }
         let package = VirtualPackage::builtin(
             ModManifestDraft {
@@ -260,13 +268,12 @@ fn validate_manifest(manifest: &WorldManifest) -> Result<(), WorldProjectError> 
     for path in &manifest.resources {
         let valid = (path.starts_with("locales/") && path.ends_with(".json"))
             || path.starts_with("assets/")
+            || path == "appearance/pack.toml"
+            || (path.starts_with("appearance/images/") && path.ends_with(".png"))
             || (path.starts_with("prompts/") && path.ends_with(".md"));
         if !valid {
             return invalid_manifest("resources");
         }
-    }
-    if manifest.prompts.narrator.is_empty() {
-        return invalid_manifest("prompts.narrator");
     }
     for path in manifest
         .prompts
@@ -361,7 +368,8 @@ fn validate_world_path(path: &str) -> Result<(), WorldProjectError> {
         || path.starts_with("rules/")
         || path.starts_with("prompts/")
         || path.starts_with("locales/")
-        || path.starts_with("assets/");
+        || path.starts_with("assets/")
+        || path.starts_with("appearance/");
     if !valid_prefix
         || candidate.is_absolute()
         || path.contains('\\')
@@ -481,6 +489,80 @@ npc = ["prompts/npc.md"]
         .expect("change unlisted Mod");
         let (_, unchanged_lock, _, _) = compile_world(first.path());
         assert_eq!(first_lock, unchanged_lock);
+    }
+
+    #[test]
+    fn world_can_omit_prompts_and_defer_them_to_a_mod() {
+        let root = TempDir::new().expect("world root");
+        fs::create_dir_all(root.path().join("content")).expect("content directory");
+        fs::write(
+            root.path().join("world.toml"),
+            r#"schema_version = 1
+world_id = "games.loreloom.test-world"
+version = "0.1.0"
+engine = "=0.1.0"
+content_schema = 1
+initial_scene = "games.loreloom.test-world:scene/start"
+inventory_root_definition = "games.loreloom.test-world:item/inventory"
+spawn_system_definition = "games.loreloom.test-world:system/spawn"
+npc_generation_policy = "games.loreloom.test-world:generation_policy/default"
+content = ["content/world.json"]
+rules = []
+resources = []
+"#,
+        )
+        .expect("promptless world manifest");
+        fs::write(
+            root.path().join("content/world.json"),
+            r#"{"schema_version":1,"definitions":[]}"#,
+        )
+        .expect("world content");
+        let source = WorldProjectSource::load(root.path()).expect("load promptless world");
+        let compiler = PackageCompiler::default();
+        let without_mod = compiler
+            .compile_world(
+                &source,
+                std::iter::empty::<PackageSource>(),
+                std::iter::empty::<PackageSource>(),
+                &BTreeSet::new(),
+            )
+            .expect("compile world without prompts");
+        assert!(without_mod.prompts().narrator().is_empty());
+        assert!(without_mod.prompts().npc().is_empty());
+
+        let prompts = prompt_mod(
+            "games.loreloom.context-only",
+            None,
+            &["Mod narrator."],
+            &["Mod NPC."],
+            None,
+        );
+        let with_mod = compiler
+            .compile_world(
+                &source,
+                std::iter::empty::<PackageSource>(),
+                [PackageSource::Builtin(prompts)],
+                &BTreeSet::new(),
+            )
+            .expect("compile promptless world with prompt Mod");
+        assert_eq!(
+            with_mod
+                .prompts()
+                .narrator()
+                .iter()
+                .map(LongText::as_str)
+                .collect::<Vec<_>>(),
+            ["Mod narrator."]
+        );
+        assert_eq!(
+            with_mod
+                .prompts()
+                .npc()
+                .iter()
+                .map(LongText::as_str)
+                .collect::<Vec<_>>(),
+            ["Mod NPC."]
+        );
     }
 
     fn prompt_mod(

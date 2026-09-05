@@ -14,14 +14,15 @@ use loreloom_content::{
     parse_content_hash,
 };
 use loreloom_core::{
-    ActionId, ActionState, ActorId, BaseAttributes, CharacterController, CharacterLifetime,
-    CharacterProfile, CharacterRecord, CharacterSpawnSpec, ContentDefinitionId, ContentOrigin,
-    DisplayName, DomainRecord, EntityOrigin, Fixed, GeneratedOrigin, GenerationId,
-    GenerationSource, ItemRecord, LifeState, ModId, ObjectId, PlaceRecord, PlacementInput, Posture,
-    ResourcePool, Revision, SceneRecord, SceneTransitionTarget, ShortText, SkillGrantRecord,
-    SkillSource, SkillTargetRef, SpawnConstraints, StackState, SystemIdGenerator, TranscriptItemId,
-    TranscriptItemRecord, TranscriptSpeaker, TranscriptState, WorldCommand, WorldCommandKind,
-    WorldEventKind, WorldId, WorldStateRecord, WorldTime,
+    ActionId, ActionState, ActorId, AppearanceValue, BaseAttributes, CharacterAppearance,
+    CharacterController, CharacterLifetime, CharacterProfile, CharacterRecord, CharacterSpawnSpec,
+    ContentDefinitionId, ContentOrigin, DisplayName, DomainRecord, EntityOrigin, Fixed,
+    GeneratedOrigin, GenerationId, GenerationSource, ItemRecord, LifeState, ModId, ObjectId,
+    PlaceRecord, PlacementInput, Posture, ResourcePool, Revision, SceneRecord,
+    SceneTransitionTarget, ShortText, SkillGrantRecord, SkillSource, SkillTargetRef,
+    SpawnConstraints, StackState, SystemIdGenerator, TranscriptItemId, TranscriptItemRecord,
+    TranscriptSpeaker, TranscriptState, WorldCommand, WorldCommandKind, WorldEventKind, WorldId,
+    WorldStateRecord, WorldTime,
 };
 use loreloom_world::{GameWorld, WorldConfig, WorldError};
 use semver::Version;
@@ -227,6 +228,7 @@ fn fixture() -> Fixture {
                     speaking_style: text("Direct."),
                     narrative_tags: Default::default(),
                 },
+                appearance: None,
                 agent_profile: None,
                 base_attributes: BaseAttributes::default(),
                 resources: vec![InitialResource {
@@ -270,6 +272,7 @@ fn fixture() -> Fixture {
                     speaking_style: text("Measured."),
                     narrative_tags: Default::default(),
                 },
+                appearance: None,
                 agent_profile: Some(agent_profile),
                 base_attributes: BaseAttributes::default(),
                 resources: Vec::new(),
@@ -389,6 +392,7 @@ fn fixture() -> Fixture {
                 speaking_style: text("Direct."),
                 narrative_tags: Default::default(),
             },
+            appearance: None,
             controller: CharacterController::Player,
             lifetime: CharacterLifetime::Persistent,
             location: quay,
@@ -1112,6 +1116,13 @@ fn scene_character_spawns_and_promotes_through_stable_records() {
         &fixture.registry,
     )
     .expect("load world");
+    let appearance = CharacterAppearance {
+        model_id: definition_id("appearance_model", "dockhand"),
+        parameters: BTreeMap::from([(
+            definition_id("appearance_parameter", "eyes"),
+            AppearanceValue::Color { rgb: [35, 70, 95] },
+        )]),
+    };
     let spec = CharacterSpawnSpec {
         origin: EntityOrigin::System {
             source: definition_id("system", "narrator"),
@@ -1123,6 +1134,7 @@ fn scene_character_spawns_and_promotes_through_stable_records() {
             speaking_style: text("Weathered."),
             narrative_tags: Default::default(),
         },
+        appearance: Some(appearance.clone()),
         controller: CharacterController::NarratorProxy,
         lifetime: CharacterLifetime::Scene {
             scene_id: fixture.scene,
@@ -1175,6 +1187,13 @@ fn scene_character_spawns_and_promotes_through_stable_records() {
         world.character(spawned_actor).expect("spawned character").lifetime,
         CharacterLifetime::Scene { scene_id } if scene_id == fixture.scene
     ));
+    assert_eq!(
+        world
+            .character(spawned_actor)
+            .expect("spawned character")
+            .appearance,
+        Some(appearance)
+    );
 
     world
         .execute(

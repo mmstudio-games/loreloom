@@ -2,6 +2,7 @@
 members = [
     "crates/loreloom",
     "crates/loreloom-agent",
+    "crates/loreloom-appearance",
     "crates/loreloom-content",
     "crates/loreloom-core",
     "crates/loreloom-runtime",

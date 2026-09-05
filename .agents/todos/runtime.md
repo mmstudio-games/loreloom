@@ -35,8 +35,25 @@ OPEN 项、后续 RFC 或 P0 Spike；空 crate 不代表相关协议已经实现
   与运行时 Draft 的统一 SpawnSpec/Factory 路径、两阶段跨引用、失败回滚和 GeneratedOrigin 恢复；
 - [x] [Mod/Rule Spike](../spikes/0006-mod-rule.md)：验证并冻结目录包格式、依赖/Patch/哈希锁定、
   Parameter、Event Option、Gameplay Action、Rule 预算、ModLock 和资源限制。
+- [x] [动态纸娃娃/TUI 图片 Spike](../spikes/0007-tui-appearance.md)：验证透明图层合成、外观变化
+  cache key、Kitty/iTerm2/Sixel 探测、half-block 降级和本地视觉验收；不冻结产品 API 或 Mod Schema。
+- [x] [DoL 外观语义与 Goose 式双视图 Spike](../spikes/0008-tui-appearance-parity.md)：用原创确定性素材
+  验证左右眼局部 mask、代表性 Canvas 混合模式、同步眨眼帧与“全身 + 特写”终端视觉，不冻结正式
+  compositor、资源 Schema、依赖或动画时钟。
+- [x] 接受 [RFC 0003](../rfcs/0003-dynamic-character-appearance.md)，冻结根级 `appearance/`、
+  `loreloom-appearance`、Character/UiSnapshot 外观投影、后台 compositor 与终端协议降级边界；
 
 ## 后续协议与实现
+
+- [x] 创建 `loreloom-appearance` 并实现 Pack v1、受限 PNG Catalog、mask/tint/blend、同步帧与
+  确定性 render key；
+- [x] 在 Content/World/Store/Runtime 接入 Appearance capability、Character record v1 可选字段、
+  SpawnSpec 和 `UiSnapshot.player.appearance`，不保留开发期 migration；
+- [x] 在正式 TUI 接入后台合成/协议编码、宽屏头像布局、配置覆盖、过期任务抑制和文本降级；
+- [x] 用原创/程序生成资源覆盖 Pack 安全、像素 golden、存档 round-trip、snapshot/cache invalidation
+  与 TUI 确定性测试；
+- [ ] 在 Rio 直连环境对正式 `loreloom` 二进制完成最终人工视觉 smoke test（Codex PTY 已用正式产品
+  链路和本地 Goose 素材验证 iTerm2 协议输出）；
 
 - [x] 冻结 Stable ID 与 Command/Event/RecordOp 重建权威关系；
 - [x] 冻结领域 record payload 初始 v1 Schema；record envelope、未知字段、重建、提交、后端和物理
@@ -101,10 +118,10 @@ OPEN 项、后续 RFC 或 P0 Spike；空 crate 不代表相关协议已经实现
 - [x] 把 Place Definition edge 物化为同 Scene 双向 ObjectId 连接并约束普通移动；实现 Narrator-only
   延迟 `create_scene`/`create_place`、GeneratedOrigin、原子 Command/Event/RecordOp 与创建后重规划；
 - [x] 实现根级 `world.toml`、外部 Content/Prompt、WorldLock 与只含已启用扩展的 ModLock；
-- [x] 统一根世界与 Mod 的 `[prompts]` Narrator/NPC 全局上下文声明，按根世界、依赖拓扑和列表顺序
-  注入 Agent，并覆盖哈希、分流与未声明资源不注入测试；
-- [x] 删除 Manifest/Agent/Runtime 的独立响应语言配置与 System Message，把固定或跟随语言完全交给
-  World/Mod Narrator/NPC Prompt；
+- [x] 统一根世界与 Mod 的可选 `[prompts]` Narrator/NPC 全局上下文声明，按根世界、依赖拓扑和列表
+  顺序注入 Agent；允许根世界缺省/留空并由 Mod 单独提供，覆盖哈希、分流与无 Prompt 请求测试；
+- [x] 删除 Manifest/Agent/Runtime 的独立响应语言配置与所有硬编码自然语言 System Message，把固定
+  或跟随语言完全交给可选 World/Mod Narrator/NPC Prompt；
 - [x] 把目录 Mod 根级 `.gitignore` 作为不参与 payload/hash 的本地作者元数据跳过，保持其它未知文件
   与隐藏路径的严格拒绝策略；
 - [x] 把 Rainbound Inn 从 `demo.rs` 迁移到根目录世界文件，并移除生产 Demo Bridge/英文剧情硬编码；

@@ -13,15 +13,15 @@ mod view;
 
 pub use codec::{DomainError, DomainRecord, decode_domain_records};
 pub use domain::{
-    ActionState, AgentBinding, AttributeAdjustment, AttributeOperation, AutonomyMode,
-    BaseAttributes, CharacterController, CharacterLifetime, CharacterOrigin, CharacterProfile,
-    CharacterRecord, CharacterSpawnSpec, ConditionGrantInput, ConditionRecord, ConditionSource,
-    ContainerState, ContentHash, ContentOrigin, DomainValueError, Durability, EntityOrigin,
-    EquippedState, EventInstanceRecord, EventStatus, FactSource, FactSubject, FactValue,
-    GeneratedOrigin, GenerationSource, GoalInput, GoalRecord, GoalSource, GoalStatus,
-    IntensityPolicy, ItemGrantInput, ItemRecord, KnowledgeStatus, KnownFactInput, KnownFactRecord,
-    LifeState, ParameterSetRecord, ParameterValue, PlaceRecord, PlacementInput, Posture,
-    RelationshipRecord, ResourcePool, RuleStateRecord, SceneRecord, SkillGrantInput,
+    ActionState, AgentBinding, AppearanceValue, AttributeAdjustment, AttributeOperation,
+    AutonomyMode, BaseAttributes, CharacterAppearance, CharacterController, CharacterLifetime,
+    CharacterOrigin, CharacterProfile, CharacterRecord, CharacterSpawnSpec, ConditionGrantInput,
+    ConditionRecord, ConditionSource, ContainerState, ContentHash, ContentOrigin, DomainValueError,
+    Durability, EntityOrigin, EquippedState, EventInstanceRecord, EventStatus, FactSource,
+    FactSubject, FactValue, GeneratedOrigin, GenerationSource, GoalInput, GoalRecord, GoalSource,
+    GoalStatus, IntensityPolicy, ItemGrantInput, ItemRecord, KnowledgeStatus, KnownFactInput,
+    KnownFactRecord, LifeState, ParameterSetRecord, ParameterValue, PlaceRecord, PlacementInput,
+    Posture, RelationshipRecord, ResourcePool, RuleStateRecord, SceneRecord, SkillGrantInput,
     SkillGrantRecord, SkillSource, SpawnConstraints, StackState, TranscriptItemRecord,
     TranscriptSpeaker, TranscriptState, WorldStateRecord,
 };
@@ -47,10 +47,10 @@ pub use record::{
 pub use revision::{Revision, RevisionError};
 pub use text::{BoundedText, DisplayName, LongText, ShortText, TextError};
 pub use view::{
-    ActiveEventView, AdjacentPlaceView, AttributeView, CharacterContext, ConditionView,
-    DIAGNOSED_CONDITION_PREDICATE_ID, EventOptionView, InventoryView, ModPackageStatus,
-    ModPackageView, NoticeKind, PackageCatalogView, PackageContentView, ParameterSetView,
-    ParameterValueView, ResourceView, RuntimePhase, RuntimeProgressEvent, SceneContext,
-    SceneObservation, SkillView, ToolActivity, ToolActivityState, TranscriptWindow, UiNotice,
-    UiSnapshot, VisibleActorView, WorldPackageView,
+    ActiveEventView, AdjacentPlaceView, AppearanceView, AttributeView, CharacterContext,
+    ConditionView, DIAGNOSED_CONDITION_PREDICATE_ID, EventOptionView, InventoryView,
+    ModPackageStatus, ModPackageView, NoticeKind, PackageCatalogView, PackageContentView,
+    ParameterSetView, ParameterValueView, ResourceView, RuntimePhase, RuntimeProgressEvent,
+    SceneContext, SceneObservation, SkillView, ToolActivity, ToolActivityState, TranscriptWindow,
+    UiNotice, UiSnapshot, VisibleActorView, WorldPackageView,
 };

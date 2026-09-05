@@ -11,7 +11,9 @@ use ratatui::{
     widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap},
 };
 
-use crate::{CrosstermTerminalOps, InputEditor, TerminalSession, TuiConfig, TuiError};
+use crate::{
+    CrosstermTerminalOps, InputEditor, TerminalSession, TuiConfig, TuiError, render::format_fixed,
+};
 
 const ACCENT: Color = Color::Cyan;
 const MUTED: Color = Color::DarkGray;
@@ -170,6 +172,7 @@ struct StartupFormState {
     current: usize,
     values: Vec<FormValueState>,
     option_cursors: Vec<usize>,
+    validation_errors: Vec<Option<String>>,
     editor: InputEditor,
 }
 
@@ -186,9 +189,9 @@ impl StartupFormState {
                 StartupFieldKind::Integer { default, .. } => FormValueState::Integer(
                     default.map_or_else(String::new, |value| value.to_string()),
                 ),
-                StartupFieldKind::Number { default, .. } => FormValueState::Number(
-                    default.map_or_else(String::new, |value| value.to_string()),
-                ),
+                StartupFieldKind::Number { default, .. } => {
+                    FormValueState::Number(default.map_or_else(String::new, format_fixed))
+                }
                 StartupFieldKind::Boolean { default } => FormValueState::Boolean(*default),
                 StartupFieldKind::SingleChoice { default, .. } => {
                     FormValueState::SingleChoice(default.clone())
@@ -206,6 +209,7 @@ impl StartupFormState {
         Self {
             current: 0,
             option_cursors: vec![0; values.len()],
+            validation_errors: vec![None; values.len()],
             values,
             editor,
         }
@@ -237,6 +241,12 @@ impl StartupFormState {
         self.store_editor();
         self.current = index.min(self.values.len().saturating_sub(1));
         self.load_editor();
+    }
+
+    fn current_validation_notice(&self) -> Option<String> {
+        self.validation_errors
+            .get(self.current)
+            .and_then(Clone::clone)
     }
 }
 
@@ -483,32 +493,45 @@ fn handle_form_key(app: &mut StartupApp, key: KeyEvent) -> Option<StartupAction>
     }
     let current = state.current;
     let field = &form.fields[current];
+    let mut validate_after_edit = false;
     match key.code {
-        KeyCode::Tab if key.modifiers.contains(KeyModifiers::SHIFT) => {
+        KeyCode::BackTab | KeyCode::Up => {
+            let _ = validate_current_form_field(form, state);
             state.select(current.saturating_sub(1));
-            app.notice = None;
+            app.notice = state.current_validation_notice();
         }
-        KeyCode::Tab => {
+        KeyCode::Tab if key.modifiers.contains(KeyModifiers::SHIFT) => {
+            let _ = validate_current_form_field(form, state);
+            state.select(current.saturating_sub(1));
+            app.notice = state.current_validation_notice();
+        }
+        KeyCode::Tab | KeyCode::Down => {
+            let _ = validate_current_form_field(form, state);
             state.select((current + 1).min(form.fields.len() - 1));
-            app.notice = None;
+            app.notice = state.current_validation_notice();
         }
         KeyCode::Enter
             if key.modifiers.contains(KeyModifiers::ALT)
                 && matches!(field.kind, StartupFieldKind::LongText { .. }) =>
         {
             insert_form_text(state, field, "\n");
+            validate_after_edit = true;
         }
         KeyCode::Char('j')
             if key.modifiers.contains(KeyModifiers::CONTROL)
                 && matches!(field.kind, StartupFieldKind::LongText { .. }) =>
         {
             insert_form_text(state, field, "\n");
+            validate_after_edit = true;
         }
         KeyCode::Enter => {
-            state.store_editor();
+            if let Some(error) = validate_current_form_field(form, state) {
+                app.notice = Some(error.notice);
+                return None;
+            }
             if current + 1 < form.fields.len() {
                 state.select(current + 1);
-                app.notice = None;
+                app.notice = state.current_validation_notice();
             } else {
                 match submit_form(form, state) {
                     Ok(submission) => {
@@ -523,13 +546,12 @@ fn handle_form_key(app: &mut StartupApp, key: KeyEvent) -> Option<StartupAction>
                 }
             }
         }
-        KeyCode::Up => adjust_form_value(state, field, -1),
-        KeyCode::Down => adjust_form_value(state, field, 1),
         KeyCode::Left => {
             if editor_text(&state.values[current]).is_some() {
                 state.editor.move_left();
             } else {
                 adjust_form_value(state, field, -1);
+                validate_after_edit = true;
             }
         }
         KeyCode::Right => {
@@ -537,21 +559,35 @@ fn handle_form_key(app: &mut StartupApp, key: KeyEvent) -> Option<StartupAction>
                 state.editor.move_right();
             } else {
                 adjust_form_value(state, field, 1);
+                validate_after_edit = true;
             }
         }
-        KeyCode::Char(' ') => toggle_form_value(state, field),
+        KeyCode::Char(' ') => {
+            toggle_form_value(state, field);
+            validate_after_edit = true;
+        }
         KeyCode::Home => state.editor.move_home(),
         KeyCode::End => state.editor.move_end(),
-        KeyCode::Backspace => state.editor.backspace(),
-        KeyCode::Delete => state.editor.delete(),
+        KeyCode::Backspace => {
+            state.editor.backspace();
+            validate_after_edit = true;
+        }
+        KeyCode::Delete => {
+            state.editor.delete();
+            validate_after_edit = true;
+        }
         KeyCode::Char(character)
             if !key
                 .modifiers
                 .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
         {
             insert_form_text(state, field, &character.to_string());
+            validate_after_edit = true;
         }
         _ => {}
+    }
+    if validate_after_edit {
+        app.notice = validate_current_form_field(form, state).map(|error| error.notice);
     }
     None
 }
@@ -568,6 +604,7 @@ fn handle_startup_paste(app: &mut StartupApp, text: &str) {
     };
     if let Some(field) = form.fields.get(state.current) {
         insert_form_text(state, field, text);
+        app.notice = validate_current_form_field(form, state).map(|error| error.notice);
     }
 }
 
@@ -632,7 +669,7 @@ fn adjust_form_value(state: &mut StartupFormState, field: &StartupFieldView, dir
             }
             .unwrap_or(value)
             .clamp(*minimum, *maximum);
-            *raw = adjusted.to_string();
+            *raw = format_fixed(adjusted);
             state.load_editor();
         }
         (StartupFieldKind::Boolean { .. }, FormValueState::Boolean(value)) => *value = !*value,
@@ -699,93 +736,155 @@ fn submit_form(
     state.store_editor();
     let mut values = Vec::with_capacity(form.fields.len());
     for (field_index, (field, value)) in form.fields.iter().zip(&state.values).enumerate() {
-        let invalid = || FormValidationError {
-            field_index,
-            notice: format!("{} · invalid_value", field.field_id),
-        };
-        let value = match (&field.kind, value) {
-            (
-                StartupFieldKind::Text {
-                    minimum_bytes,
-                    maximum_bytes,
-                    ..
-                }
-                | StartupFieldKind::LongText {
-                    minimum_bytes,
-                    maximum_bytes,
-                    ..
-                },
-                FormValueState::Text(value),
-            ) if value.len() >= *minimum_bytes as usize
-                && value.len() <= *maximum_bytes as usize =>
-            {
-                StartupFieldValue::Text(value.clone())
+        match validate_form_field(field_index, field, value) {
+            Ok(Some(value)) => {
+                state.validation_errors[field_index] = None;
+                values.push((field.field_id.clone(), value));
             }
-            (
-                StartupFieldKind::Integer {
-                    minimum, maximum, ..
-                },
-                FormValueState::Integer(raw),
-            ) => {
-                let value = raw.parse::<i64>().map_err(|_| invalid())?;
-                if value < *minimum || value > *maximum {
-                    return Err(invalid());
-                }
-                StartupFieldValue::Integer(value)
+            Ok(None) => state.validation_errors[field_index] = None,
+            Err(error) => {
+                state.validation_errors[field_index] = Some(error.notice.clone());
+                return Err(error);
             }
-            (
-                StartupFieldKind::Number {
-                    minimum, maximum, ..
-                },
-                FormValueState::Number(raw),
-            ) => {
-                let value = parse_fixed(raw).ok_or_else(invalid)?;
-                if value < *minimum || value > *maximum {
-                    return Err(invalid());
-                }
-                StartupFieldValue::Number(value)
-            }
-            (StartupFieldKind::Boolean { .. }, FormValueState::Boolean(value)) => {
-                StartupFieldValue::Boolean(*value)
-            }
-            (
-                StartupFieldKind::SingleChoice { options, .. },
-                FormValueState::SingleChoice(Some(value)),
-            ) if options.iter().any(|option| &option.value == value) => {
-                StartupFieldValue::SingleChoice(value.clone())
-            }
-            (
-                StartupFieldKind::MultiChoice {
-                    minimum_selections,
-                    maximum_selections,
-                    options,
-                    ..
-                },
-                FormValueState::MultiChoice(selected),
-            ) if selected.len() >= *minimum_selections as usize
-                && selected.len() <= *maximum_selections as usize
-                && selected
-                    .iter()
-                    .all(|value| options.iter().any(|option| &option.value == value)) =>
-            {
-                StartupFieldValue::MultiChoice(selected.clone())
-            }
-            (_, FormValueState::Text(value))
-            | (_, FormValueState::Integer(value))
-            | (_, FormValueState::Number(value))
-                if !field.required && value.is_empty() =>
-            {
-                continue;
-            }
-            (_, FormValueState::SingleChoice(None)) if !field.required => continue,
-            _ => return Err(invalid()),
-        };
-        values.push((field.field_id.clone(), value));
+        }
     }
     Ok(StartupFormSubmission {
         form_id: form.form_id.clone(),
         values,
     })
+}
+
+fn validate_current_form_field(
+    form: &StartupFormView,
+    state: &mut StartupFormState,
+) -> Option<FormValidationError> {
+    state.store_editor();
+    let field_index = state.current;
+    let error = validate_form_field(
+        field_index,
+        &form.fields[field_index],
+        &state.values[field_index],
+    )
+    .err();
+    state.validation_errors[field_index] = error.as_ref().map(|error| error.notice.clone());
+    error
+}
+
+fn validate_form_field(
+    field_index: usize,
+    field: &StartupFieldView,
+    value: &FormValueState,
+) -> Result<Option<StartupFieldValue>, FormValidationError> {
+    let invalid = |expectation: String| FormValidationError {
+        field_index,
+        notice: format!("{} · {expectation}", field.display_name),
+    };
+    match (&field.kind, value) {
+        (
+            StartupFieldKind::Text {
+                minimum_bytes,
+                maximum_bytes,
+                ..
+            }
+            | StartupFieldKind::LongText {
+                minimum_bytes,
+                maximum_bytes,
+                ..
+            },
+            FormValueState::Text(value),
+        ) => {
+            if !field.required && value.is_empty() {
+                return Ok(None);
+            }
+            if value.len() < *minimum_bytes as usize || value.len() > *maximum_bytes as usize {
+                return Err(invalid(format!(
+                    "expected {minimum_bytes}..={maximum_bytes} UTF-8 bytes"
+                )));
+            }
+            Ok(Some(StartupFieldValue::Text(value.clone())))
+        }
+        (
+            StartupFieldKind::Integer {
+                minimum, maximum, ..
+            },
+            FormValueState::Integer(raw),
+        ) => {
+            if !field.required && raw.is_empty() {
+                return Ok(None);
+            }
+            let value = raw
+                .parse::<i64>()
+                .map_err(|_| invalid(format!("expected an integer from {minimum} to {maximum}")))?;
+            if value < *minimum || value > *maximum {
+                return Err(invalid(format!(
+                    "expected an integer from {minimum} to {maximum}"
+                )));
+            }
+            Ok(Some(StartupFieldValue::Integer(value)))
+        }
+        (
+            StartupFieldKind::Number {
+                minimum, maximum, ..
+            },
+            FormValueState::Number(raw),
+        ) => {
+            if !field.required && raw.is_empty() {
+                return Ok(None);
+            }
+            let expectation = || {
+                format!(
+                    "expected a number from {} to {} (up to 6 decimals)",
+                    format_fixed(*minimum),
+                    format_fixed(*maximum)
+                )
+            };
+            let value = parse_fixed(raw).ok_or_else(|| invalid(expectation()))?;
+            if value < *minimum || value > *maximum {
+                return Err(invalid(expectation()));
+            }
+            Ok(Some(StartupFieldValue::Number(value)))
+        }
+        (StartupFieldKind::Boolean { .. }, FormValueState::Boolean(value)) => {
+            Ok(Some(StartupFieldValue::Boolean(*value)))
+        }
+        (
+            StartupFieldKind::SingleChoice { options, .. },
+            FormValueState::SingleChoice(selected),
+        ) => match selected {
+            Some(value) if options.iter().any(|option| &option.value == value) => {
+                Ok(Some(StartupFieldValue::SingleChoice(value.clone())))
+            }
+            None if !field.required => Ok(None),
+            Some(_) | None => Err(invalid("select one of the available options".to_owned())),
+        },
+        (
+            StartupFieldKind::MultiChoice {
+                minimum_selections,
+                maximum_selections,
+                options,
+                ..
+            },
+            FormValueState::MultiChoice(selected),
+        ) if selected.len() >= *minimum_selections as usize
+            && selected.len() <= *maximum_selections as usize
+            && selected
+                .iter()
+                .all(|value| options.iter().any(|option| &option.value == value)) =>
+        {
+            Ok(Some(StartupFieldValue::MultiChoice(selected.clone())))
+        }
+        (
+            StartupFieldKind::MultiChoice {
+                minimum_selections,
+                maximum_selections,
+                ..
+            },
+            _,
+        ) => Err(invalid(format!(
+            "select {minimum_selections}..={maximum_selections} options"
+        ))),
+        _ => Err(invalid("field type mismatch".to_owned())),
+    }
 }
 
 fn parse_fixed(raw: &str) -> Option<Fixed> {
@@ -1105,10 +1204,17 @@ fn render_form(frame: &mut Frame<'_>, app: &mut StartupApp, area: Rect) {
     let mut fields = Vec::new();
     for (index, (field, value)) in form.fields.iter().zip(&state.values).enumerate() {
         let selected = index == state.current;
+        let invalid = state.validation_errors[index].is_some();
         fields.push(Line::from(vec![
             Span::styled(
-                if selected { "› " } else { "  " },
-                Style::default().fg(ACCENT),
+                if selected {
+                    "› "
+                } else if invalid {
+                    "! "
+                } else {
+                    "  "
+                },
+                Style::default().fg(if invalid { Color::Red } else { ACCENT }),
             ),
             Span::styled(
                 format!(
@@ -1117,14 +1223,24 @@ fn render_form(frame: &mut Frame<'_>, app: &mut StartupApp, area: Rect) {
                     if field.required { " *" } else { "" }
                 ),
                 if selected {
-                    Style::default().add_modifier(Modifier::BOLD)
+                    Style::default()
+                        .fg(if invalid { Color::Red } else { Color::Reset })
+                        .add_modifier(Modifier::BOLD)
+                } else if invalid {
+                    Style::default().fg(Color::Red)
                 } else {
                     Style::default()
                 },
             ),
             Span::styled(
                 format!("  {}", display_form_value(field, value, state, index)),
-                Style::default().fg(if selected { ACCENT } else { MUTED }),
+                Style::default().fg(if invalid {
+                    Color::Red
+                } else if selected {
+                    ACCENT
+                } else {
+                    MUTED
+                }),
             ),
         ]));
     }
@@ -1253,7 +1369,7 @@ fn render_startup_footer(frame: &mut Frame<'_>, app: &StartupApp, area: Rect) {
         StartupPage::Main => "↑↓ select  Enter open  Esc quit",
         StartupPage::Saves | StartupPage::Presets => "↑↓ select  Enter confirm  Esc back",
         StartupPage::Mods | StartupPage::Settings => "↑↓ scroll  Esc back",
-        StartupPage::Form => "Tab field  ↑↓/Space choose  Enter next/confirm  Esc back",
+        StartupPage::Form => "↑↓/Tab field  ←→ choose  Space toggle  Enter next/confirm  Esc back",
     };
     frame.render_widget(
         Paragraph::new(Span::styled(hint, Style::default().fg(MUTED))).alignment(Alignment::Center),
@@ -1454,6 +1570,7 @@ mod tests {
             fields,
         };
         let mut state = StartupFormState::new(&form);
+        assert_eq!(state.values[3], FormValueState::Number("1.5".to_owned()));
 
         let submission = submit_form(&form, &mut state).expect("valid typed form");
 
@@ -1486,7 +1603,7 @@ mod tests {
         invalid.current = form.fields.len() - 1;
         let error = submit_form(&form, &mut invalid).expect_err("name is required");
         assert_eq!(error.field_index, 0);
-        assert!(error.notice.contains("player_field/text"));
+        assert!(error.notice.contains("Text"));
 
         let mut model = fixed_model();
         model.new_game_only = true;
@@ -1506,6 +1623,124 @@ mod tests {
             .collect::<String>();
         assert!(rendered.contains("CHARACTER CARD"));
         assert!(rendered.contains("Lin"));
+    }
+
+    #[test]
+    fn ugc_form_can_return_to_previous_fields_with_up_or_backtab() {
+        let fields = ["name", "background"]
+            .into_iter()
+            .map(|key| StartupFieldView {
+                field_id: id("player_field", key),
+                display_name: key.to_owned(),
+                description: None,
+                required: false,
+                kind: StartupFieldKind::Text {
+                    minimum_bytes: 0,
+                    maximum_bytes: 32,
+                    default: None,
+                },
+            })
+            .collect();
+        let mut model = fixed_model();
+        model.new_game_only = true;
+        model.player_creation = StartupPlayerCreationView::Ugc {
+            form: StartupFormView {
+                form_id: id("player_creation_form", "traveler"),
+                display_name: "Traveler".to_owned(),
+                description: "Create a traveler.".to_owned(),
+                fields,
+            },
+        };
+        let mut app = StartupApp::new(model);
+
+        handle_startup_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('A'), KeyModifiers::NONE),
+        );
+        handle_startup_key(&mut app, KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(app.form.as_ref().expect("form").current, 1);
+
+        handle_startup_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('B'), KeyModifiers::NONE),
+        );
+        handle_startup_key(&mut app, KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        let form = app.form.as_ref().expect("form");
+        assert_eq!(form.current, 0);
+        assert_eq!(form.editor.text(), "A");
+
+        handle_startup_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('C'), KeyModifiers::NONE),
+        );
+        handle_startup_key(&mut app, KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        handle_startup_key(
+            &mut app,
+            KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT),
+        );
+        let form = app.form.as_ref().expect("form");
+        assert_eq!(form.current, 0);
+        assert_eq!(form.editor.text(), "AC");
+    }
+
+    #[test]
+    fn ugc_number_validation_is_live_and_uses_compact_values() {
+        let mut model = fixed_model();
+        model.new_game_only = true;
+        model.player_creation = StartupPlayerCreationView::Ugc {
+            form: StartupFormView {
+                form_id: id("player_creation_form", "traveler"),
+                display_name: "Traveler".to_owned(),
+                description: "Create a traveler.".to_owned(),
+                fields: vec![StartupFieldView {
+                    field_id: id("player_field", "resolve"),
+                    display_name: "Resolve".to_owned(),
+                    description: None,
+                    required: true,
+                    kind: StartupFieldKind::Number {
+                        minimum: Fixed::ZERO,
+                        maximum: Fixed::from_integer(20).expect("fixed"),
+                        default: Some(Fixed::from_integer(10).expect("fixed")),
+                    },
+                }],
+            },
+        };
+        let mut app = StartupApp::new(model);
+        assert_eq!(app.form.as_ref().expect("form").editor.text(), "10");
+
+        handle_startup_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE),
+        );
+        handle_startup_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE),
+        );
+        assert!(
+            app.notice
+                .as_deref()
+                .is_some_and(|notice| notice.contains("number from 0 to 20"))
+        );
+
+        handle_startup_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('2'), KeyModifiers::NONE),
+        );
+        assert_eq!(app.notice, None);
+        handle_startup_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('1'), KeyModifiers::NONE),
+        );
+        assert!(
+            app.notice
+                .as_deref()
+                .is_some_and(|notice| notice.contains("number from 0 to 20"))
+        );
+        assert_eq!(
+            handle_startup_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),),
+            None
+        );
+        assert_eq!(app.form.as_ref().expect("form").current, 0);
     }
 
     #[test]

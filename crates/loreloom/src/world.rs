@@ -26,6 +26,7 @@ use crate::{config::ConfiguredProviders, error::AppError};
 pub struct WorldSetup {
     pub runtime: GameRuntime,
     pub initial_snapshot: UiSnapshot,
+    pub appearance: loreloom_appearance::AppearanceCatalog,
     pub save_id: SaveId,
     pub world_id: ModId,
     #[cfg(test)]
@@ -154,6 +155,7 @@ pub async fn build_world_with_player(
         &engine_namespaces,
     )?;
     let prompts = compiled.prompts().clone();
+    let appearance = compiled.appearance().clone();
     let enabled_mod_details = compiled
         .mod_lock()
         .mods
@@ -251,6 +253,7 @@ pub async fn build_world_with_player(
     Ok(WorldSetup {
         runtime,
         initial_snapshot,
+        appearance,
         save_id,
         world_id: manifest.world_id.clone(),
         #[cfg(test)]

@@ -10,6 +10,7 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap},
 };
+use ratatui_image::{Image, protocol::Protocol};
 
 use crate::{NarrowPage, TuiApp, TuiOverlay};
 
@@ -28,6 +29,16 @@ pub(crate) fn render_ui_with_state_width(
     frame: &mut Frame<'_>,
     app: &mut TuiApp,
     state_width_percent: u16,
+) {
+    render_ui_with_appearance(frame, app, state_width_percent, None, None);
+}
+
+pub(crate) fn render_ui_with_appearance(
+    frame: &mut Frame<'_>,
+    app: &mut TuiApp,
+    state_width_percent: u16,
+    portrait: Option<&Protocol>,
+    portrait_status: Option<&str>,
 ) {
     let area = frame.area();
     let header_height = area.height.min(HEADER_HEIGHT);
@@ -52,7 +63,14 @@ pub(crate) fn render_ui_with_state_width(
 
     render_header(frame, app, header);
     if area.width >= WIDE_LAYOUT_MINIMUM {
-        render_wide(frame, app, main, state_width_percent);
+        render_wide(
+            frame,
+            app,
+            main,
+            state_width_percent,
+            portrait,
+            portrait_status,
+        );
     } else {
         render_narrow(frame, app, main);
     }
@@ -110,7 +128,14 @@ fn render_header(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
     }
 }
 
-fn render_wide(frame: &mut Frame<'_>, app: &mut TuiApp, area: Rect, state_width_percent: u16) {
+fn render_wide(
+    frame: &mut Frame<'_>,
+    app: &mut TuiApp,
+    area: Rect,
+    state_width_percent: u16,
+    portrait: Option<&Protocol>,
+    portrait_status: Option<&str>,
+) {
     let state_width = area.width.saturating_mul(state_width_percent) / 100;
     let sidebar = Rect::new(area.x, area.y, state_width, area.height);
     let right = Rect::new(
@@ -135,9 +160,69 @@ fn render_wide(frame: &mut Frame<'_>, app: &mut TuiApp, area: Rect, state_width_
         composer_height,
     );
 
-    render_state(frame, &app.snapshot, sidebar, true);
+    let state_area = render_portrait(frame, sidebar, portrait, portrait_status);
+    render_state(frame, &app.snapshot, state_area, true);
     render_story(frame, app, story);
     render_input(frame, app, composer);
+}
+
+fn render_portrait(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    portrait: Option<&Protocol>,
+    status: Option<&str>,
+) -> Rect {
+    let Some(portrait) = portrait else {
+        if let Some(status) = status
+            && area.height > 1
+        {
+            frame.render_widget(
+                Paragraph::new(status).style(Style::default().fg(MUTED)),
+                Rect::new(
+                    area.x.saturating_add(1),
+                    area.y,
+                    area.width.saturating_sub(2),
+                    1,
+                ),
+            );
+            return Rect::new(
+                area.x,
+                area.y.saturating_add(2),
+                area.width,
+                area.height.saturating_sub(2),
+            );
+        }
+        return area;
+    };
+    let size = portrait.size();
+    let image_width = size.width.min(area.width.saturating_sub(2));
+    let image_height = size.height.min(area.height.saturating_sub(2));
+    let image_area = Rect::new(
+        area.x
+            .saturating_add(area.width.saturating_sub(image_width) / 2),
+        area.y,
+        image_width,
+        image_height,
+    );
+    frame.render_widget(Image::new(portrait).allow_clipping(true), image_area);
+    let status_height = u16::from(status.is_some() && image_height < area.height);
+    if let Some(status) = status
+        && status_height > 0
+    {
+        frame.render_widget(
+            Paragraph::new(status)
+                .alignment(Alignment::Center)
+                .style(Style::default().fg(MUTED)),
+            Rect::new(area.x, area.y.saturating_add(image_height), area.width, 1),
+        );
+    }
+    let consumed = image_height.saturating_add(status_height).saturating_add(1);
+    Rect::new(
+        area.x,
+        area.y.saturating_add(consumed),
+        area.width,
+        area.height.saturating_sub(consumed),
+    )
 }
 
 fn render_narrow(frame: &mut Frame<'_>, app: &mut TuiApp, area: Rect) {
@@ -848,7 +933,7 @@ fn tool_line(name: &str, state: ToolActivityState, code: Option<&str>) -> Line<'
     Line::from(spans)
 }
 
-fn format_fixed(value: Fixed) -> String {
+pub(crate) fn format_fixed(value: Fixed) -> String {
     let micros = i128::from(value.micros());
     let negative = micros.is_negative();
     let absolute = micros.abs();

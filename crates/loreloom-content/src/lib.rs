@@ -13,9 +13,10 @@ pub use package::{
 };
 
 pub use registry::{
-    CONTENT_SCHEMA_V1, CharacterCompileRequest, CompiledPlayerCreation, ContentError,
-    ContentPackContext, DefinitionRegistry, DraftCompileRequest, RegisteredDefinition,
-    SceneCharacterSpawnPlan, ScenePlaceSpawnPlan, SceneSpawnPlan, parse_content_hash,
+    CONTENT_SCHEMA_CURRENT, CONTENT_SCHEMA_V1, CharacterCompileRequest, CompiledPlayerCreation,
+    ContentError, ContentPackContext, DefinitionRegistry, DraftCompileRequest,
+    RegisteredDefinition, SceneCharacterSpawnPlan, ScenePlaceSpawnPlan, SceneSpawnPlan,
+    parse_content_hash,
 };
 pub use schema::*;
 pub use world_project::{

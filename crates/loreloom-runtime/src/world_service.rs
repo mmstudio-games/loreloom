@@ -2148,6 +2148,14 @@ fn character_context(
         revision,
         display_name: character.display_name.clone(),
         profile: character.profile.clone(),
+        appearance: character
+            .appearance
+            .as_ref()
+            .map(|appearance| loreloom_core::AppearanceView {
+                revision,
+                model_id: appearance.model_id.clone(),
+                parameters: appearance.parameters.clone(),
+            }),
         location_id: character.location,
         attributes,
         resources,

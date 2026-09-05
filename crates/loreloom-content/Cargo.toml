@@ -8,6 +8,7 @@ repository.workspace = true
 readme.workspace = true
 
 [dependencies]
+loreloom-appearance = { version = "0.1.0", path = "../loreloom-appearance" }
 loreloom-core = { version = "0.1.0", path = "../loreloom-core" }
 semver = { version = "1", features = ["serde"] }
 serde = { version = "1", features = ["derive"] }
@@ -17,4 +18,5 @@ thiserror = "2.0.20"
 toml = "1"
 
 [dev-dependencies]
+image = { version = "0.25.8", default-features = false, features = ["png"] }
 tempfile = "3.27.0"

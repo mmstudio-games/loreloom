@@ -532,6 +532,8 @@ pub struct CharacterDefinition {
     pub display_name: DisplayName,
     pub profile: CharacterProfile,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub appearance: Option<Box<loreloom_core::CharacterAppearance>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_profile: Option<ContentDefinitionId>,
     pub base_attributes: BaseAttributes,
     pub resources: Vec<InitialResource>,

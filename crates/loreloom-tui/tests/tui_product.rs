@@ -54,6 +54,7 @@ fn snapshot() -> UiSnapshot {
                 speaking_style: text("Direct."),
                 narrative_tags: Default::default(),
             },
+            appearance: None,
             location_id: place,
             attributes: vec![AttributeView {
                 attribute_id: "games.loreloom.demo:attribute/resolve"

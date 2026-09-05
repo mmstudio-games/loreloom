@@ -1,13 +1,17 @@
 use std::{io, time::Duration};
 
 use crossterm::event::{self, Event};
+use loreloom_appearance::AppearanceCatalog;
 use loreloom_core::{RuntimePhase, UiSnapshot};
+use ratatui::layout::Size;
 use ratatui::{Terminal, backend::CrosstermBackend};
+use ratatui_image::picker::Picker;
 use thiserror::Error;
 
 use crate::{
-    CrosstermTerminalOps, RuntimeUiEvent, TerminalSession, TuiApp, UiClientError, UiIntent,
-    handle_key, handle_mouse, handle_paste, render::render_ui_with_state_width,
+    CrosstermTerminalOps, ImageProtocolPreference, RuntimeUiEvent, TerminalSession, TuiApp,
+    UiClientError, UiIntent, appearance::AppearancePresenter, handle_key, handle_mouse,
+    handle_paste, render::render_ui_with_appearance,
 };
 
 const MAX_RUNTIME_EVENTS_PER_FRAME: usize = 1_024;
@@ -16,6 +20,7 @@ const MAX_RUNTIME_EVENTS_PER_FRAME: usize = 1_024;
 pub struct TuiConfig {
     pub state_width_percent: u16,
     pub event_poll_interval: Duration,
+    pub image_protocol: ImageProtocolPreference,
 }
 
 impl Default for TuiConfig {
@@ -23,6 +28,7 @@ impl Default for TuiConfig {
         Self {
             state_width_percent: 30,
             event_poll_interval: Duration::from_millis(50),
+            image_protocol: ImageProtocolPreference::Auto,
         }
     }
 }
@@ -58,15 +64,43 @@ pub fn run(
     initial_snapshot: UiSnapshot,
     config: TuiConfig,
 ) -> Result<(), TuiError> {
+    run_with_appearance(
+        client,
+        initial_snapshot,
+        config,
+        AppearanceCatalog::default(),
+    )
+}
+
+pub fn run_with_appearance(
+    client: &mut impl RuntimeClient,
+    initial_snapshot: UiSnapshot,
+    config: TuiConfig,
+    appearance: AppearanceCatalog,
+) -> Result<(), TuiError> {
     let config = config.validate()?;
-    let _session = TerminalSession::open(CrosstermTerminalOps)?;
+    let session = TerminalSession::open(CrosstermTerminalOps)?;
+    let mut presenter =
+        if config.image_protocol == ImageProtocolPreference::Disabled || appearance.is_empty() {
+            None
+        } else {
+            let mut picker = Picker::from_query_stdio().unwrap_or_else(|_| Picker::halfblocks());
+            if let Some(protocol) = config.image_protocol.forced() {
+                picker.set_protocol_type(protocol);
+            }
+            Some(AppearancePresenter::new(appearance, picker)?)
+        };
     let backend = CrosstermBackend::new(io::stdout());
     let mut terminal = Terminal::new(backend)?;
     terminal.clear()?;
     let mut app = TuiApp::new(initial_snapshot);
 
-    let loop_result = run_loop(client, &mut terminal, &mut app, config);
+    let loop_result = run_loop(client, &mut terminal, &mut app, config, presenter.as_mut());
     let shutdown_result = client.shutdown().map_err(TuiError::Client);
+    drop(terminal);
+    drop(session);
+    // A bounded compositor job may still be finishing. Restore the terminal before joining it.
+    drop(presenter);
     loop_result.and(shutdown_result)
 }
 
@@ -75,6 +109,7 @@ fn run_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     app: &mut TuiApp,
     config: TuiConfig,
+    mut appearance: Option<&mut AppearancePresenter>,
 ) -> Result<(), TuiError> {
     loop {
         for _ in 0..MAX_RUNTIME_EVENTS_PER_FRAME {
@@ -84,8 +119,15 @@ fn run_loop(
             app.apply_runtime_event(event);
         }
         app.tick_spinner();
+        if let Some(presenter) = appearance.as_deref_mut() {
+            presenter.sync(&app.snapshot, appearance_target(terminal.size()?, config));
+        }
         terminal.draw(|frame| {
-            render_ui_with_state_width(frame, app, config.state_width_percent);
+            let protocol = appearance
+                .as_deref()
+                .and_then(AppearancePresenter::protocol);
+            let status = appearance.as_deref().and_then(AppearancePresenter::status);
+            render_ui_with_appearance(frame, app, config.state_width_percent, protocol, status);
         })?;
 
         if !event::poll(config.event_poll_interval)? {
@@ -114,4 +156,17 @@ fn run_loop(
             Event::Resize(_, _) | Event::FocusGained | Event::FocusLost => {}
         }
     }
+}
+
+fn appearance_target(size: Size, config: TuiConfig) -> Option<Size> {
+    if size.width < crate::WIDE_LAYOUT_MINIMUM {
+        return None;
+    }
+    let width = size
+        .width
+        .saturating_mul(config.state_width_percent)
+        .saturating_div(100)
+        .saturating_sub(2);
+    let height = size.height.saturating_sub(15).min(28);
+    (width >= 8 && height >= 6).then_some(Size::new(width, height))
 }

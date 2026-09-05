@@ -1,5 +1,6 @@
 //! Loreloom terminal input, rendering, session lifecycle, and Runtime client boundary.
 
+mod appearance;
 mod editor;
 mod render;
 mod run;
@@ -7,9 +8,10 @@ mod session;
 mod startup;
 mod state;
 
+pub use appearance::ImageProtocolPreference;
 pub use editor::{EditorError, InputEditor, MAX_INPUT_BYTES};
 pub use render::{WIDE_LAYOUT_MINIMUM, render_ui};
-pub use run::{RuntimeClient, TuiConfig, TuiError, run};
+pub use run::{RuntimeClient, TuiConfig, TuiError, run, run_with_appearance};
 pub use session::{CrosstermTerminalOps, TerminalOps, TerminalSession};
 pub use startup::{
     StartupAction, StartupApp, StartupChoiceView, StartupFieldKind, StartupFieldValue,

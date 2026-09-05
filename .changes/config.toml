@@ -34,6 +34,12 @@ resolver = "rust"
 channel = "alpha"
 channel-bump = "preserve"
 
+[packages.loreloom-appearance]
+path = "crates/loreloom-appearance"
+resolver = "rust"
+channel = "alpha"
+channel-bump = "preserve"
+
 [packages.loreloom-agent]
 path = "crates/loreloom-agent"
 resolver = "rust"

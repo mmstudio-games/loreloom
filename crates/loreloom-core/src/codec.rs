@@ -4,11 +4,11 @@ use serde::{Serialize, de::DeserializeOwned};
 use thiserror::Error;
 
 use crate::{
-    CharacterController, CharacterRecord, ConditionRecord, EventInstanceRecord, Fixed, GoalRecord,
-    ItemRecord, KnownFactRecord, ParameterSetRecord, PlaceRecord, RecordEnvelope, RecordError,
-    RecordId, RecordKey, RecordProvenance, RecordSet, RecordType, RelationshipRecord, Revision,
-    RuleStateRecord, SceneRecord, SchemaVersion, SkillGrantRecord, TranscriptItemRecord,
-    TranscriptState, WorldStateRecord,
+    AppearanceValue, CharacterAppearance, CharacterController, CharacterRecord, ConditionRecord,
+    EventInstanceRecord, Fixed, GoalRecord, ItemRecord, KnownFactRecord, ParameterSetRecord,
+    PlaceRecord, RecordEnvelope, RecordError, RecordId, RecordKey, RecordProvenance, RecordSet,
+    RecordType, RelationshipRecord, Revision, RuleStateRecord, SceneRecord, SchemaVersion,
+    SkillGrantRecord, TranscriptItemRecord, TranscriptState, WorldStateRecord,
 };
 
 #[derive(Debug, Error)]
@@ -122,7 +122,7 @@ impl DomainRecord {
         };
         Ok(RecordEnvelope::new(
             self.record_type()?,
-            Self::SCHEMA_VERSION,
+            self.schema_version(),
             self.record_id()?,
             revision,
             payload,
@@ -131,6 +131,7 @@ impl DomainRecord {
     }
 
     pub fn from_envelope(envelope: &RecordEnvelope) -> Result<Self, DomainError> {
+        let record_type = envelope.record_type().as_str();
         if envelope.schema_version() != Self::SCHEMA_VERSION {
             return Err(DomainError::Codec {
                 record_type: envelope.record_type().to_string(),
@@ -142,7 +143,6 @@ impl DomainRecord {
             });
         }
         let payload = envelope.payload().clone();
-        let record_type = envelope.record_type().as_str();
         let record = match record_type {
             "world_state" => Self::WorldState(decode(payload, record_type)?),
             "scene" => Self::Scene(decode(payload, record_type)?),
@@ -198,6 +198,11 @@ impl DomainRecord {
             Self::TranscriptItem(value) => validate_transcript(value),
         }
     }
+
+    #[must_use]
+    pub const fn schema_version(&self) -> SchemaVersion {
+        Self::SCHEMA_VERSION
+    }
 }
 
 pub fn decode_domain_records(
@@ -242,6 +247,9 @@ fn validate_character(value: &CharacterRecord) -> Result<(), DomainError> {
             return invalid("character.resources.range");
         }
     }
+    if let Some(appearance) = &value.appearance {
+        validate_appearance(appearance)?;
+    }
     let mut order = None;
     for adjustment in &value.attribute_adjustments {
         let key = (
@@ -254,6 +262,24 @@ fn validate_character(value: &CharacterRecord) -> Result<(), DomainError> {
             return invalid("character.attribute_adjustments.order");
         }
         order = Some(key);
+    }
+    Ok(())
+}
+
+fn validate_appearance(value: &CharacterAppearance) -> Result<(), DomainError> {
+    if value.parameters.len() > 64 || value.model_id.kind().ok() != Some("appearance_model") {
+        return invalid("character.appearance");
+    }
+    for (parameter_id, parameter) in &value.parameters {
+        if parameter_id.kind().ok() != Some("appearance_parameter")
+            || matches!(
+                parameter,
+                AppearanceValue::Variant { id }
+                    if id.kind().ok() != Some("appearance_variant")
+            )
+        {
+            return invalid("character.appearance.parameters");
+        }
     }
     Ok(())
 }
@@ -351,6 +377,47 @@ mod tests {
         assert_eq!(envelope.schema_version(), SchemaVersion::V1);
         assert_eq!(
             DomainRecord::from_envelope(&envelope).expect("decode"),
+            record
+        );
+    }
+
+    #[test]
+    fn character_appearance_round_trips_in_v1() {
+        let actor = parse::<ActorId>("obj_01890f6a-2b3d-7d4e-8f90-123456789abc");
+        let record = DomainRecord::Character(CharacterRecord {
+            id: actor,
+            display_name: crate::DisplayName::new("Mara").expect("display name"),
+            profile: crate::CharacterProfile {
+                summary: crate::ShortText::new("A traveler.").expect("summary"),
+                values: Vec::new(),
+                speaking_style: crate::ShortText::new("Direct.").expect("style"),
+                narrative_tags: BTreeSet::new(),
+            },
+            appearance: Some(CharacterAppearance {
+                model_id: parse("games.loreloom.test:appearance_model/player"),
+                parameters: BTreeMap::new(),
+            }),
+            controller: CharacterController::Player,
+            lifetime: crate::CharacterLifetime::Persistent,
+            location: parse("obj_01890f6a-2b3e-7d4e-8f90-123456789abc"),
+            inventory_root: parse("obj_01890f6a-2b3f-7d4e-8f90-123456789abc"),
+            agent_binding: None,
+            base_attributes: crate::BaseAttributes::default(),
+            attribute_adjustments: Vec::new(),
+            resources: BTreeMap::new(),
+            life_state: crate::LifeState::Alive,
+            action_state: crate::ActionState::Idle,
+            posture: crate::Posture::Standing,
+            origin: crate::EntityOrigin::System {
+                source: parse("games.loreloom.core:system/bootstrap"),
+            },
+        });
+        let current = record
+            .to_envelope(Revision::ZERO, None)
+            .expect("encode v1 character");
+        assert_eq!(current.schema_version(), SchemaVersion::V1);
+        assert_eq!(
+            DomainRecord::from_envelope(&current).expect("decode v1 character"),
             record
         );
     }

@@ -2231,6 +2231,7 @@ fn materialize_character_records(
         id: character_id,
         display_name: spec.display_name.clone(),
         profile: spec.profile.clone(),
+        appearance: spec.appearance.clone(),
         controller: spec.controller,
         lifetime: spec.lifetime,
         location: spec.placement.place_id,

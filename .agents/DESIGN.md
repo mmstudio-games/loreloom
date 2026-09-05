@@ -1,7 +1,7 @@
 # Loreloom 设计索引
 
 > 状态：核心架构已接受；全部 P0 Spike 已完成，MVP 基础协议开始冻结
-> 更新日期：2026-09-02
+> 更新日期：2026-09-03
 > 作用：Loreloom 的权威工程设计入口，不在本文件重复 RFC 或 Spec 的细节
 
 本目录按成熟度区分 `rfcs/` 中的架构提案、`specs/` 中的工程契约和未来 `todos/` 中的实施
@@ -28,6 +28,8 @@ Loreloom 是独立项目。其构建、测试、文档和发布必须自包含�
 
 ```text
 Loreloom TUI
+      ├──────────────► Loreloom Appearance
+      │                 terminal-independent compositor
       │ 输入 / UiSnapshot
       ▼
 Loreloom Runtime ───────────────► Persistence
@@ -38,6 +40,7 @@ Loreloom Runtime ───────────────► Persistence
       │      └──► armillae-tools      │
       │
       ├──► Loreloom Content
+      │      ├──► Loreloom Appearance
       │      └──► Loreloom Core
       │             definitions / rule plans / spawn specs
       │
@@ -51,6 +54,9 @@ Loreloom Runtime ───────────────► Persistence
 依赖与所有权约束：
 
 - TUI 只通过 Runtime API 发送输入并读取不可变 `UiSnapshot`，不直接查询或修改 Bevy World；
+- Loreloom Appearance 拥有 `appearance/` 子格式、已验证的外观 Catalog、确定性 RGBA 图层合成和
+  缓存键；它不访问 Working World、Store、Provider 或终端，TUI 只在资源边界把合成结果编码为
+  Kitty/iTerm2/Sixel/half-block；
 - Agent Harness 只接收针对某个角色和世界版本的 `Observation`，通过受限 Tool 请求命令；
 - Runtime 是应用级协调者，拥有 Agent Step、Tool Loop、Mod 加载图、世界请求、提交、取消和 UI
   发布顺序；它隔离尚未 durable commit 的 ECS candidate，提交失败或结果不确定时从 Store 重建；
@@ -78,6 +84,7 @@ Loreloom Runtime ───────────────► Persistence
 |---|---|---|
 | [RFC 0001：Loreloom 架构](rfcs/0001-loreloom-architecture.md) | Accepted RFC | 产品边界、ECS 权威状态、Agent/Tool 流程、持久化方向、TUI 和 crate 拆分 |
 | [RFC 0002：根世界与 Mod](rfcs/0002-root-world-and-mods.md) | Accepted RFC | 唯一根世界、Mod 扩展、世界 Prompt 与 WorldLock |
+| [RFC 0003：动态角色外观](rfcs/0003-dynamic-character-appearance.md) | Accepted RFC | `appearance/`、外观状态、合成器、UiSnapshot 与终端图片管线 |
 | [Runtime Spec](specs/runtime.md) | Active Spec | 第一阶段工程约束与范围化实施门禁 |
 | [TODO 索引](TODO.md) | Active | 路由到从 Active Spec 派生的实施清单 |
 
@@ -164,9 +171,10 @@ Loreloom Runtime ───────────────► Persistence
     的未完成正文。Runtime 在已解析 ToolCall 开始执行前和获得 ToolResult 后发布只含 call ID、名称、
     状态与脱敏错误码的临时 Tool Activity；参数与结果不进入 UI，Activity 不进入 Transcript 或存档。
     第一阶段逻辑 World Clock 不随真实墙钟时间隐式推进，世界只通过明确 WorldCommand/System 变化。
-31. 第一阶段使用 Cargo virtual workspace，包含 `loreloom-core`、`loreloom-content`、
-    `loreloom-world`、`loreloom-agent`、`loreloom-store`、`loreloom-runtime`、`loreloom-tui` 七个
-    library crate 和 `loreloom` binary crate；
+31. 第一阶段使用 Cargo virtual workspace，包含 `loreloom-core`、`loreloom-appearance`、
+    `loreloom-content`、`loreloom-world`、`loreloom-agent`、`loreloom-store`、`loreloom-runtime`、
+    `loreloom-tui` 八个 library crate 和 `loreloom` binary crate；Appearance 是 RFC 0003 接受后
+    新增的终端无关展示资源/合成边界；
 32. 每个 crate 在自己的 Manifest 中显式声明版本，禁止使用 `version.workspace`；项目不声明
     `rust-version`，使用 Semifold 的 Rust resolver 和 `.changes/` 变更集管理各 crate 版本；
     Semifold base branch 为 `main`，release branch 为非 `main` 的 `release`，全部 workspace package
@@ -185,9 +193,9 @@ Loreloom Runtime ───────────────► Persistence
     只作为已接受输入和幂等摘要保存，WorldEvent 只作为已发生事实、叙事 provenance 与审计记录；
     Load/Replay 不重新执行 Command、Rule、Agent 或 Provider。
 38. 领域 record 使用拒绝未知控制字段的 versioned JSON envelope；当前 payload codec 拒绝未知
-    字段和浮点数。首个公开版本前只有当前 v1，旧开发数据直接拒绝；发布后的旧版本只能通过逐版本、
-    纯确定性的显式 migration 升级。新版本、未知 record type、迁移缺口或数据库 `NONE` 必须在物化
-    World 前失败。
+    字段和浮点数。首个公开版本前所有 record kind 均直接使用初始 payload v1；RFC 0003 的可选
+    Character appearance 直接属于该 v1，不分配 v2 或保留开发期 migration。新版本、未知 record
+    type、迁移缺口或数据库 `NONE` 必须在物化 World 前失败。
 39. 第一阶段所有机械数值使用全局 scale 为 `1_000_000` 的 signed i64 Fixed；中间计算使用 i128，
     乘除采用 ties-to-even，任何最终越界都拒绝完整 candidate。WorldTime 是从 0 开始、只由显式
     Command 推进的逻辑秒 tick。
@@ -196,8 +204,8 @@ Loreloom Runtime ───────────────► Persistence
     Transcript。派生属性、背包列表、可用技能和 UI 文本不保存；Generated provenance 的 tagged
     source 直接属于初始 payload v1，不为更早的开发期表示保留兼容分支。
 41. Content 与运行时生成共享 Core 拥有的 `CharacterSpawnSpec`；Content 拥有 Definition/NpcDraft
-    Schema 与纯编译器，World 拥有结合当前状态校验并执行的 NpcFactory。Content document v1 拒绝
-    未知字段；首个公开版本前直接更新 v1，发布后才按 content schema version 显式迁移。
+    Schema 与纯编译器，World 拥有结合当前状态校验并执行的 NpcFactory。首个公开版本的 Content
+    document 直接使用 v1 并拒绝未知字段；RFC 0003 的可选 Character appearance 属于该 v1。
 42. 纯叙事提及不调用 Tool、也不生成 Entity；Scene 与 Persistent 使用同一完整 Character
     record，`create_npc` 的 narrated mode 只是没有 AgentBinding 的 Narrator controller。Scene、其状态与
     Scene-owned entity 都是存档中的持久事实；离开 Scene 只停用，重新进入时恢复，不因离开或故事
@@ -249,13 +257,14 @@ Loreloom Runtime ───────────────► Persistence
     排除当前 Scene 并避免同一 Definition 的重复目标。`transition_scene` 只接受查询返回的精确 target，
     拒绝结果提供可操作的恢复方向；Narrator 不得在提交成功前叙述已经抵达，也不得原样重试已拒绝
     的请求。查询无匹配目标时表示当前内容不可达，不隐式生成新 Scene。
-52. 根世界通过 `[prompts]` 分别拥有有序的 Narrator 与 NPC 基础 Prompt，启用的 Mod 可用相同结构
-    按依赖拓扑和声明顺序追加两类全局 Prompt；引擎只在其前保留不可覆盖的 Tool/ECS/安全协议，
-    Mod Prompt 不能扩大 Tool Capability。回复语言完全由 World/Mod Prompt 表达，Manifest、Agent
-    协议和 Runtime 不拥有、检测或追加独立语言策略。Prompt hash 可以作为 WorldLock/ModLock 的内容
-    provenance，但 Prompt 变化不得独自阻止读档。初始 Save Format v1 直接保存 WorldLock 与只含已
-    启用扩展的 ModLock，不为开发期存档增加 Schema 兼容分支。Rainbound Inn 必须从
-    Rust 硬编码迁移到根目录内容文件；生产二进制不使用硬编码 Demo Bridge 生成剧情。
+52. 根世界与启用的 Mod 均可通过可选 `[prompts]` 分别贡献有序的 Narrator/NPC 全局 Prompt；根世界
+    两类列表可缺省或为空，Mod 仍按依赖拓扑和声明顺序追加，因此一个世界可以把全部全局 Prompt
+    交给启用的 Mod，也可以完全不提供。引擎、Agent 协议和 Runtime 不注入硬编码自然语言 System
+    Prompt；Tool/ECS、Capability、Secret 与日志边界由代码和 Tool Schema 强制，Prompt 不能扩大 Tool
+    Capability。回复语言完全由实际提供的 World/Mod Prompt 表达；Prompt hash 可以作为
+    WorldLock/ModLock 的内容 provenance，但 Prompt 变化不得独自阻止读档。初始 Save Format v1 直接
+    保存 WorldLock 与只含已启用扩展的 ModLock，不为开发期存档增加 Schema 兼容分支。Rainbound Inn
+    必须从 Rust 硬编码迁移到根目录内容文件；生产二进制不使用硬编码 Demo Bridge 生成剧情。
 53. 首个公开版本发布前，Save Format、领域 payload 和内容 Schema 的破坏性修改直接压平进各自的
     初始 v1；开发期产物直接拒绝并重建，不分配 v2、不注册兼容迁移，也不保留 legacy load 分支。
     连续 migration 基础设施只为首个公开版本之后的已发布数据契约保留。
@@ -318,8 +327,9 @@ workspace、版本管理和仓库目录约定。尚未冻结的精确协议转�
 ## 5. Active 基线下仍需独立冻结的事项
 
 - 已冻结第一阶段领域 record、Fixed、Attribute/Resource/Condition、物品/技能、正交状态、
-  KnownFact/Goal/Transcript、Content Definition v1 与 CharacterSpawnSpec；后续新增类型必须走新的
-  schema version/migration，不能扩展 v1 未知字段；
+  KnownFact/Goal/Transcript、Content Definition v1 与 CharacterSpawnSpec；RFC 0003 的 Character
+  appearance 已直接压平进未发布的 record/content v1，并保持未知字段策略；首个公开版本后新增
+  类型仍必须走新的 schema version/migration；
 - Mod Package Manifest、命名空间、依赖解析、显式 Patch、内容哈希、信任来源和资源限额；
 - Event/Rule/Parameter Schema、Predicate/Effect 白名单、规则执行顺序和 Gameplay Action 协议；
 - Extension Mod 是否采用 WASM Component、Host API、Capability、签名与存档兼容边界；
@@ -332,6 +342,10 @@ workspace、版本管理和仓库目录约定。尚未冻结的精确协议转�
   Turn 预算字段、配置层级、默认值和最大编排轮数；模型正文不承担这些结构化协议；
 - 角色私有知识、Goal、Transcript 与确定性上下文投影已冻结；摘要模型延期；
 - TUI 的窄屏降级、快捷键、thinking 状态和后台任务交互细节；
+- 动态角色外观由 [RFC 0003](rfcs/0003-dynamic-character-appearance.md) 冻结：角色持久状态保存稳定
+  Model/Parameter ID，Content/Appearance 把根级 `appearance/` 编译为不可变 Catalog，Runtime 将
+  权威状态投影到 `UiSnapshot`，TUI 后台完成合成与终端编码；眨眼等纯展示动画不推进 World
+  Revision，Kitty/iTerm2/Sixel 为高质量路径，half-block 只作兼容降级；
 - 初始世界内容、玩法循环和可发布范围。
 
 ## 6. 后续推进顺序

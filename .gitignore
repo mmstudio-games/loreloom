@@ -1,4 +1,5 @@
 /target/
+/.local/appearance-spike/
 /.loreloom/
 /loreloom.toml
 /loreloom.*.toml

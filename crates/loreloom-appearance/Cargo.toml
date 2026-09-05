@@ -1,0 +1,16 @@
+[package]
+name = "loreloom-appearance"
+version = "0.1.0"
+edition = "2024"
+description = "Versioned paper-doll appearance packs and deterministic RGBA composition for Loreloom"
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+
+[dependencies]
+image = { version = "0.25.8", default-features = false, features = ["png"] }
+loreloom-core = { version = "0.1.0", path = "../loreloom-core" }
+serde = { version = "1", features = ["derive"] }
+sha2 = "0.10"
+thiserror = "2"
+toml = "1"

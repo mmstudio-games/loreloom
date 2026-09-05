@@ -85,6 +85,7 @@ fn fixture_document() -> ContentDocument {
                     speaking_style: text("Measured and direct."),
                     narrative_tags: BTreeSet::new(),
                 },
+                appearance: None,
                 agent_profile: Some(agent_id.clone()),
                 base_attributes: BaseAttributes::default(),
                 resources: vec![InitialResource {

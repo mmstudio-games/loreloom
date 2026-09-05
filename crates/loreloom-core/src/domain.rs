@@ -249,10 +249,28 @@ pub struct PlaceRecord {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct CharacterAppearance {
+    pub model_id: ContentDefinitionId,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub parameters: BTreeMap<ContentDefinitionId, AppearanceValue>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum AppearanceValue {
+    Color { rgb: [u8; 3] },
+    Variant { id: ContentDefinitionId },
+    Boolean { value: bool },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CharacterRecord {
     pub id: ActorId,
     pub display_name: DisplayName,
     pub profile: CharacterProfile,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub appearance: Option<CharacterAppearance>,
     pub controller: CharacterController,
     pub lifetime: CharacterLifetime,
     pub location: ObjectId,
@@ -640,6 +658,8 @@ pub struct CharacterSpawnSpec {
     pub origin: CharacterOrigin,
     pub display_name: DisplayName,
     pub profile: CharacterProfile,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub appearance: Option<CharacterAppearance>,
     pub controller: CharacterController,
     pub lifetime: CharacterLifetime,
     #[serde(default, skip_serializing_if = "Option::is_none")]

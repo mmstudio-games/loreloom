@@ -92,13 +92,19 @@ workspace、空 crate、版本工具和 P0 Spike 初始化。实现不得选择�
 - Event/Rule Definition 到受限 Trigger/Predicate/Effect plan 的纯编译与静态预算检查；
 - ContentOrigin 输入和可供迁移/诊断使用的内容 provenance。
 
-依赖 `loreloom-core`。不得依赖 Bevy、Armillae LLM/Tool、Provider SDK、Store 后端或 TUI，也不得
+依赖 `loreloom-core` 与 `loreloom-appearance`。不得依赖 Bevy、Armillae LLM/Tool、Provider SDK、Store 后端或 TUI，也不得
 直接访问 Working World、分配 Bevy Entity 或提交 WorldCommand。Core 拥有
 `CharacterSpawnSpec`、持久领域 record 与共享值类型；Content 拥有 Definition/NpcDraft wire、
 Registry 和两条输入到 SpawnSpec 的统一纯编译器。不得引入 Content -> World/Agent/Store 的反向
 依赖，也不得让 World 直接接受原始 NpcDraft。
 
-### 3.3 `loreloom-world`
+### 3.3 `loreloom-appearance`
+
+拥有 `appearance/pack.toml` v1、编译后 Catalog、受限 PNG 解码、稳定图层解析、mask/tint/opacity/
+blend compositor、同步关键帧和确定性 render key。依赖 `loreloom-core`，不得依赖 Content、Bevy、
+Runtime、Store、Ratatui、Crossterm 或异步运行时，不得访问路径、网络或 Working World。
+
+### 3.4 `loreloom-world`
 
 拥有：
 
@@ -115,7 +121,7 @@ Registry 和两条输入到 SpawnSpec 的统一纯编译器。不得引入 Conte
 依赖 `loreloom-core`、`loreloom-content`、`armillae-simulate`、`armillae-simulate-bevy` 和与其兼容的
 `bevy_ecs`。不得依赖 LLM、Provider Adapter、TUI 或具体存储后端。
 
-### 3.4 `loreloom-agent`
+### 3.5 `loreloom-agent`
 
 拥有：
 
@@ -132,7 +138,7 @@ Registry 和两条输入到 SpawnSpec 的统一纯编译器。不得引入 Conte
 依赖 `loreloom-core`、`armillae-llm` 和 `armillae-tools`；具体 `armillae-llm-rig`
 Adapter 优先由二进制装配。不得依赖 Bevy 类型或持久化后端。
 
-### 3.5 `loreloom-store`
+### 3.6 `loreloom-store`
 
 拥有：
 
@@ -150,7 +156,7 @@ driver 与对应嵌入式引擎，但这些类型不得穿透 Core/World/Agent A
 backup 协议遵循第 11.4 节。领域 record Schema、未知字段和领域迁移仍未冻结，因此当前只能保留
 测试专用 adapter/模型，不能提前建立生产 Store 公共 API。
 
-### 3.6 `loreloom-runtime`
+### 3.7 `loreloom-runtime`
 
 拥有：
 
@@ -166,10 +172,10 @@ backup 协议遵循第 11.4 节。领域 record Schema、未知字段和领域�
 
 Runtime 可以依赖 Core、Content、World、Agent 和 Store，是应用策略的唯一组合层。
 
-### 3.7 `loreloom-tui` 与 `loreloom`
+### 3.8 `loreloom-tui` 与 `loreloom`
 
 TUI 拥有终端初始化/恢复、Launcher、玩家创建表单交互、事件映射、布局、输入编辑、滚动与渲染。
-它只依赖 Core 暴露的 View Model 和 Runtime Client；Content 的玩家创建 Schema 必须先由应用装配层
+它只依赖 Core 暴露的 View Model、Appearance 的不可变 Catalog/compositor 和 Runtime Client；Content 的玩家创建 Schema 必须先由应用装配层
 投影成无执行能力的 Startup View Model，TUI 不依赖 Content/World/Agent/Store 实现。
 
 `loreloom` 二进制拥有根世界路径、配置读取、Secret 解析、Mod Package 来源、Provider Adapter、Store
@@ -182,8 +188,8 @@ Backend、Runtime 与 TUI 装配，以及进程退出顺序。
 
 ## 4. Rust、Cargo 与依赖策略
 
-- 根目录使用 Cargo virtual workspace，八个成员位于 `crates/`；七个 library crate 与一个
-  `loreloom` binary crate 的名称和职责遵循第 3 节。
+- 根目录使用 Cargo virtual workspace，九个成员位于 `crates/`；八个 library crate 与一个
+  `loreloom` binary crate 的名称和职责遵循第 3 节，其中 `loreloom-appearance` 由 RFC 0003 新增。
 - 每个成员 Manifest 必须显式声明自己的 `package.version`，禁止 `version.workspace`；初始版本为
   `0.1.0`。
 - Semifold 使用 Rust workspace resolver 与根级 `.changes/` 变更集管理成员版本；base branch 为
@@ -353,8 +359,8 @@ pub struct ItemDefinition {
 ```
 
 Item Definition 属于版本化内容注册表，不为世界中的每件物品复制完整定义。存档必须记录所使用
-的 content version；Definition 使用第 10.2 节冻结的 Content Document v1，迁移只按显式 content
-schema version 执行。
+的 content version；Definition 使用第 10.2 节冻结的 Content Document v1，首个公开版本后迁移只按
+显式 content schema version 执行。
 
 每件或每组实际存在的物品必须是具有 Stable ObjectId 的 ECS Entity。第一阶段候选 Component：
 
@@ -1287,8 +1293,8 @@ request ID 必须唯一。
 - NpcAgent 完成后即丢弃；角色长期状态只保存在 ECS、Transcript、WorldEvent 和 AgentBinding。
 
 模型自然语言正文的语义真实性不能由字符串验证器完全证明。Runtime 通过 ToolResult/WorldEvent
-维护实际状态 provenance，并在 Prompt 中要求 Narrator 只把已提交变化叙述为事实；任何 narration
-或 NPC claim 本身仍不成为 ECS 或存档世界事实。
+维护实际状态 provenance；World/Mod 可以用 Prompt 要求 Narrator 只把已提交变化叙述为事实，但
+无论是否提供该 Prompt，任何 narration 或 NPC claim 本身仍不成为 ECS 或存档世界事实。
 
 ### 10.2 根世界/Mod Content、SpawnSpec 与运行时生成
 
@@ -1301,9 +1307,10 @@ request ID 必须唯一。
 - 可选 Event/Rule/Gameplay Action Definition；
 - 初始位置、关系、物品、Skill Grant、Knowledge、Goal 和 Scene Narrative 数据。
 
-每个 `content/*.json` 固定使用 Content Document v1：顶层只有 `schema_version: 1` 与
-`definitions`；definition 是拒绝未知字段的 `type` tagged union，并具有完整 namespaced ID 与有界
-display/description。v1 字段按 kind 固定为：
+每个 `content/*.json` 固定使用 Content Document v1：顶层只有 `schema_version` 与
+`definitions`；同一 Package 的文档版本必须等于 Manifest `content_schema`。definition 是拒绝未知
+字段的 `type` tagged union，并具有完整 namespaced ID 与有界 display/description。v1 字段按 kind
+固定为：
 
 - AgentProfile：system style、model alias、Tool capability allowlist 与默认 autonomy；
 - Attribute：minimum、maximum 与允许的 aggregation/modifier operation；
@@ -1313,7 +1320,8 @@ display/description。v1 字段按 kind 固定为：
 - Skill：active/passive/reaction kind、唯一 Resource cost、cooldown ticks、typed target、registered
   executor/effect plan 与 reaction window；
 - Character：Profile、Archetype、可选 AgentProfile、placement、Base Attribute/Resource、Condition、
-  inventory、Skill、Knowledge、Goal 与 trusted spawn constraints；
+  inventory、Skill、Knowledge、Goal、trusted spawn constraints，以及 RFC 0003 的可选
+  `appearance`；
 - Place：名称、描述、tags 与 Scene graph edge；
 - Scene：入口 Place、初始 Character/Item、关系、活动 Event 与 narrative framing；
 - Parameter/Event/GameplayAction/Rule：服从第 6.5 节已经冻结的 tagged Schema。
@@ -1627,16 +1635,16 @@ mods/<mod-id>/...
 ```
 
 `world.toml` Manifest Schema v1 声明 `world_id`、SemVer、Engine requirement、Content Schema、
-初始 Scene、Inventory Root、Spawn System、显式 content/rule/resource 文件列表、`[prompts]` 中有序的
-Narrator/NPC Prompt 路径。根世界 Narrator Prompt 列表非空，NPC 列表可为空。只读取 Manifest 显式
+初始 Scene、Inventory Root、Spawn System、显式 content/rule/resource 文件列表，以及可选
+`[prompts]` 中有序的 Narrator/NPC Prompt 路径。整个表和两类列表均可缺省或为空；只读取 Manifest 显式
 声明的世界文件；`mods/`、`.loreloom/`、Cargo
 源码和其它根目录文件不进入世界 payload。Manifest 原始 bytes、声明 payload 和 Prompt 全部进入
 WorldLock 内容哈希，但该 hash 只表达完整性与内容 provenance；Prompt-only 差异不得成为读档硬门禁。
 
 回复语言是 World/Mod Prompt 拥有的叙事内容，不是 Manifest 或 Runtime 协议。Manifest v1 不声明
 `response_language`；Agent 定义、Narrator/NPC Request Builder 与 Runtime 不保存或追加独立语言策略，
-也不执行语言检测、翻译或模型重试。需要固定语言或跟随玩家语言时，World 必须在 Narrator/NPC Prompt
-中分别用自然语言说明，Mod 可以按普通 Prompt 追加规则扩展该取向。
+也不执行语言检测、翻译或模型重试。需要固定语言或跟随玩家语言时，World 或 Mod 可以在
+Narrator/NPC Prompt 中分别用自然语言说明；两者都不提供时，引擎不补入默认语言策略。
 
 Mod Package 是主世界扩展的分发和完整性边界，逻辑上包含：
 
@@ -1659,6 +1667,8 @@ patches/*.json       # only files declared by Manifest
 locales/*.json       # optional display-only data
 assets/**            # optional bounded opaque resources
 prompts/*.md         # optional agent prompt resources
+appearance/pack.toml # optional Appearance Pack v1 entry
+appearance/images/** # optional bounded PNG layers
 ```
 
 产品启动时把世界根 `mods/` 的直接子目录作为 installed candidate，按稳定路径顺序使用与启用路径相同
@@ -1672,8 +1682,8 @@ catalog；依赖图、跨包引用和 Patch 目标只在显式启用闭包中解
 
 `mod.toml` 是 UTF-8 TOML，Manifest Schema v1 至少声明 reverse-DNS lowercase Mod ID、SemVer
 version、属于该 Mod 且 kind 为 `pack` 的 Pack ID、Engine SemVer requirement、Content Schema
-version、required/optional dependencies、`content | rules` capability、64-byte lowercase hex payload
-SHA-256、显式 Patch，以及可选的 `[prompts] narrator = [...]`、`npc = [...]` 有序路径列表。JSON
+version、required/optional dependencies、`content | rules | appearance` capability、64-byte lowercase
+hex payload SHA-256、显式 Patch，以及可选的 `[prompts] narrator = [...]`、`npc = [...]` 有序路径列表。JSON
 文件为 versioned tagged Schema，拒绝未知控制字段。第一阶段没有
 package signature/authenticity 承诺；包来源信任由用户配置表达，SHA-256 只提供内容完整性和存档
 provenance，不能单独判定内容与存档不兼容。第一阶段 Loreloom Engine compatibility version 固定为
@@ -1683,9 +1693,9 @@ Semifold patch release；只有协议兼容边界变化时才显式提升。
 `content/*.json` 使用第 10.2 节 Content Document v1，并只允许 AgentProfile 到 Scene 的静态
 Definition；`rules/*.json` 复用同一 document envelope，但只允许 Parameter、Event、GameplayAction
 与 Rule Definition。对应目录存在时 Manifest 必须分别声明 `content`/`rules` capability。
-`patches/*.json` 不参与普通 Definition 扫描，只能由 Manifest 精确引用；Patch Document v1 顶层为
-`schema_version: 1` 与非空 `operations`，第一阶段唯一 operation 是 `replace_definition`，其 value
-为完整 Definition。替换值必须与声明的 target Definition 保持相同 ID 和 kind，保留 target 的
+`patches/*.json` 不参与普通 Definition 扫描，只能由 Manifest 精确引用；Patch Document 顶层版本
+必须是 v1，另含非空 `operations`；第一阶段唯一 operation 是 `replace_definition`，其 value 为
+完整 Definition。替换值必须与声明的 target Definition 保持相同 ID 和 kind，保留 target 的
 ContentOrigin，并在全部 Patch 应用后重新执行字段、跨引用、Rule plan 与能力校验。第一阶段不支持
 JSON Pointer、字段级 merge、删除/重命名 Definition 或可执行 Patch。
 
@@ -1696,9 +1706,11 @@ little-endian `u64`、path bytes、内容 byte length 的 little-endian `u64` �
 Manifest TOML 空白不影响 hash，JSON/asset 原始 bytes 或路径变化会改变 hash。
 
 声明为全局 Prompt 的路径必须唯一、位于 `prompts/*.md`、存在、为非空 UTF-8 且满足 `LongText`
-上限。未在 `[prompts]` 声明的 Prompt 文件只作为普通包资源，不注入 Agent。最终 Narrator Prompt
-顺序为根世界声明顺序，再按 Mod dependency topology 与各 Mod 声明顺序追加；NPC 使用相同合并顺序，
-但位于角色 `AgentProfile.system_style` 之后。Prompt 不能改变 Runtime 实际注册的 Tool 或 Capability。
+上限。未在 `[prompts]` 声明的 Prompt 文件只作为普通包资源，不注入 Agent。引擎不注入硬编码自然
+语言 System Prompt。最终 Narrator Prompt 顺序为可选根世界声明顺序，再按 Mod dependency topology
+与各 Mod 声明顺序追加；NPC 使用相同合并顺序，但位于内容拥有的 `AgentProfile.system_style` 之后。
+根世界没有 Prompt 时，Mod Prompt 自然成为对应 Agent 的首个全局 Prompt；两者都没有时请求仍合法。
+Prompt 不能改变 Runtime 实际注册的 Tool 或 Capability。
 
 包路径统一使用 `/` 的相对路径。加载器在解析内容前拒绝 absolute、反斜杠、NUL、空/`.`/`..`
 segment、symlink 和重复规范路径。Host 默认上限为 256 个 payload 文件、单文件 1 MiB、总 payload
@@ -2224,6 +2236,35 @@ UiSnapshot 至少包含：
 
 UiSnapshot 是拥有所有权且不可变的 View Model。TUI 不能通过 Widget callback 修改 ECS。
 
+`CharacterContext` 额外包含可选 `AppearanceView { revision, model_id, parameters }`。Parameter 是
+`color`、`variant`、`boolean` tagged value，并以稳定 Content Definition ID 为键；View 不包含资源
+路径、PNG/RGBA bytes、Ratatui 类型、终端协议或进程内句柄。Runtime 只从 committed Character
+record 投影它，TUI 不得从文字、Inventory 展示行或 Widget 本地状态反推权威外观。
+
+### 12.3 动态外观与终端图片
+
+根世界/Mod 的可选入口固定为 `appearance/pack.toml`，图片固定在 `appearance/images/**/*.png`。
+根世界通过 `world.toml.resources` 显式列出；Mod 必须声明 `appearance` capability。Content 在发布
+Registry/WorldLock/ModLock 前完成路径、引用、namespace、资源上限和 Pack 编译；原始 bytes 参与
+既有内容哈希。整个 Package 仍只使用 `world.toml`/`mod.toml`，不存在 `package.toml`。
+
+`loreloom-appearance` Pack v1 固定支持不超过 512 x 512 的逻辑画布、稳定 z-order、同 z 声明顺序、
+最多 16 个同步 Frame、每 Frame 最多 128 层、sprite frame、局部 alpha mask、RGB tint、opacity、
+typed equality predicate，以及 SourceOver/Multiply/Screen/HardLight。未知字段/模式、重复 ID、缺失
+资源、尺寸/帧/mask 不匹配和解码限额均拒绝加载。Goose 式全身与特写只是同一画布中的美术布局。
+
+Content Document v1 的 Character Definition、未单独版本化的 SpawnSpec，以及 Character Record v1
+保存可选 Model ID 与 typed Parameter。Loreloom 尚未发布首个版本，因此 appearance 直接属于这些
+初始 v1 契约，不分配 v2 或注册开发期 migration；缺少可选字段时读取为 `None`。装备、耐久、
+Condition、姿态等现有权威事实不得复制进自由参数袋。PNG、合成帧、terminal protocol、cell size、
+宿主探测和眨眼 clock 不进入 ECS、Store、Agent Context 或 World Revision。
+
+TUI 在 alternate screen 后、事件读取前探测协议，支持 `auto|kitty|iterm2|sixel|halfblocks|disabled`。
+合成、缩放和协议编码由有界后台 worker 完成；新请求 last-write-wins，旧帧保持显示直到新 key
+ready，过期结果不得覆盖新状态。draw callback 只渲染 ready protocol；普通 redraw 不解码、合成、
+缩放或编码。普通 blink/idle 使用 Pack frame duration 和进程展示时钟，不推进 World Clock/Revision。
+Halfblocks 只作低清 fallback，探测失败必须给出安全提示或允许显式覆盖。
+
 第一阶段 wire 形状补充冻结为：
 
 ```rust
@@ -2665,8 +2706,8 @@ CI 使用最新 stable，不执行 MSRV Job，不允许 manifest 出现 `rust-ve
 RFC 0001 已于 2026-08-30 被项目方接受。以下事项继续阻塞对应公共 API、持久化格式或产品行为，
 但不阻塞 workspace、空 crate、Semifold、测试数据目录和 P0 Spike：
 
-- Stable ID 编码、record envelope 与 Command/Event/RecordOp 重建权威关系已冻结；首个公开版本前
-  只有当前 v1 codec，不存在已激活的领域兼容 migration；
+- Stable ID 编码、record envelope 与 Command/Event/RecordOp 重建权威关系已冻结；RFC 0003 的可选
+  Character appearance 已直接压平进初始 v1 payload，所有 record kind 仍只有 v1 codec；
 - Store driver 的 AGPL 兼容分发方式已通过 Loreloom 采用 `AGPL-3.0-only` 确认；后端、公开依赖
   revision 与 commit/failure 协议已由 P0 Spike 冻结；物理 backup/restore/switch 仍受 SurrealDB shutdown
   上游能力门禁；

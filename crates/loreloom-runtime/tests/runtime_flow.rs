@@ -34,18 +34,18 @@ use loreloom_content::{
     TagDefinition, parse_content_hash,
 };
 use loreloom_core::{
-    ActionId, ActionState, ActorId, AgentBinding, AttributeAdjustment, AttributeOperation,
-    BaseAttributes, CharacterController, CharacterLifetime, CharacterProfile, CharacterRecord,
-    ConditionRecord, ConditionSource, ContentDefinitionId, ContentOrigin,
-    DIAGNOSED_CONDITION_PREDICATE_ID, DisplayName, DomainRecord, EntityOrigin, EventInstanceRecord,
-    EventStatus, FactSource, FactSubject, FactValue, Fixed, GenerationSource, GoalRecord,
-    GoalSource, GoalStatus, IntensityPolicy, ItemRecord, KnowledgeStatus, KnownFactRecord,
-    LifeState, LockedMod, LongText, ModId, ModLock, ModSourceKind, ObjectId, ParameterSetRecord,
-    ParameterValue, PlaceRecord, Posture, ResourcePool, Revision, RuntimeProgressEvent,
-    SAVE_FORMAT_V1, SaveId, SaveManifest, SceneRecord, SessionId, ShortText, SkillGrantRecord,
-    SkillSource, SpawnConstraints, StackState, SystemIdGenerator, ToolActivityState,
-    TranscriptSpeaker, WorldCommand, WorldCommandKind, WorldEventKind, WorldId, WorldLock,
-    WorldStateRecord, WorldTime,
+    ActionId, ActionState, ActorId, AgentBinding, AppearanceValue, AttributeAdjustment,
+    AttributeOperation, BaseAttributes, CharacterAppearance, CharacterController,
+    CharacterLifetime, CharacterProfile, CharacterRecord, ConditionRecord, ConditionSource,
+    ContentDefinitionId, ContentOrigin, DIAGNOSED_CONDITION_PREDICATE_ID, DisplayName,
+    DomainRecord, EntityOrigin, EventInstanceRecord, EventStatus, FactSource, FactSubject,
+    FactValue, Fixed, GenerationSource, GoalRecord, GoalSource, GoalStatus, IntensityPolicy,
+    ItemRecord, KnowledgeStatus, KnownFactRecord, LifeState, LockedMod, LongText, ModId, ModLock,
+    ModSourceKind, ObjectId, ParameterSetRecord, ParameterValue, PlaceRecord, Posture,
+    ResourcePool, Revision, RuntimeProgressEvent, SAVE_FORMAT_V1, SaveId, SaveManifest,
+    SceneRecord, SessionId, ShortText, SkillGrantRecord, SkillSource, SpawnConstraints, StackState,
+    SystemIdGenerator, ToolActivityState, TranscriptSpeaker, WorldCommand, WorldCommandKind,
+    WorldEventKind, WorldId, WorldLock, WorldStateRecord, WorldTime,
 };
 use loreloom_runtime::{
     ContextProjectionPolicy, GameRuntime, NpcResourcePolicy, OrchestrationBudget, RuntimeConfig,
@@ -180,6 +180,7 @@ fn fixture() -> Fixture {
                             speaking_style: text("Patient and exact."),
                             narrative_tags: BTreeSet::new(),
                         },
+                        appearance: None,
                         agent_profile: Some(profile_id.clone()),
                         base_attributes: BaseAttributes::default(),
                         resources: Vec::new(),
@@ -575,6 +576,7 @@ fn character(
         id,
         display_name: name(display_name),
         profile,
+        appearance: None,
         controller,
         lifetime: CharacterLifetime::Persistent,
         location,
@@ -837,6 +839,61 @@ async fn condition_name_projection_requires_a_confirmed_diagnosis_fact() {
         let encoded = serde_json::to_string(&snapshot.player).expect("encode player context");
         assert_eq!(encoded.contains("Winter fever"), diagnosed);
     }
+}
+
+#[tokio::test]
+async fn snapshot_projects_persisted_player_appearance_at_its_world_revision() {
+    let directory = TempDir::new().expect("temporary save parent");
+    let mut fixture = fixture();
+    let appearance = CharacterAppearance {
+        model_id: definition_id("appearance_model", "player"),
+        parameters: BTreeMap::from([(
+            definition_id("appearance_parameter", "eyes"),
+            AppearanceValue::Color { rgb: [24, 96, 144] },
+        )]),
+    };
+    let character = fixture
+        .records
+        .iter_mut()
+        .find_map(|record| match record {
+            DomainRecord::Character(character) if character.id == fixture.player => Some(character),
+            _ => None,
+        })
+        .expect("player character");
+    character.appearance = Some(appearance.clone());
+    let candidate_world_lock = fixture.manifest.world_lock.clone();
+    let candidate_mod_lock = fixture.manifest.mod_lock.clone();
+    let store = SaveStore::create(
+        directory.path().join("save"),
+        fixture.manifest,
+        fixture.records,
+    )
+    .await
+    .expect("create appearance save");
+    let service = WorldService::open(
+        store,
+        fixture.registry,
+        &candidate_world_lock,
+        &candidate_mod_lock,
+        fixture.world_config,
+    )
+    .await
+    .expect("open appearance service");
+
+    let snapshot = service
+        .snapshot(
+            parse("ses_01890f6a-2b4a-7d4e-8f90-123456789abc"),
+            loreloom_core::RuntimePhase::Idle,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        )
+        .await
+        .expect("appearance snapshot");
+    let projected = snapshot.player.appearance.expect("appearance projection");
+    assert_eq!(projected.revision, Revision::ZERO);
+    assert_eq!(projected.model_id, appearance.model_id);
+    assert_eq!(projected.parameters, appearance.parameters);
 }
 
 enum SupportMode {
@@ -2484,15 +2541,14 @@ async fn player_narrator_npc_and_surreal_store_form_a_durable_vertical_slice() {
     );
     let npc_requests = npc.requests().expect("npc requests");
     assert_eq!(npc_requests.len(), 2);
-    assert_eq!(npc_requests[0].messages.len(), 4);
+    assert_eq!(npc_requests[0].messages.len(), 3);
     let message_text = |index: usize| match &npc_requests[0].messages[index].content[..] {
         [armillae_core::ContentPart::Text(text)] => text.text.as_str(),
         content => panic!("expected one text part, got {content:?}"),
     };
-    assert!(message_text(0).contains("tool rules"));
-    assert_eq!(message_text(1), "Be concise.");
-    assert_eq!(message_text(2), "Respect the shared test lore.");
-    assert!(message_text(3).contains("\"kind\":\"npc_turn\""));
+    assert_eq!(message_text(0), "Be concise.");
+    assert_eq!(message_text(1), "Respect the shared test lore.");
+    assert!(message_text(2).contains("\"kind\":\"npc_turn\""));
 
     let loaded = observer.load().await.expect("load durable result");
     assert_eq!(loaded.revision, Revision::new(3));

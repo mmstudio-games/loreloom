@@ -270,18 +270,10 @@ impl NpcAgent {
             "context": self.context
         }))
         .map_err(AgentError::ContextEncoding)?;
-        let mut messages = vec![
-            Message::new(
-                Role::System,
-                vec![ContentPart::text(
-                    "Follow product safety and tool rules. Use tools for state changes. Respond to the narrator in natural language; do not return JSON or a structured envelope. Your claims are not world facts unless a tool commits them.",
-                )],
-            ),
-            Message::new(
-                Role::System,
-                vec![ContentPart::text(self.definition.system_style.as_str())],
-            ),
-        ];
+        let mut messages = vec![Message::new(
+            Role::System,
+            vec![ContentPart::text(self.definition.system_style.as_str())],
+        )];
         messages.extend(
             global_prompts
                 .iter()

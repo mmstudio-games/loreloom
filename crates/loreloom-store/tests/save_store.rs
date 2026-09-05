@@ -1,6 +1,10 @@
+use std::collections::BTreeMap;
+
 use loreloom_core::{
-    ActionId, ActorId, ContentHash, DomainRecord, EventId, ExecutionChangeSet, LockedMod, LongText,
-    ModId, ModLock, ModSourceKind, Revision, SAVE_FORMAT_V1, SaveId, SaveManifest, SessionId,
+    ActionId, ActionState, ActorId, AppearanceValue, BaseAttributes, CharacterAppearance,
+    CharacterController, CharacterLifetime, CharacterProfile, CharacterRecord, ContentHash,
+    DomainRecord, EntityOrigin, EventId, ExecutionChangeSet, LifeState, LockedMod, LongText, ModId,
+    ModLock, ModSourceKind, Posture, Revision, SAVE_FORMAT_V1, SaveId, SaveManifest, SessionId,
     ShortText, TranscriptItemId, TranscriptItemRecord, TranscriptSpeaker, TranscriptState,
     WorldCommand, WorldCommandKind, WorldEvent, WorldEventKind, WorldId, WorldLock,
     WorldStateRecord, WorldTime,
@@ -100,6 +104,58 @@ fn candidate_content_locks(manifest: &SaveManifest) -> (WorldLock, ModLock) {
         }],
     };
     (world_lock, mod_lock)
+}
+
+#[tokio::test]
+async fn character_appearance_round_trips_through_the_save_store() {
+    let directory = TempDir::new().expect("temporary save parent");
+    let path = directory.path().join("save");
+    let (manifest, world, actor) = fixture();
+    let character = DomainRecord::Character(CharacterRecord {
+        id: actor,
+        display_name: parse_display_name("Traveler"),
+        profile: CharacterProfile {
+            summary: ShortText::new("A traveler.").expect("summary"),
+            values: Vec::new(),
+            speaking_style: ShortText::new("Direct.").expect("style"),
+            narrative_tags: Default::default(),
+        },
+        appearance: Some(CharacterAppearance {
+            model_id: parse("games.loreloom.test:appearance_model/player"),
+            parameters: BTreeMap::from([(
+                parse("games.loreloom.test:appearance_parameter/eyes"),
+                AppearanceValue::Color { rgb: [24, 96, 144] },
+            )]),
+        }),
+        controller: CharacterController::Player,
+        lifetime: CharacterLifetime::Persistent,
+        location: parse("obj_01890f6a-2b3f-7d4e-8f90-123456789abc"),
+        inventory_root: parse("obj_01890f6a-2b40-7d4e-8f90-123456789abc"),
+        agent_binding: None,
+        base_attributes: BaseAttributes::default(),
+        attribute_adjustments: Vec::new(),
+        resources: BTreeMap::new(),
+        life_state: LifeState::Alive,
+        action_state: ActionState::Idle,
+        posture: Posture::Standing,
+        origin: EntityOrigin::System {
+            source: parse("games.loreloom.test:system/bootstrap"),
+        },
+    });
+    let expected = character.clone();
+    let mut store = SaveStore::create(&path, manifest, vec![world, character])
+        .await
+        .expect("create appearance save");
+    let loaded = store.load().await.expect("load appearance save");
+    assert!(loaded.records.contains(&expected));
+
+    let mut reopened = store.connect().await.expect("reopen appearance save");
+    let reloaded = reopened.load().await.expect("reload appearance save");
+    assert!(reloaded.records.contains(&expected));
+}
+
+fn parse_display_name(value: &str) -> loreloom_core::DisplayName {
+    loreloom_core::DisplayName::new(value).expect("display name")
 }
 
 #[tokio::test]

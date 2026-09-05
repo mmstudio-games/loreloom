@@ -8,7 +8,7 @@ use loreloom_agent::ResourceBudget;
 use loreloom_runtime::{
     ContextProjectionPolicy, NpcResourcePolicy, OrchestrationBudget, RuntimeConfig,
 };
-use loreloom_tui::TuiConfig;
+use loreloom_tui::{ImageProtocolPreference, TuiConfig};
 use loreloom_world::RuleLimits;
 use serde::Deserialize;
 use url::Url;
@@ -126,6 +126,32 @@ impl From<RuleLimitConfig> for RuleLimits {
 struct TuiProductConfig {
     state_width_percent: u16,
     event_poll_ms: u64,
+    image_protocol: ImageProtocolConfig,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum ImageProtocolConfig {
+    #[default]
+    Auto,
+    Kitty,
+    Iterm2,
+    Sixel,
+    Halfblocks,
+    Disabled,
+}
+
+impl From<ImageProtocolConfig> for ImageProtocolPreference {
+    fn from(value: ImageProtocolConfig) -> Self {
+        match value {
+            ImageProtocolConfig::Auto => Self::Auto,
+            ImageProtocolConfig::Kitty => Self::Kitty,
+            ImageProtocolConfig::Iterm2 => Self::Iterm2,
+            ImageProtocolConfig::Sixel => Self::Sixel,
+            ImageProtocolConfig::Halfblocks => Self::Halfblocks,
+            ImageProtocolConfig::Disabled => Self::Disabled,
+        }
+    }
 }
 
 impl Default for TuiProductConfig {
@@ -136,6 +162,7 @@ impl Default for TuiProductConfig {
         Self {
             state_width_percent: value.state_width_percent,
             event_poll_ms,
+            image_protocol: ImageProtocolConfig::Auto,
         }
     }
 }
@@ -192,6 +219,7 @@ impl ProductConfig {
             tui: TuiConfig {
                 state_width_percent: self.tui.state_width_percent,
                 event_poll_interval: Duration::from_millis(self.tui.event_poll_ms),
+                image_protocol: self.tui.image_protocol.into(),
             },
         })
     }
@@ -201,6 +229,7 @@ impl ProductConfig {
         TuiConfig {
             state_width_percent: self.tui.state_width_percent,
             event_poll_interval: Duration::from_millis(self.tui.event_poll_ms),
+            image_protocol: self.tui.image_protocol.into(),
         }
     }
 

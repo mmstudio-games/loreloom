@@ -74,3 +74,4 @@ max_cascade_depth = 8
 [tui]
 state_width_percent = 30
 event_poll_ms = 50
+image_protocol = "auto"

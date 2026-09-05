@@ -118,6 +118,7 @@ fn run_application_with(
     let WorldSetup {
         mut runtime,
         initial_snapshot,
+        appearance,
         save_id,
         world_id,
         ..
@@ -141,7 +142,7 @@ fn run_application_with(
     }
 
     let mut client = RuntimeAdapter::spawn(runtime)?;
-    loreloom_tui::run(&mut client, initial_snapshot, tui_config)?;
+    loreloom_tui::run_with_appearance(&mut client, initial_snapshot, tui_config, appearance)?;
     Ok(())
 }
 

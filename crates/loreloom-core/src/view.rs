@@ -2,7 +2,7 @@ use semver::Version;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    ActionState, ActorId, CharacterController, CharacterProfile, ConditionRecord,
+    ActionState, ActorId, AppearanceValue, CharacterController, CharacterProfile, ConditionRecord,
     ContentDefinitionId, DisplayName, EventId, Fixed, GoalRecord, ItemRecord, KnownFactRecord,
     LifeState, ModId, ObjectId, ParameterValue, Posture, Revision, SessionId, ShortText,
     SkillGrantRecord, TranscriptItemId, TranscriptItemRecord, WorldEvent, WorldTime,
@@ -54,11 +54,21 @@ pub struct SkillView {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct AppearanceView {
+    pub revision: Revision,
+    pub model_id: ContentDefinitionId,
+    pub parameters: std::collections::BTreeMap<ContentDefinitionId, AppearanceValue>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CharacterContext {
     pub actor_id: ActorId,
     pub revision: Revision,
     pub display_name: DisplayName,
     pub profile: CharacterProfile,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub appearance: Option<AppearanceView>,
     pub location_id: ObjectId,
     pub attributes: Vec<AttributeView>,
     pub resources: Vec<ResourceView>,

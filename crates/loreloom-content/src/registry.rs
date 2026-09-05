@@ -20,6 +20,7 @@ use crate::schema::{
 };
 
 pub const CONTENT_SCHEMA_V1: u32 = 1;
+pub const CONTENT_SCHEMA_CURRENT: u32 = CONTENT_SCHEMA_V1;
 
 #[derive(Debug, Error)]
 pub enum ContentError {
@@ -180,7 +181,9 @@ impl DefinitionRegistry {
             let version_text = ShortText::new(context.mod_version.to_string())
                 .map_err(|_| ContentError::TextBound)?;
             for document in documents {
-                if document.schema_version != CONTENT_SCHEMA_V1 {
+                if document.schema_version != CONTENT_SCHEMA_V1
+                    || document.schema_version != context.content_version
+                {
                     return Err(ContentError::UnsupportedSchema {
                         observed: document.schema_version,
                     });
@@ -392,6 +395,7 @@ impl DefinitionRegistry {
             },
             display_name: character.display_name.clone(),
             profile: character.profile.clone(),
+            appearance: character.appearance.as_deref().cloned(),
             controller: request.controller,
             lifetime: request.lifetime,
             agent_binding,
@@ -633,6 +637,7 @@ impl DefinitionRegistry {
             },
             display_name: draft.display_name.clone(),
             profile: draft.profile.clone(),
+            appearance: None,
             controller: request.controller,
             lifetime: request.lifetime,
             agent_binding,

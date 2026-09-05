@@ -4,6 +4,7 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
+use loreloom_appearance::{APPEARANCE_PACK_PATH, AppearanceCatalog, AppearanceError};
 use loreloom_core::{
     ContentDefinitionId, ContentHash, LockedDependency, LockedMod, LongText, ModId, ModLock,
     ModSourceKind, PackageContentView, WorldLock,
@@ -26,6 +27,7 @@ pub const LORELOOM_ENGINE_VERSION: &str = "0.1.0";
 pub enum ModCapability {
     Content,
     Rules,
+    Appearance,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -277,6 +279,8 @@ pub enum PackageError {
     InvalidLock,
     #[error(transparent)]
     Content(#[from] ContentError),
+    #[error(transparent)]
+    Appearance(#[from] AppearanceError),
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -304,6 +308,7 @@ pub struct CompiledModSet {
     registry: DefinitionRegistry,
     mod_lock: ModLock,
     resources: PackageResources,
+    appearance: AppearanceCatalog,
     prompts: CompiledAgentPrompts,
     prompt_sets: BTreeMap<ModId, CompiledAgentPrompts>,
     package_content: BTreeMap<ModId, PackageContentView>,
@@ -338,6 +343,7 @@ pub struct CompiledWorldSet {
     world_lock: WorldLock,
     mod_lock: ModLock,
     resources: PackageResources,
+    appearance: AppearanceCatalog,
     prompts: CompiledAgentPrompts,
     package_content: BTreeMap<ModId, PackageContentView>,
 }
@@ -361,6 +367,11 @@ impl CompiledWorldSet {
     #[must_use]
     pub fn resources(&self) -> &PackageResources {
         &self.resources
+    }
+
+    #[must_use]
+    pub fn appearance(&self) -> &AppearanceCatalog {
+        &self.appearance
     }
 
     #[must_use]
@@ -398,6 +409,11 @@ impl CompiledModSet {
     #[must_use]
     pub fn resources(&self) -> &PackageResources {
         &self.resources
+    }
+
+    #[must_use]
+    pub fn appearance(&self) -> &AppearanceCatalog {
+        &self.appearance
     }
 
     #[must_use]
@@ -464,6 +480,13 @@ impl PackageCompiler {
         let raw = read_directory_package(root.as_ref(), self.limits)?;
         let package = parse_package(raw, &self.engine_version, self.limits)?;
         let unit = parse_definition_documents(&package)?;
+        let resources = collect_resources(
+            std::slice::from_ref(&package.manifest.mod_id),
+            &BTreeMap::from([(package.manifest.mod_id.clone(), package.clone())]),
+        );
+        let appearance = AppearanceCatalog::compile(resources.iter())?;
+        let registry = DefinitionRegistry::build(unit.context.clone(), unit.documents.clone())?;
+        validate_character_appearance_models(&registry, &appearance)?;
         let content = package_content_view(&package.manifest, &unit.documents);
         Ok(InspectedPackage {
             manifest: package.manifest,
@@ -485,6 +508,7 @@ impl PackageCompiler {
             registry,
             mod_lock: full_lock,
             resources,
+            appearance,
             prompts: _,
             prompt_sets,
             package_content,
@@ -498,6 +522,7 @@ impl PackageCompiler {
             world_lock,
             mod_lock,
             resources,
+            appearance,
             prompts,
             package_content,
         })
@@ -557,12 +582,15 @@ impl PackageCompiler {
             return Err(PackageError::LockMismatch);
         }
         let resources = collect_resources(&order, &parsed);
+        let appearance = AppearanceCatalog::compile(resources.iter())?;
+        validate_character_appearance_models(&registry, &appearance)?;
         let prompt_sets = collect_prompt_sets(&order, &parsed)?;
         let prompts = flatten_prompt_sets(&order, &prompt_sets);
         Ok(CompiledModSet {
             registry,
             mod_lock,
             resources,
+            appearance,
             prompts,
             prompt_sets,
             package_content,
@@ -577,7 +605,7 @@ struct RawPackage {
     payloads: Vec<PackagePayload>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct ParsedPackage {
     source_kind: ModSourceKind,
     manifest: ModManifest,
@@ -771,8 +799,17 @@ fn validate_payload_groups(
                 std::str::from_utf8(bytes).map_err(|_| PackageError::InvalidData)?;
             }
             Some(PayloadKind::Asset) => {}
+            Some(PayloadKind::Appearance) if capabilities.contains(&ModCapability::Appearance) => {}
             _ => return Err(PackageError::UnsafePath),
         }
+    }
+    let has_appearance = files
+        .keys()
+        .any(|path| matches!(classify_path(path), Some(PayloadKind::Appearance)));
+    if capabilities.contains(&ModCapability::Appearance) != has_appearance
+        || (has_appearance && !files.contains_key(APPEARANCE_PACK_PATH))
+    {
+        return invalid_manifest("appearance");
     }
     if manifest
         .patches
@@ -1087,7 +1124,12 @@ fn collect_resources(
             for (path, bytes) in &package.files {
                 if matches!(
                     classify_path(path),
-                    Some(PayloadKind::Locale | PayloadKind::Prompt | PayloadKind::Asset)
+                    Some(
+                        PayloadKind::Locale
+                            | PayloadKind::Prompt
+                            | PayloadKind::Asset
+                            | PayloadKind::Appearance
+                    )
                 ) {
                     entries.insert((mod_id.clone(), path.clone()), bytes.clone());
                 }
@@ -1095,6 +1137,27 @@ fn collect_resources(
         }
     }
     PackageResources { entries }
+}
+
+fn validate_character_appearance_models(
+    registry: &DefinitionRegistry,
+    appearance: &AppearanceCatalog,
+) -> Result<(), PackageError> {
+    for (_, entry) in registry.iter() {
+        if let Definition::Character(character) = &entry.definition
+            && let Some(state) = &character.appearance
+        {
+            if !appearance.contains_model(&state.model_id) {
+                return Err(PackageError::Appearance(AppearanceError::ModelUnavailable));
+            }
+            appearance.render_key(&loreloom_core::AppearanceView {
+                revision: loreloom_core::Revision::ZERO,
+                model_id: state.model_id.clone(),
+                parameters: state.parameters.clone(),
+            })?;
+        }
+    }
+    Ok(())
 }
 
 fn collect_prompt_sets(
@@ -1220,6 +1283,7 @@ enum PayloadKind {
     Locale,
     Prompt,
     Asset,
+    Appearance,
 }
 
 fn classify_path(path: &str) -> Option<PayloadKind> {
@@ -1231,6 +1295,8 @@ fn classify_path(path: &str) -> Option<PayloadKind> {
         ["locales", file] if file.ends_with(".json") => Some(PayloadKind::Locale),
         ["prompts", file] if file.ends_with(".md") => Some(PayloadKind::Prompt),
         ["assets", _, ..] => Some(PayloadKind::Asset),
+        ["appearance", "pack.toml"] => Some(PayloadKind::Appearance),
+        ["appearance", "images", _, ..] if path.ends_with(".png") => Some(PayloadKind::Appearance),
         _ => None,
     }
 }
