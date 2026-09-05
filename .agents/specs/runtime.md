@@ -2110,6 +2110,12 @@ Checkpoint、RecordOp、WorldEvent、Transcript 与 ActionCommit 的 JSON payloa
 - 可从 Definition、实例和规则重新计算的 EffectiveAttributes、effective resource maximum、
   总重量、装备加成、技能可用性、可用行动或 UI 状态文本缓存。
 
+Launcher Settings 提供既有 Provider、资源预算和 TUI 配置的编辑入口。TUI 只提交 Host 配置草稿；
+二进制装配层复用 ProductConfig 校验，在同目录临时文件完成写入后原子替换 `--config` 文件，
+成功后更新本次启动的配置。校验或保存失败保留旧文件和草稿，允许修正重试；取消不写入。
+Provider 凭证只编辑环境变量名或文件引用，不读取或展示 Secret。此处不引入新的配置 Schema、
+运行中热更新或 ECS/Save 状态。
+
 ### 11.3 Save/Load
 
 应用装配层在每个由 Launcher 创建或显式直达后登记的 Save 旁维护一个小型、原子替换的 catalog

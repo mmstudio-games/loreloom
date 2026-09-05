@@ -301,7 +301,8 @@ Loreloom Runtime ───────────────► Persistence
     v1。Launcher 的存档目录元数据是可重建的 Host 索引，不是 ECS/Store 权威事实，也不得包含 Secret。
     同一次交互式启动从 Launcher、初始化加载页到游戏页必须持有同一个 alternate-screen/raw-mode
     终端会话；页面切换或 Provider/World/Store 初始化不得中途恢复原始终端，失败与最终退出仍必须
-    可靠恢复终端。
+    可靠恢复终端。Settings 编辑既有 Host 配置，由二进制装配层校验并原子保存到
+    `--config` 文件，成功后用于本次启动；TUI 只持有配置引用与编辑草稿，不解析 Secret。
 
 项目方已于 2026-08-29 明确确认第 18–23 项的 Mod 子系统方向。该确认把 Content Mod、Rule Mod、
 统一导入路径、类型化参数、结构化 Event Option、通用 Gameplay Tool、ModLock 和 Extension Mod

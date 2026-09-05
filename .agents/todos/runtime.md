@@ -155,3 +155,6 @@ OPEN 项、后续 RFC 或 P0 Spike；空 crate 不代表相关协议已经实现
 - [x] 完成 Active Spec 第 17 节实施审计：除显式 `UPSTREAM-GATED` 的第 47 条和上述分发许可选择外，
   其余验收均有自动化或可复现证据；当前门禁为 188 tests passed，目录根世界的创建、锁分离、
   Prompt 注入与存档内容锁重开拒绝均有确定性测试。macOS arm64 release 基线仍为 81.2 MiB。
+
+- [x] 修复 Launcher Settings 只读占位：编辑既有 Host 配置，校验、原子保存、取消与失败重试，
+  保存后用于本次启动，并覆盖配置持久化及确定性页面交互。

@@ -10,7 +10,7 @@ use loreloom_runtime::{
 };
 use loreloom_tui::{ImageProtocolPreference, TuiConfig};
 use loreloom_world::RuleLimits;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use url::Url;
 
 use crate::error::{AppError, ProviderSetupDiagnostic, ProviderSetupIssue, ProviderSlot};
@@ -41,7 +41,7 @@ pub struct ProductConfig {
     tui: TuiProductConfig,
 }
 
-#[derive(Debug, Clone, Copy, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct OrchestrationConfig {
     resources: ResourceBudget,
@@ -60,7 +60,7 @@ impl Default for OrchestrationConfig {
     }
 }
 
-#[derive(Debug, Clone, Copy, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct NpcResourceConfig {
     max_generated_per_orchestration: u32,
@@ -89,7 +89,7 @@ impl From<NpcResourceConfig> for NpcResourcePolicy {
     }
 }
 
-#[derive(Debug, Clone, Copy, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct RuleLimitConfig {
     max_triggered_rules: u32,
@@ -121,7 +121,7 @@ impl From<RuleLimitConfig> for RuleLimits {
     }
 }
 
-#[derive(Debug, Clone, Copy, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct TuiProductConfig {
     state_width_percent: u16,
@@ -129,7 +129,7 @@ struct TuiProductConfig {
     image_protocol: ImageProtocolConfig,
 }
 
-#[derive(Debug, Clone, Copy, Default, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 enum ImageProtocolConfig {
     #[default]
@@ -180,11 +180,67 @@ pub struct ResolvedProductConfig {
 }
 
 impl ProductConfig {
+    #[cfg(test)]
     pub fn load(path: &Path) -> Result<Self, AppError> {
         let source = std::fs::read_to_string(path)?;
         let value: Self = toml::from_str(&source).map_err(|_| AppError::ConfigCodec)?;
         value.validate()?;
         Ok(value)
+    }
+
+    pub fn settings(&self) -> Result<Vec<loreloom_tui::StartupSettingView>, AppError> {
+        use loreloom_tui::StartupSettingView;
+        let mut fields = Vec::new();
+        for (slot, bridge) in [("narrator", &self.narrator), ("npc", &self.npc)] {
+            for (name, value, help) in [
+                (
+                    "provider",
+                    bridge.provider.clone(),
+                    "Provider: anthropic, deepseek, minimax, moonshot, ollama, openai, openai-compatible",
+                ),
+                ("model", bridge.model.clone(), "Model name (plain text)"),
+                (
+                    "endpoint",
+                    bridge
+                        .endpoint
+                        .as_ref()
+                        .map(ToString::to_string)
+                        .unwrap_or_default(),
+                    "Custom URL; blank uses Provider default. Add its host to allowed_endpoint_hosts.",
+                ),
+                (
+                    "credential",
+                    match &bridge.credential {
+                        Some(CredentialRef::Environment { name }) => format!("env:{name}"),
+                        Some(CredentialRef::File { path }) => format!("file:{}", path.display()),
+                        _ => String::new(),
+                    },
+                    "Credential reference: env:VARIABLE or file:/path; blank for no credential. Never enter an API key.",
+                ),
+            ] {
+                fields.push(StartupSettingView {
+                    key: format!("{slot}.{name}"),
+                    value,
+                    help: help.to_owned(),
+                });
+            }
+        }
+        macro_rules! project {
+            ($($name:ident),* $(,)?) => { $(
+                flatten_settings(stringify!($name), &toml::Value::try_from(&self.$name).map_err(|_| AppError::ConfigCodec)?, &mut fields);
+            )* };
+        }
+        project!(
+            allowed_endpoint_hosts,
+            narrator_capabilities,
+            turn_budget,
+            orchestration_budget,
+            npc_resources,
+            context_projection,
+            rule_limits,
+            tui
+        );
+        Ok(fields)
     }
 
     pub async fn resolve(self) -> Result<ResolvedProductConfig, AppError> {
@@ -233,7 +289,7 @@ impl ProductConfig {
         }
     }
 
-    fn validate(&self) -> Result<(), AppError> {
+    pub(crate) fn validate(&self) -> Result<(), AppError> {
         if self.schema_version != CONFIG_SCHEMA_V1 {
             return Err(AppError::ConfigPolicy("unsupported config schema"));
         }
@@ -260,6 +316,177 @@ impl ProductConfig {
         }
         Ok(())
     }
+}
+
+fn flatten_settings(
+    key: &str,
+    value: &toml::Value,
+    fields: &mut Vec<loreloom_tui::StartupSettingView>,
+) {
+    if let toml::Value::Table(table) = value {
+        for (name, value) in table {
+            flatten_settings(&format!("{key}.{name}"), value, fields);
+        }
+    } else {
+        let (value, help) = match value {
+            toml::Value::String(value) => (
+                value.clone(),
+                "Plain text; image protocol: auto, kitty, iterm2, sixel, halfblocks, disabled",
+            ),
+            toml::Value::Array(_) => (
+                value.to_string(),
+                "TOML list of quoted names, e.g. [\"localhost\"]",
+            ),
+            toml::Value::Boolean(_) => (value.to_string(), "Boolean: true or false"),
+            _ => (
+                value.to_string(),
+                "Non-negative integer; state_width_percent: 25–35; event_poll_ms: greater than 0",
+            ),
+        };
+        fields.push(loreloom_tui::StartupSettingView {
+            key: key.to_owned(),
+            value,
+            help: help.to_owned(),
+        });
+    }
+}
+
+/// Retains the original source for conflict detection; never contains resolved credentials.
+pub struct SettingsDocument {
+    source: String,
+}
+
+impl SettingsDocument {
+    pub fn load(path: &Path) -> Result<(Self, ProductConfig), AppError> {
+        let source = std::fs::read_to_string(path)?;
+        let config: ProductConfig = toml::from_str(&source).map_err(|_| AppError::ConfigCodec)?;
+        config.validate()?;
+        Ok((Self { source }, config))
+    }
+
+    pub fn save(
+        &mut self,
+        path: &Path,
+        fields: &[loreloom_tui::StartupSettingView],
+    ) -> Result<ProductConfig, AppError> {
+        let original: ProductConfig =
+            toml::from_str(&self.source).map_err(|_| AppError::ConfigCodec)?;
+        let expected = original.settings()?;
+        if fields.len() != expected.len()
+            || fields.iter().zip(&expected).any(|(a, b)| a.key != b.key)
+        {
+            return Err(AppError::ConfigPolicy(
+                "settings fields do not match the configuration",
+            ));
+        }
+        let mut document: toml::Value =
+            toml::from_str(&self.source).map_err(|_| AppError::ConfigCodec)?;
+        for field in fields {
+            let mut table = document.as_table_mut().ok_or(AppError::ConfigCodec)?;
+            let parts = field.key.split('.').collect::<Vec<_>>();
+            let (name, parents) = parts.split_last().ok_or(AppError::ConfigCodec)?;
+            for parent in parents {
+                table = table
+                    .entry((*parent).to_owned())
+                    .or_insert_with(|| toml::Value::Table(Default::default()))
+                    .as_table_mut()
+                    .ok_or(AppError::ConfigCodec)?;
+            }
+            let value = if *name == "credential" {
+                if field.value.is_empty() {
+                    table.remove(*name);
+                    continue;
+                }
+                let reference = if let Some(name) = field.value.strip_prefix("env:") {
+                    CredentialRef::Environment {
+                        name: name.to_owned(),
+                    }
+                } else if let Some(path) = field.value.strip_prefix("file:") {
+                    CredentialRef::File { path: path.into() }
+                } else {
+                    return Err(AppError::ConfigPolicy(
+                        "credential must be an env: or file: reference",
+                    ));
+                };
+                toml::Value::try_from(reference).map_err(|_| AppError::ConfigCodec)?
+            } else if matches!(*name, "provider" | "model" | "endpoint" | "image_protocol") {
+                if *name == "endpoint" && field.value.is_empty() {
+                    table.remove(*name);
+                    continue;
+                }
+                toml::Value::String(field.value.clone())
+            } else {
+                let parsed: toml::Table = toml::from_str(&format!("value = {}", field.value))
+                    .map_err(|_| {
+                        AppError::ConfigPolicy(
+                            "setting requires a valid number, boolean or TOML list",
+                        )
+                    })?;
+                if parsed.len() != 1 {
+                    return Err(AppError::ConfigCodec);
+                }
+                parsed.get("value").cloned().ok_or(AppError::ConfigCodec)?
+            };
+            table.insert((*name).to_owned(), value);
+        }
+        let encoded = toml::to_string_pretty(&document).map_err(|_| AppError::ConfigCodec)?;
+        let candidate: ProductConfig =
+            toml::from_str(&encoded).map_err(|_| AppError::ConfigCodec)?;
+        candidate.validate()?;
+        if std::fs::read_to_string(path)? != self.source {
+            return Err(AppError::ConfigPolicy(
+                "configuration changed on disk; reopen the launcher before saving",
+            ));
+        }
+        atomic_save_config(path, &encoded)?;
+        self.source = encoded;
+        Ok(candidate)
+    }
+}
+
+fn atomic_save_config(path: &Path, encoded: &str) -> Result<(), AppError> {
+    use std::{
+        fs::{self, OpenOptions},
+        io::Write,
+    };
+    // Resolve symlinks so saving through a config link updates its target.
+    let path = fs::canonicalize(path)?;
+    let parent = path.parent().ok_or(AppError::ConfigPolicy(
+        "configuration has no parent directory",
+    ))?;
+    let permissions = fs::metadata(&path)?.permissions();
+    for nonce in 0_u8..16 {
+        let temporary = parent.join(format!(
+            ".loreloom-config-{}-{nonce}.tmp",
+            std::process::id()
+        ));
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = match options.open(&temporary) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error.into()),
+        };
+        let result = file
+            .write_all(encoded.as_bytes())
+            .and_then(|()| file.set_permissions(permissions.clone()))
+            .and_then(|()| file.sync_all());
+        drop(file);
+        let result = result.and_then(|()| fs::rename(&temporary, &path));
+        if let Err(error) = result {
+            let _ = fs::remove_file(&temporary);
+            return Err(error.into());
+        }
+        return Ok(());
+    }
+    Err(AppError::ConfigPolicy(
+        "could not reserve a configuration temporary file",
+    ))
 }
 
 const SUPPORTED_PROVIDERS: [&str; 7] = [
@@ -484,6 +711,112 @@ fn invalid_endpoint(message: &'static str) -> armillae_llm::BridgeError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn change_setting(fields: &mut [loreloom_tui::StartupSettingView], key: &str, value: &str) {
+        fields
+            .iter_mut()
+            .find(|field| field.key == key)
+            .expect("setting")
+            .value = value.to_owned();
+    }
+
+    #[test]
+    fn settings_save_round_trips_defaults_provider_references_and_runtime_values() {
+        let directory = tempfile::tempdir().expect("directory");
+        let path = directory.path().join("config.toml");
+        let source = config("http://127.0.0.1:11434", "\"127.0.0.1\"");
+        std::fs::write(
+            &path,
+            format!("{source}\n[narrator.transport]\nrequest_timeout_ms = 12345\n"),
+        )
+        .expect("write");
+        let (mut document, config) = SettingsDocument::load(&path).expect("load");
+        let mut fields = config
+            .settings()
+            .expect("fields including omitted defaults");
+        change_setting(&mut fields, "narrator.model", "新模型");
+        change_setting(
+            &mut fields,
+            "narrator.credential",
+            "env:LORELOOM_SETTINGS_TEST_KEY",
+        );
+        change_setting(
+            &mut fields,
+            "npc.credential",
+            "file:/private/credential-reference",
+        );
+        change_setting(&mut fields, "tui.state_width_percent", "35");
+        change_setting(&mut fields, "tui.image_protocol", "disabled");
+        change_setting(&mut fields, "turn_budget.max_model_calls", "7");
+        let saved = document.save(&path, &fields).expect("save");
+        assert_eq!(saved.tui_config().state_width_percent, 35);
+        assert_eq!(saved.turn_budget.max_model_calls, 7);
+        assert_eq!(saved.narrator.model, "新模型");
+        let reloaded = ProductConfig::load(&path).expect("reload");
+        assert_eq!(reloaded.settings().expect("fields"), fields);
+        let stored: toml::Value =
+            toml::from_str(&std::fs::read_to_string(&path).expect("read")).expect("TOML");
+        assert_eq!(
+            stored["narrator"]["transport"]["request_timeout_ms"].as_integer(),
+            Some(12345)
+        );
+    }
+
+    #[test]
+    fn settings_reject_invalid_edits_without_overwriting_and_allow_retry() {
+        let directory = tempfile::tempdir().expect("directory");
+        let path = directory.path().join("config.toml");
+        let source = config("http://127.0.0.1:11434", "\"127.0.0.1\"");
+        std::fs::write(&path, &source).expect("write");
+        let (mut document, config) = SettingsDocument::load(&path).expect("load");
+        for (key, value) in [
+            ("tui.state_width_percent", "99"),
+            ("tui.event_poll_ms", "0"),
+            ("tui.image_protocol", "invalid"),
+            ("narrator.provider", "unsupported"),
+            ("narrator.endpoint", "https://untrusted.example"),
+            ("turn_budget.max_model_calls", "-1"),
+            ("context_projection.max_context_tokens", "999999999"),
+            ("narrator.credential", "raw-secret-must-not-escape"),
+            ("allowed_endpoint_hosts", "["),
+        ] {
+            let mut fields = config.settings().expect("fields");
+            change_setting(&mut fields, key, value);
+            let error = document.save(&path, &fields).err().expect("reject");
+            assert!(!format!("{error:?} {error}").contains("raw-secret-must-not-escape"));
+            assert_eq!(std::fs::read_to_string(&path).expect("read"), source);
+        }
+        document
+            .save(&path, &config.settings().expect("fields"))
+            .expect("retry");
+    }
+
+    #[test]
+    fn settings_preserve_external_changes_and_previous_file_on_write_failure() {
+        let directory = tempfile::tempdir().expect("directory");
+        let path = directory.path().join("config.toml");
+        let source = config("http://127.0.0.1:11434", "\"127.0.0.1\"");
+        std::fs::write(&path, &source).expect("write");
+        let (mut document, config) = SettingsDocument::load(&path).expect("load");
+        let fields = config.settings().expect("fields");
+        let external = format!("{source}\n# externally edited\n");
+        std::fs::write(&path, &external).expect("external edit");
+        assert!(document.save(&path, &fields).is_err());
+        assert_eq!(std::fs::read_to_string(&path).expect("read"), external);
+        std::fs::write(&path, &source).expect("restore");
+        for nonce in 0_u8..16 {
+            std::fs::write(
+                directory.path().join(format!(
+                    ".loreloom-config-{}-{nonce}.tmp",
+                    std::process::id()
+                )),
+                "reserved",
+            )
+            .expect("reserve");
+        }
+        assert!(document.save(&path, &fields).is_err());
+        assert_eq!(std::fs::read_to_string(&path).expect("read"), source);
+    }
 
     fn credential_config(credential: CredentialRef) -> BridgeConfig {
         BridgeConfig::builder("deepseek", "test")

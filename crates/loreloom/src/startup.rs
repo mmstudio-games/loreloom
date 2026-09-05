@@ -103,8 +103,11 @@ pub fn project_startup_model(
         settings: vec![
             format!("Configuration  {}", config_path.display()),
             "Provider credentials are resolved only after a game is selected.".to_owned(),
-            "Edit the TOML file to change providers, budgets, and TUI sizing.".to_owned(),
+            "Save applies to this launch and rewrites TOML formatting/comments.".to_owned(),
         ],
+        setting_fields: vec![],
+        settings_draft: None,
+        open_settings: false,
         player_creation,
         new_game_only,
         open_mods: false,

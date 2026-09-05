@@ -18,7 +18,7 @@ pub use startup::{
     StartupAction, StartupApp, StartupChoiceView, StartupFieldKind, StartupFieldValue,
     StartupFieldView, StartupFormSubmission, StartupFormView, StartupModel, StartupPage,
     StartupPlayerCreationView, StartupPlayerSelection, StartupPresetView, StartupSaveView,
-    handle_startup_key, render_startup, run_startup,
+    StartupSettingView, handle_startup_key, render_startup, run_startup,
 };
 pub use state::{
     NarrowPage, RuntimeUiEvent, TuiApp, TuiOverlay, UiClientError, UiIntent, handle_key,

@@ -15,7 +15,7 @@ use std::{
 
 use cli::{Cli, HELP};
 use client::RuntimeAdapter;
-use config::{ProductConfig, ResolvedProductConfig};
+use config::{ResolvedProductConfig, SettingsDocument};
 use error::AppError;
 use loreloom_content::PlayerBootstrap;
 use loreloom_core::{ModPackageStatus, ModPackageView};
@@ -58,8 +58,7 @@ fn run_application_with(
     let config_path = cli.config_path.as_deref().ok_or(AppError::Arguments(
         "--config is required because production play needs a model Provider",
     ))?;
-    let configured = ProductConfig::load(config_path)?;
-    let launcher_tui_config = configured.tui_config();
+    let (mut settings_document, mut configured) = SettingsDocument::load(config_path)?;
     let mut tui_terminal = None;
     let mut active_mod_paths = cli.mod_paths.clone();
     if cli.headless_input.is_none() {
@@ -105,17 +104,22 @@ fn run_application_with(
         };
         let terminal = tui_terminal.insert(TuiTerminal::open()?);
         let mut open_mods = false;
+        let mut open_settings = false;
+        let mut settings_draft = None;
         let mut notice = None;
         let mut draft_selection = None;
         loop {
             let mut model =
                 project_startup_model(&content, &entries, config_path, cli.save_path.is_some())?;
             model.open_mods = open_mods;
+            model.open_settings = open_settings;
+            model.setting_fields = configured.settings()?;
+            model.settings_draft = settings_draft.take();
             model.notice = notice.take();
             if let Some(selection) = draft_selection.take() {
                 project_mod_selection(&mut model.packages.mods, &selection);
             }
-            match terminal.run_startup(model, launcher_tui_config)? {
+            match terminal.run_startup(model, configured.tui_config())? {
                 StartupAction::OpenSave { index } => {
                     let entry = entries
                         .get(index)
@@ -137,6 +141,7 @@ fn run_application_with(
                     break (path, display_name, player_bootstrap(selection)?);
                 }
                 StartupAction::ApplyMods { enabled } => {
+                    open_settings = false;
                     let requested = selected_mods(&enabled);
                     let mut candidate_selection = requested.clone();
                     candidate_selection.extend(content.selected_mods_for_paths(&cli.mod_paths));
@@ -152,6 +157,20 @@ fn run_application_with(
                         Err(error) => {
                             draft_selection = Some(candidate_selection);
                             notice = Some(format!("Mod selection could not be applied: {error}"));
+                        }
+                    }
+                }
+                StartupAction::ApplySettings { fields } => {
+                    open_mods = false;
+                    open_settings = true;
+                    match settings_document.save(config_path, &fields) {
+                        Ok(candidate) => {
+                            configured = candidate;
+                            notice = Some("Settings saved. They apply to this launch.".to_owned());
+                        }
+                        Err(error) => {
+                            settings_draft = Some(fields);
+                            notice = Some(format!("Settings could not be saved: {error}"));
                         }
                     }
                 }

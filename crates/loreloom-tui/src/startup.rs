@@ -25,10 +25,21 @@ pub struct StartupModel {
     pub saves: Vec<StartupSaveView>,
     pub packages: PackageCatalogView,
     pub settings: Vec<String>,
+    pub setting_fields: Vec<StartupSettingView>,
+    pub settings_draft: Option<Vec<StartupSettingView>>,
+    pub open_settings: bool,
     pub player_creation: StartupPlayerCreationView,
     pub new_game_only: bool,
     pub open_mods: bool,
     pub notice: Option<String>,
+}
+
+/// A non-secret Host setting. Validation and persistence belong to the application.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StartupSettingView {
+    pub key: String,
+    pub value: String,
+    pub help: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -121,6 +132,9 @@ pub enum StartupAction {
     NewGame(StartupPlayerSelection),
     ApplyMods {
         enabled: Vec<loreloom_core::ModPackageView>,
+    },
+    ApplySettings {
+        fields: Vec<StartupSettingView>,
     },
     Quit,
 }
@@ -270,6 +284,8 @@ fn editor_text(value: &FormValueState) -> Option<&str> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StartupApp {
+    settings_editor: Option<InputEditor>,
+    initial_settings: Vec<StartupSettingView>,
     pub model: StartupModel,
     pub page: StartupPage,
     pub selected: usize,
@@ -280,8 +296,10 @@ pub struct StartupApp {
 
 impl StartupApp {
     #[must_use]
-    pub fn new(model: StartupModel) -> Self {
-        let page = if model.open_mods {
+    pub fn new(mut model: StartupModel) -> Self {
+        let page = if model.open_settings {
+            StartupPage::Settings
+        } else if model.open_mods {
             StartupPage::Mods
         } else if model.new_game_only {
             match model.player_creation {
@@ -308,7 +326,13 @@ impl StartupApp {
         };
         let initial_enabled_mods = enabled_mod_keys(&model.packages);
         let notice = model.notice.clone();
+        let initial_settings = model.setting_fields.clone();
+        if let Some(draft) = model.settings_draft.take() {
+            model.setting_fields = draft;
+        }
         Self {
+            settings_editor: None,
+            initial_settings,
             model,
             page,
             selected,
@@ -333,6 +357,7 @@ impl StartupApp {
 pub fn run_startup(model: StartupModel, config: TuiConfig) -> Result<StartupAction, TuiError> {
     if model.new_game_only
         && !model.open_mods
+        && !model.open_settings
         && matches!(&model.player_creation, StartupPlayerCreationView::Fixed)
     {
         return Ok(StartupAction::NewGame(StartupPlayerSelection::Fixed));
@@ -349,6 +374,7 @@ impl TuiTerminal {
     ) -> Result<StartupAction, TuiError> {
         if model.new_game_only
             && !model.open_mods
+            && !model.open_settings
             && matches!(&model.player_creation, StartupPlayerCreationView::Fixed)
         {
             self.show_loading(&model.world_name)?;
@@ -367,7 +393,11 @@ impl TuiTerminal {
                 Event::Key(key) => {
                     if let Some(action) = handle_startup_key(&mut app, key) {
                         if action != StartupAction::Quit
-                            && !matches!(&action, StartupAction::ApplyMods { .. })
+                            && !matches!(
+                                &action,
+                                StartupAction::ApplyMods { .. }
+                                    | StartupAction::ApplySettings { .. }
+                            )
                         {
                             self.show_loading(&app.model.world_name)?;
                         }
@@ -392,7 +422,7 @@ pub fn handle_startup_key(app: &mut StartupApp, key: KeyEvent) -> Option<Startup
         StartupPage::Main => handle_main_key(app, key),
         StartupPage::Saves => handle_saves_key(app, key),
         StartupPage::Mods => handle_mods_key(app, key),
-        StartupPage::Settings => handle_information_key(app, key),
+        StartupPage::Settings => handle_settings_key(app, key),
         StartupPage::Presets => handle_presets_key(app, key),
         StartupPage::Form => handle_form_key(app, key),
     }
@@ -485,14 +515,70 @@ fn handle_saves_key(app: &mut StartupApp, key: KeyEvent) -> Option<StartupAction
     None
 }
 
-fn handle_information_key(app: &mut StartupApp, key: KeyEvent) -> Option<StartupAction> {
+fn handle_settings_key(app: &mut StartupApp, key: KeyEvent) -> Option<StartupAction> {
+    if key.code == KeyCode::Char('s') && key.modifiers.contains(KeyModifiers::CONTROL) {
+        commit_setting_edit(app);
+        return Some(StartupAction::ApplySettings {
+            fields: app.model.setting_fields.clone(),
+        });
+    }
+    if let Some(editor) = app.settings_editor.as_mut() {
+        match key.code {
+            KeyCode::Esc => app.settings_editor = None,
+            KeyCode::Enter => commit_setting_edit(app),
+            KeyCode::Left => editor.move_left(),
+            KeyCode::Right => editor.move_right(),
+            KeyCode::Home => editor.move_home(),
+            KeyCode::End => editor.move_end(),
+            KeyCode::Backspace => {
+                editor.backspace();
+            }
+            KeyCode::Delete => {
+                editor.delete();
+            }
+            KeyCode::Char(character)
+                if !key
+                    .modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+                    && editor.insert(&character.to_string()).is_err() =>
+            {
+                app.notice = Some("Setting exceeds the input limit.".to_owned());
+            }
+            _ => {}
+        }
+        return None;
+    }
+    let count = app.model.setting_fields.len();
     match key.code {
-        KeyCode::Esc | KeyCode::Backspace => return app.return_to_main(),
-        KeyCode::Up | KeyCode::PageUp => app.selected = app.selected.saturating_sub(1),
-        KeyCode::Down | KeyCode::PageDown => app.selected = app.selected.saturating_add(1),
+        KeyCode::Esc => {
+            app.model.setting_fields.clone_from(&app.initial_settings);
+            return app.return_to_main();
+        }
+        KeyCode::Up | KeyCode::BackTab => app.selected = app.selected.saturating_sub(1),
+        KeyCode::Down | KeyCode::Tab => {
+            app.selected = (app.selected + 1).min(count.saturating_sub(1))
+        }
+        KeyCode::PageUp => app.selected = app.selected.saturating_sub(10),
+        KeyCode::PageDown => app.selected = (app.selected + 10).min(count.saturating_sub(1)),
+        KeyCode::Enter => {
+            if let Some(field) = app.model.setting_fields.get(app.selected) {
+                match InputEditor::with_text(&field.value) {
+                    Ok(editor) => app.settings_editor = Some(editor),
+                    Err(_) => app.notice = Some("Setting exceeds the input limit.".to_owned()),
+                }
+            }
+        }
         _ => {}
     }
     None
+}
+
+fn commit_setting_edit(app: &mut StartupApp) {
+    if let Some(editor) = app.settings_editor.take()
+        && let Some(field) = app.model.setting_fields.get_mut(app.selected)
+    {
+        field.value = editor.text().to_owned();
+    }
 }
 
 fn handle_mods_key(app: &mut StartupApp, key: KeyEvent) -> Option<StartupAction> {
@@ -750,6 +836,16 @@ fn handle_form_key(app: &mut StartupApp, key: KeyEvent) -> Option<StartupAction>
 }
 
 fn handle_startup_paste(app: &mut StartupApp, text: &str) {
+    if app.page == StartupPage::Settings {
+        if let Some(editor) = app.settings_editor.as_mut() {
+            if text.chars().any(char::is_control) {
+                app.notice = Some("Paste a single-line setting value.".to_owned());
+            } else if editor.insert(text).is_err() {
+                app.notice = Some("Setting exceeds the input limit.".to_owned());
+            }
+        }
+        return;
+    }
     if app.page != StartupPage::Form {
         return;
     }
@@ -1299,15 +1395,58 @@ fn render_mods(frame: &mut Frame<'_>, app: &mut StartupApp, area: Rect) {
 }
 
 fn render_settings(frame: &mut Frame<'_>, app: &StartupApp, area: Rect) {
-    let mut lines = vec![Line::from(Span::styled(
+    let rows = Layout::vertical([
+        Constraint::Length(4),
+        Constraint::Min(1),
+        Constraint::Length(4),
+    ])
+    .split(inset(area, 2, 1));
+    let mut heading = vec![Line::from(Span::styled(
         "SETTINGS",
-        Style::default().fg(MUTED).add_modifier(Modifier::BOLD),
+        Style::default().fg(ACCENT),
     ))];
-    lines.extend(app.model.settings.iter().cloned().map(Line::from));
-    frame.render_widget(
-        Paragraph::new(lines).wrap(Wrap { trim: false }),
-        inset(area, 2, 1),
-    );
+    heading.extend(app.model.settings.iter().cloned().map(Line::from));
+    frame.render_widget(Paragraph::new(heading), rows[0]);
+    let visible = usize::from(rows[1].height).max(1);
+    let start = app.selected.saturating_sub(visible - 1);
+    let lines = app
+        .model
+        .setting_fields
+        .iter()
+        .enumerate()
+        .skip(start)
+        .take(visible)
+        .map(|(index, field)| {
+            let selected = index == app.selected;
+            let value = if selected {
+                app.settings_editor
+                    .as_ref()
+                    .map_or_else(|| field.value.clone(), InputEditor::text_with_cursor)
+            } else {
+                field.value.clone()
+            };
+            Line::from(Span::styled(
+                format!(
+                    "{}{}  =  {}",
+                    if selected { "› " } else { "  " },
+                    field.key,
+                    value
+                ),
+                Style::default().fg(if selected { ACCENT } else { Color::White }),
+            ))
+        })
+        .collect::<Vec<_>>();
+    frame.render_widget(Paragraph::new(lines), rows[1]);
+    if let Some(field) = app.model.setting_fields.get(app.selected) {
+        let value = app
+            .settings_editor
+            .as_ref()
+            .map_or_else(|| field.value.clone(), InputEditor::text_with_cursor);
+        frame.render_widget(
+            Paragraph::new(format!("{}\n{}", field.help, value)).wrap(Wrap { trim: false }),
+            rows[2],
+        );
+    }
 }
 
 fn render_presets(frame: &mut Frame<'_>, app: &StartupApp, area: Rect) {
@@ -1588,7 +1727,7 @@ fn render_startup_footer(frame: &mut Frame<'_>, app: &StartupApp, area: Rect) {
         StartupPage::Main => "↑↓ select  Enter open  Esc quit",
         StartupPage::Saves | StartupPage::Presets => "↑↓ select  Enter confirm  Esc back",
         StartupPage::Mods => "↑↓ select  Space toggle  Enter apply  Esc cancel",
-        StartupPage::Settings => "↑↓ scroll  Esc back",
+        StartupPage::Settings => "↑↓ select  Enter edit/accept  Ctrl+S save  Esc cancel",
         StartupPage::Form => "↑↓/Tab field  ←→ choose  Space toggle  Enter next/confirm  Esc back",
     };
     frame.render_widget(
@@ -1632,11 +1771,101 @@ mod tests {
                 unavailable_installed: 0,
             },
             settings: vec!["Configuration  loreloom.toml".to_owned()],
+            setting_fields: vec![],
+            settings_draft: None,
+            open_settings: false,
             player_creation: StartupPlayerCreationView::Fixed,
             new_game_only: false,
             open_mods: false,
             notice: None,
         }
+    }
+
+    fn settings_model() -> StartupModel {
+        let mut model = fixed_model();
+        model.setting_fields = vec![StartupSettingView {
+            key: "narrator.model".to_owned(),
+            value: "original".to_owned(),
+            help: "Model name".to_owned(),
+        }];
+        model
+    }
+
+    fn press(app: &mut StartupApp, code: KeyCode) -> Option<StartupAction> {
+        handle_startup_key(app, KeyEvent::new(code, KeyModifiers::NONE))
+    }
+
+    #[test]
+    fn settings_edit_paste_save_and_cancel_from_launcher() {
+        let mut app = StartupApp::new(settings_model());
+        app.selected = 4;
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.page, StartupPage::Settings);
+        press(&mut app, KeyCode::Enter);
+        press(&mut app, KeyCode::End);
+        handle_startup_paste(&mut app, "-新");
+        let action = handle_startup_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL),
+        );
+        let Some(StartupAction::ApplySettings { fields }) = action else {
+            panic!("save action");
+        };
+        assert_eq!(fields[0].value, "original-新");
+        press(&mut app, KeyCode::Esc);
+        assert_eq!(app.page, StartupPage::Main);
+        app.selected = 4;
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.model.setting_fields[0].value, "original");
+        press(&mut app, KeyCode::Enter);
+        press(&mut app, KeyCode::Backspace);
+        press(&mut app, KeyCode::Esc);
+        assert_eq!(app.model.setting_fields[0].value, "original");
+    }
+
+    #[test]
+    fn settings_failed_save_keeps_draft_but_cancel_restores_saved_values() {
+        let mut model = settings_model();
+        let mut draft = model.setting_fields.clone();
+        draft[0].value = "rejected".to_owned();
+        model.settings_draft = Some(draft);
+        model.open_settings = true;
+        model.notice = Some("Settings could not be saved".to_owned());
+        let mut app = StartupApp::new(model);
+        assert_eq!(app.model.setting_fields[0].value, "rejected");
+        press(&mut app, KeyCode::Esc);
+        assert_eq!(app.model.setting_fields[0].value, "original");
+    }
+
+    #[test]
+    fn settings_render_selected_field_after_scrolling_in_small_terminal() {
+        let mut model = settings_model();
+        model.open_settings = true;
+        model
+            .setting_fields
+            .extend((0..60).map(|index| StartupSettingView {
+                key: format!("budget.{index}"),
+                value: "12".to_owned(),
+                help: "Integer".to_owned(),
+            }));
+        let mut app = StartupApp::new(model);
+        for _ in 0..10 {
+            press(&mut app, KeyCode::PageDown);
+        }
+        assert_eq!(app.selected, 60);
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("terminal");
+        terminal
+            .draw(|frame| render_startup(frame, &mut app))
+            .expect("render");
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(rendered.contains("budget.59  =  12"));
+        assert!(rendered.contains("Ctrl+S save"));
     }
 
     fn mod_package(id: &str, status: ModPackageStatus) -> ModPackageView {
