@@ -28,6 +28,8 @@ pub struct StartupModel {
     pub setting_fields: Vec<StartupSettingView>,
     pub settings_draft: Option<Vec<StartupSettingView>>,
     pub open_settings: bool,
+    pub open_saves: bool,
+    pub recovery_error: Option<String>,
     pub player_creation: StartupPlayerCreationView,
     pub new_game_only: bool,
     pub open_mods: bool,
@@ -129,6 +131,9 @@ pub enum StartupAction {
     OpenSave {
         index: usize,
     },
+    DeleteSave {
+        index: usize,
+    },
     NewGame(StartupPlayerSelection),
     ApplyMods {
         enabled: Vec<loreloom_core::ModPackageView>,
@@ -136,6 +141,8 @@ pub enum StartupAction {
     ApplySettings {
         fields: Vec<StartupSettingView>,
     },
+    RetryStartup,
+    BackToLauncher,
     Quit,
 }
 
@@ -164,6 +171,7 @@ pub enum StartupFieldValue {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StartupPage {
+    Recovery,
     Main,
     Saves,
     Mods,
@@ -284,6 +292,7 @@ fn editor_text(value: &FormValueState) -> Option<&str> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StartupApp {
+    delete_confirmation: Option<(usize, bool)>,
     settings_editor: Option<InputEditor>,
     initial_settings: Vec<StartupSettingView>,
     pub model: StartupModel,
@@ -297,8 +306,12 @@ pub struct StartupApp {
 impl StartupApp {
     #[must_use]
     pub fn new(mut model: StartupModel) -> Self {
-        let page = if model.open_settings {
+        let page = if model.open_saves {
+            StartupPage::Saves
+        } else if model.open_settings {
             StartupPage::Settings
+        } else if model.recovery_error.is_some() {
+            StartupPage::Recovery
         } else if model.open_mods {
             StartupPage::Mods
         } else if model.new_game_only {
@@ -331,6 +344,7 @@ impl StartupApp {
             model.setting_fields = draft;
         }
         Self {
+            delete_confirmation: None,
             settings_editor: None,
             initial_settings,
             model,
@@ -343,7 +357,12 @@ impl StartupApp {
     }
 
     fn return_to_main(&mut self) -> Option<StartupAction> {
-        if self.model.new_game_only {
+        if self.model.recovery_error.is_some() {
+            self.page = StartupPage::Recovery;
+            self.selected = 0;
+            self.notice = None;
+            None
+        } else if self.model.new_game_only {
             Some(StartupAction::Quit)
         } else {
             self.page = StartupPage::Main;
@@ -356,6 +375,7 @@ impl StartupApp {
 
 pub fn run_startup(model: StartupModel, config: TuiConfig) -> Result<StartupAction, TuiError> {
     if model.new_game_only
+        && model.recovery_error.is_none()
         && !model.open_mods
         && !model.open_settings
         && matches!(&model.player_creation, StartupPlayerCreationView::Fixed)
@@ -373,6 +393,7 @@ impl TuiTerminal {
         config: TuiConfig,
     ) -> Result<StartupAction, TuiError> {
         if model.new_game_only
+            && model.recovery_error.is_none()
             && !model.open_mods
             && !model.open_settings
             && matches!(&model.player_creation, StartupPlayerCreationView::Fixed)
@@ -395,7 +416,9 @@ impl TuiTerminal {
                         if action != StartupAction::Quit
                             && !matches!(
                                 &action,
-                                StartupAction::ApplyMods { .. }
+                                StartupAction::BackToLauncher
+                                    | StartupAction::DeleteSave { .. }
+                                    | StartupAction::ApplyMods { .. }
                                     | StartupAction::ApplySettings { .. }
                             )
                         {
@@ -418,7 +441,45 @@ pub fn handle_startup_key(app: &mut StartupApp, key: KeyEvent) -> Option<Startup
     if matches!(key.code, KeyCode::Char('c')) && key.modifiers.contains(KeyModifiers::CONTROL) {
         return Some(StartupAction::Quit);
     }
+    if let Some((index, confirm)) = app.delete_confirmation.as_mut() {
+        if key.kind != KeyEventKind::Press {
+            return None;
+        }
+        match key.code {
+            KeyCode::Esc | KeyCode::Backspace => app.delete_confirmation = None,
+            KeyCode::Left | KeyCode::Right | KeyCode::Tab => *confirm = !*confirm,
+            KeyCode::Enter => {
+                let action = (*confirm).then_some(StartupAction::DeleteSave { index: *index });
+                app.delete_confirmation = None;
+                return action;
+            }
+            _ => {}
+        }
+        return None;
+    }
     match app.page {
+        StartupPage::Recovery => match key.code {
+            KeyCode::Up => {
+                app.selected = (app.selected + 3) % 4;
+                None
+            }
+            KeyCode::Down | KeyCode::Tab => {
+                app.selected = (app.selected + 1) % 4;
+                None
+            }
+            KeyCode::Esc => Some(StartupAction::BackToLauncher),
+            KeyCode::Enter => match app.selected {
+                0 => Some(StartupAction::RetryStartup),
+                1 => {
+                    app.page = StartupPage::Settings;
+                    app.selected = 0;
+                    None
+                }
+                2 => Some(StartupAction::BackToLauncher),
+                _ => Some(StartupAction::Quit),
+            },
+            _ => None,
+        },
         StartupPage::Main => handle_main_key(app, key),
         StartupPage::Saves => handle_saves_key(app, key),
         StartupPage::Mods => handle_mods_key(app, key),
@@ -438,7 +499,7 @@ fn handle_main_key(app: &mut StartupApp, key: KeyEvent) -> Option<StartupAction>
         KeyCode::Enter => match app.selected {
             0 if !app.model.saves.is_empty() => return Some(StartupAction::OpenSave { index: 0 }),
             1 => return enter_new_game(app),
-            2 if !app.model.saves.is_empty() => {
+            2 => {
                 app.page = StartupPage::Saves;
                 app.selected = 0;
             }
@@ -474,7 +535,7 @@ fn previous_main_entry(app: &StartupApp, current: usize) -> usize {
 }
 
 fn main_entry_enabled(app: &StartupApp, index: usize) -> bool {
-    !matches!(index, 0 | 2) || !app.model.saves.is_empty()
+    index != 0 || !app.model.saves.is_empty()
 }
 
 fn enter_new_game(app: &mut StartupApp) -> Option<StartupAction> {
@@ -497,6 +558,11 @@ fn enter_new_game(app: &mut StartupApp) -> Option<StartupAction> {
 
 fn handle_saves_key(app: &mut StartupApp, key: KeyEvent) -> Option<StartupAction> {
     match key.code {
+        KeyCode::Delete | KeyCode::Char('d' | 'D')
+            if app.model.saves.get(app.selected).is_some() =>
+        {
+            app.delete_confirmation = Some((app.selected, false));
+        }
         KeyCode::Esc | KeyCode::Backspace => return app.return_to_main(),
         KeyCode::Up => app.selected = app.selected.saturating_sub(1),
         KeyCode::Down => {
@@ -1185,6 +1251,7 @@ pub fn render_startup(frame: &mut Frame<'_>, app: &mut StartupApp) {
         .split(area);
     render_startup_header(frame, app, rows[0]);
     match app.page {
+        StartupPage::Recovery => render_recovery(frame, app, rows[1]),
         StartupPage::Main => render_main(frame, app, rows[1]),
         StartupPage::Saves => render_saves(frame, app, rows[1]),
         StartupPage::Mods => render_mods(frame, app, rows[1]),
@@ -1193,6 +1260,111 @@ pub fn render_startup(frame: &mut Frame<'_>, app: &mut StartupApp) {
         StartupPage::Form => render_form(frame, app, rows[1]),
     }
     render_startup_footer(frame, app, rows[2]);
+    if let Some((index, confirm)) = app.delete_confirmation
+        && let Some(save) = app.model.saves.get(index)
+    {
+        let width = area.width.min(64);
+        let height = area.height.min(12);
+        let popup = Rect::new(
+            area.x + (area.width - width) / 2,
+            area.y + (area.height - height) / 2,
+            width,
+            height,
+        );
+        frame.render_widget(Clear, popup);
+        frame.render_widget(
+            Paragraph::new(vec![
+                Line::from(Span::styled(
+                    format!("Delete {}?", save.display_name),
+                    Style::default().add_modifier(Modifier::BOLD),
+                )),
+                Line::from(Span::styled(
+                    "This permanently deletes the save. This cannot be undone.",
+                    Style::default().fg(MUTED),
+                )),
+                Line::from(""),
+                Line::from(vec![
+                    Span::styled(
+                        if confirm { "  Cancel  " } else { "[ Cancel ]" },
+                        if confirm {
+                            Style::default()
+                        } else {
+                            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)
+                        },
+                    ),
+                    Span::raw("     "),
+                    Span::styled(
+                        if confirm { "[ Delete ]" } else { "  Delete  " },
+                        if confirm {
+                            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)
+                        } else {
+                            Style::default()
+                        },
+                    ),
+                ]),
+                Line::from(Span::styled(
+                    "←/→ or Tab: choose · Enter: select",
+                    Style::default().fg(MUTED),
+                )),
+            ])
+            .wrap(Wrap { trim: false })
+            .block(
+                Block::bordered()
+                    .title(Span::styled(
+                        " DELETE SAVE · Esc cancel ",
+                        Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+                    ))
+                    .border_type(BorderType::Rounded)
+                    .border_style(Style::default().fg(ACCENT))
+                    .padding(ratatui::widgets::Padding::horizontal(1)),
+            ),
+            popup,
+        );
+    }
+}
+
+fn render_recovery(frame: &mut Frame<'_>, app: &StartupApp, area: Rect) {
+    let rows =
+        Layout::vertical([Constraint::Min(1), Constraint::Length(5)]).split(inset(area, 2, 0));
+    let mut lines = vec![
+        Line::from(Span::styled(
+            "Unable to start the game",
+            Style::default().fg(Color::Yellow),
+        )),
+        Line::from(app.model.recovery_error.clone().unwrap_or_default()),
+        Line::from("Your game selection is kept. Fix the configuration, then retry."),
+        Line::from(
+            "Settings accepts env:NAME or file:/path references. Exporting in another shell cannot update this process.",
+        ),
+    ];
+    if let Some(notice) = &app.notice {
+        lines.push(Line::from(notice.clone()));
+    }
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), rows[0]);
+    let actions = ["Retry", "Settings", "Back to launcher", "Quit"];
+    frame.render_widget(
+        Paragraph::new(
+            actions
+                .iter()
+                .enumerate()
+                .map(|(index, label)| {
+                    Line::from(Span::styled(
+                        format!(
+                            "{}{}",
+                            if index == app.selected { "› " } else { "  " },
+                            label
+                        ),
+                        Style::default().fg(if index == app.selected {
+                            ACCENT
+                        } else {
+                            Color::White
+                        }),
+                    ))
+                })
+                .collect::<Vec<_>>(),
+        ),
+        rows[1],
+    );
 }
 
 fn render_startup_header(frame: &mut Frame<'_>, app: &StartupApp, area: Rect) {
@@ -1220,7 +1392,7 @@ fn render_main(frame: &mut Frame<'_>, app: &StartupApp, area: Rect) {
     let entries = [
         ("Continue", !app.model.saves.is_empty()),
         ("New Game", true),
-        ("Load Save", !app.model.saves.is_empty()),
+        ("Saves", true),
         ("Mods", true),
         ("Settings", true),
         ("Quit", true),
@@ -1267,10 +1439,27 @@ fn render_main(frame: &mut Frame<'_>, app: &StartupApp, area: Rect) {
 
 fn render_saves(frame: &mut Frame<'_>, app: &StartupApp, area: Rect) {
     let mut lines = vec![Line::from(Span::styled(
-        "LOAD SAVE",
+        "SAVES",
         Style::default().fg(MUTED).add_modifier(Modifier::BOLD),
     ))];
-    for (index, save) in app.model.saves.iter().enumerate() {
+    if app.model.saves.is_empty() {
+        lines.push(Line::from("No saves yet. Start a New Game to create one."));
+    }
+    if let Some(notice) = &app.notice {
+        lines.push(Line::from(notice.clone()));
+    }
+    let visible = usize::from(area.height.saturating_sub(2))
+        .saturating_sub(lines.len())
+        .max(1);
+    let offset = app.selected.saturating_sub(visible.saturating_sub(1));
+    for (index, save) in app
+        .model
+        .saves
+        .iter()
+        .enumerate()
+        .skip(offset)
+        .take(visible)
+    {
         lines.push(Line::from(vec![
             Span::styled(
                 if index == app.selected { "› " } else { "  " },
@@ -1443,7 +1632,12 @@ fn render_settings(frame: &mut Frame<'_>, app: &StartupApp, area: Rect) {
             .as_ref()
             .map_or_else(|| field.value.clone(), InputEditor::text_with_cursor);
         frame.render_widget(
-            Paragraph::new(format!("{}\n{}", field.help, value)).wrap(Wrap { trim: false }),
+            Paragraph::new(
+                app.notice
+                    .clone()
+                    .unwrap_or_else(|| format!("{}\n{}", field.help, value)),
+            )
+            .wrap(Wrap { trim: false }),
             rows[2],
         );
     }
@@ -1724,8 +1918,10 @@ fn display_form_value(
 
 fn render_startup_footer(frame: &mut Frame<'_>, app: &StartupApp, area: Rect) {
     let hint = match app.page {
+        StartupPage::Recovery => "↑↓ select  Enter open  Esc back to launcher",
         StartupPage::Main => "↑↓ select  Enter open  Esc quit",
-        StartupPage::Saves | StartupPage::Presets => "↑↓ select  Enter confirm  Esc back",
+        StartupPage::Saves => "↑↓ select  Enter load  D/Delete delete  Esc back",
+        StartupPage::Presets => "↑↓ select  Enter confirm  Esc back",
         StartupPage::Mods => "↑↓ select  Space toggle  Enter apply  Esc cancel",
         StartupPage::Settings => "↑↓ select  Enter edit/accept  Ctrl+S save  Esc cancel",
         StartupPage::Form => "↑↓/Tab field  ←→ choose  Space toggle  Enter next/confirm  Esc back",
@@ -1774,6 +1970,8 @@ mod tests {
             setting_fields: vec![],
             settings_draft: None,
             open_settings: false,
+            open_saves: false,
+            recovery_error: None,
             player_creation: StartupPlayerCreationView::Fixed,
             new_game_only: false,
             open_mods: false,
@@ -2294,6 +2492,128 @@ mod tests {
     }
 
     #[test]
+    fn startup_recovery_keeps_settings_cancel_inside_the_app_and_allows_retry() {
+        let mut model = settings_model();
+        model.open_settings = false;
+        model.new_game_only = true;
+        model.recovery_error =
+            Some("narrator: credential_environment_missing DEEPSEEK_API_KEY".into());
+        let mut app = StartupApp::new(model);
+        let press = |app: &mut StartupApp, code| {
+            handle_startup_key(app, KeyEvent::new(code, KeyModifiers::NONE))
+        };
+        assert_eq!(app.page, StartupPage::Recovery);
+        assert_eq!(
+            press(&mut app, KeyCode::Enter),
+            Some(StartupAction::RetryStartup)
+        );
+        press(&mut app, KeyCode::Down);
+        assert_eq!(press(&mut app, KeyCode::Enter), None);
+        assert_eq!(app.page, StartupPage::Settings);
+        press(&mut app, KeyCode::Enter);
+        press(&mut app, KeyCode::Char('x'));
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(press(&mut app, KeyCode::Esc), None);
+        assert_eq!(app.page, StartupPage::Recovery);
+        assert_eq!(app.model.setting_fields[0].value, "original");
+        assert_eq!(
+            press(&mut app, KeyCode::Esc),
+            Some(StartupAction::BackToLauncher)
+        );
+        app.selected = 3;
+        assert_eq!(press(&mut app, KeyCode::Enter), Some(StartupAction::Quit));
+    }
+
+    #[test]
+    fn recovery_render_shows_diagnostic_and_repair_actions() {
+        let mut model = fixed_model();
+        model.recovery_error =
+            Some("narrator: credential_environment_missing DEEPSEEK_API_KEY".into());
+        let mut app = StartupApp::new(model);
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("terminal");
+        terminal
+            .draw(|frame| render_startup(frame, &mut app))
+            .expect("render");
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        for expected in [
+            "Unable to start",
+            "credential_environment_missing",
+            "DEEPSEEK_API_KEY",
+            "Retry",
+            "Settings",
+            "Back to launcher",
+            "Quit",
+        ] {
+            assert!(rendered.contains(expected), "missing {expected}");
+        }
+    }
+
+    #[test]
+    fn saves_require_explicit_confirmation_and_keep_navigation_modal() {
+        let mut model = fixed_model();
+        model.open_saves = true;
+        model.saves = vec![StartupSaveView {
+            display_name: "My save".into(),
+            detail: "Most recent".into(),
+        }];
+        let mut app = StartupApp::new(model);
+        let press = |app: &mut StartupApp, code| {
+            handle_startup_key(app, KeyEvent::new(code, KeyModifiers::NONE))
+        };
+        assert_eq!(press(&mut app, KeyCode::Delete), None);
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("terminal");
+        terminal
+            .draw(|frame| render_startup(frame, &mut app))
+            .expect("render");
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(rendered.contains("Delete My save?"));
+        assert!(rendered.contains("[ Cancel ]"));
+        assert_eq!(press(&mut app, KeyCode::Down), None);
+        assert_eq!(press(&mut app, KeyCode::Enter), None);
+        assert_eq!(
+            press(&mut app, KeyCode::Enter),
+            Some(StartupAction::OpenSave { index: 0 })
+        );
+        press(&mut app, KeyCode::Char('d'));
+        press(&mut app, KeyCode::Right);
+        press(&mut app, KeyCode::Esc);
+        assert_eq!(app.delete_confirmation, None);
+        press(&mut app, KeyCode::Delete);
+        press(&mut app, KeyCode::Tab);
+        assert_eq!(
+            press(&mut app, KeyCode::Enter),
+            Some(StartupAction::DeleteSave { index: 0 })
+        );
+    }
+
+    #[test]
+    fn empty_saves_page_is_accessible_and_has_no_destructive_action() {
+        let mut app = StartupApp::new(fixed_model());
+        app.selected = 2;
+        handle_startup_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.page, StartupPage::Saves);
+        for code in [KeyCode::Enter, KeyCode::Delete] {
+            assert_eq!(
+                handle_startup_key(&mut app, KeyEvent::new(code, KeyModifiers::NONE)),
+                None
+            );
+        }
+        assert_eq!(app.delete_confirmation, None);
+    }
+
+    #[test]
     fn launcher_render_is_deterministic_and_contains_primary_entries() {
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).expect("terminal");
@@ -2311,7 +2631,7 @@ mod tests {
 
         assert!(rendered.contains("LORELOOM"));
         assert!(rendered.contains("New Game"));
-        assert!(rendered.contains("Load Save"));
+        assert!(rendered.contains("Saves"));
         assert!(rendered.contains("Mods"));
         assert!(rendered.contains("Settings"));
     }

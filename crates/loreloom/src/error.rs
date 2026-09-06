@@ -61,7 +61,7 @@ impl ProviderSetupIssue {
                 "configure an environment or file credential for this Provider"
             }
             Self::CredentialEnvironmentMissing => {
-                "export this variable in the environment that starts Loreloom"
+                "choose an existing environment variable or file credential in Settings; otherwise export this variable before restarting Loreloom"
             }
             Self::CredentialEnvironmentInvalid => {
                 "set this variable to a valid UTF-8 credential value"
@@ -83,9 +83,7 @@ impl ProviderSetupIssue {
                 "allow the endpoint host explicitly and use HTTPS unless it is loopback"
             }
             Self::UnsupportedProvider => "choose a Provider supported by this Loreloom build",
-            Self::CredentialResolutionFailed => {
-                "recheck the credential source and retry the Loreloom process"
-            }
+            Self::CredentialResolutionFailed => "recheck the credential source and retry",
             Self::ProviderConfigurationRejected => {
                 "check endpoint and Provider-specific configuration options"
             }

@@ -108,6 +108,8 @@ pub fn project_startup_model(
         setting_fields: vec![],
         settings_draft: None,
         open_settings: false,
+        open_saves: false,
+        recovery_error: None,
         player_creation,
         new_game_only,
         open_mods: false,

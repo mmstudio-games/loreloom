@@ -17,7 +17,7 @@ use crate::error::{AppError, ProviderSetupDiagnostic, ProviderSetupIssue, Provid
 
 const CONFIG_SCHEMA_V1: u32 = 1;
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProductConfig {
     schema_version: u32,
@@ -712,12 +712,157 @@ fn invalid_endpoint(message: &'static str) -> armillae_llm::BridgeError {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn deepseek_http_failures_reach_player_diagnostics_with_distinct_statuses() {
+        use loreloom_agent::{
+            ModelFailureCategory, ModelFailureDiagnostic, ModelFailureStage, ModelInvocationKind,
+        };
+        use std::{
+            io::{Read, Write},
+            net::TcpListener,
+        };
+        let directory = tempfile::tempdir().expect("directory");
+        let credential = directory.path().join("test-credential");
+        std::fs::write(&credential, "local-test-placeholder").expect("fixture credential");
+        let credential = toml::Value::String(credential.to_string_lossy().into_owned()).to_string();
+        for (status, expected, label) in [
+            (
+                401,
+                ModelFailureCategory::Authentication,
+                "HTTP 401 Unauthorized",
+            ),
+            (
+                403,
+                ModelFailureCategory::PermissionDenied,
+                "HTTP 403 Forbidden",
+            ),
+            (
+                429,
+                ModelFailureCategory::RateLimited,
+                "HTTP 429 Too Many Requests",
+            ),
+            (
+                500,
+                ModelFailureCategory::Transport,
+                "HTTP 500 Internal Server Error",
+            ),
+            (
+                503,
+                ModelFailureCategory::Transport,
+                "HTTP 503 Service Unavailable",
+            ),
+            (
+                504,
+                ModelFailureCategory::Timeout,
+                "HTTP 504 Gateway Timeout",
+            ),
+        ] {
+            let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
+            let address = listener.local_addr().expect("address");
+            let server = std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().expect("accept");
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .expect("timeout");
+                let mut buffer = [0; 4096];
+                let mut request = Vec::new();
+                loop {
+                    let count = stream.read(&mut buffer).expect("request");
+                    assert!(count > 0);
+                    request.extend_from_slice(&buffer[..count]);
+                    assert!(request.len() < 65_536);
+                    if let Some(end) = request.windows(4).position(|bytes| bytes == b"\r\n\r\n") {
+                        let headers = std::str::from_utf8(&request[..end]).expect("headers");
+                        let length = headers
+                            .lines()
+                            .filter_map(|line| line.split_once(':'))
+                            .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+                            .map_or(0, |(_, length)| {
+                                length.trim().parse::<usize>().expect("length")
+                            });
+                        if request.len() >= end + 4 + length {
+                            break;
+                        }
+                    }
+                }
+                let body = "private-provider-error-must-not-escape";
+                write!(stream, "HTTP/1.1 {status} Test\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).expect("response");
+            });
+            let source = config(&format!("http://{address}"), "\"127.0.0.1\"")
+                .replace("provider = \"ollama\"", "provider = \"deepseek\"");
+            let source = format!(
+                "{source}\n[narrator.credential]\ntype = \"file\"\npath = {credential}\n[npc.credential]\ntype = \"file\"\npath = {credential}\n"
+            );
+            let path = directory.path().join("config.toml");
+            std::fs::write(&path, source).expect("config");
+            let configured = ProductConfig::load(&path)
+                .expect("load")
+                .resolve()
+                .await
+                .expect("resolve");
+            let error = configured
+                .providers
+                .narrator
+                .complete(armillae_core::CompletionRequest {
+                    messages: vec![armillae_core::Message::user("local test")],
+                    ..Default::default()
+                })
+                .await
+                .expect_err("HTTP failure");
+            server.join().expect("server");
+            let diagnostic = ModelFailureDiagnostic::from_bridge_error(
+                ModelInvocationKind::Narrator,
+                ModelFailureStage::Invocation,
+                &error,
+            );
+            assert_eq!(diagnostic.category, expected);
+            assert_eq!(diagnostic.http_status, Some(status));
+            assert!(diagnostic.user_summary().contains(label));
+            assert!(!format!("{diagnostic:?} {diagnostic}").contains("private-provider-error"));
+        }
+    }
+
     fn change_setting(fields: &mut [loreloom_tui::StartupSettingView], key: &str, value: &str) {
         fields
             .iter_mut()
             .find(|field| field.key == key)
             .expect("setting")
             .value = value.to_owned();
+    }
+
+    #[test]
+    fn missing_provider_credential_can_be_repaired_and_resolved_in_the_same_process() {
+        let directory = tempfile::tempdir().expect("directory");
+        let path = directory.path().join("config.toml");
+        let credential = directory.path().join("credential");
+        std::fs::write(&credential, "local-test-placeholder").expect("credential");
+        let source = config("http://127.0.0.1:11434", "\"127.0.0.1\"");
+        std::fs::write(&path, source).expect("config");
+        let (mut document, original) = SettingsDocument::load(&path).expect("load");
+        let mut fields = original.settings().expect("fields");
+        change_setting(
+            &mut fields,
+            "narrator.credential",
+            "env:LORELOOM_RECOVERY_TEST_MISSING_63F19E0D",
+        );
+        let broken = document
+            .save(&path, &fields)
+            .expect("save missing reference");
+        let runtime = tokio::runtime::Runtime::new().expect("runtime");
+        let error = runtime
+            .block_on(broken.clone().resolve())
+            .err()
+            .expect("missing credential");
+        assert!(matches!(error, AppError::ProviderSetup(_)));
+        assert!(error.to_string().contains("credential_environment_missing"));
+        change_setting(
+            &mut fields,
+            "narrator.credential",
+            &format!("file:{}", credential.display()),
+        );
+        document.save(&path, &fields).expect("repair reference");
+        let (_, repaired) = SettingsDocument::load(&path).expect("reload for retry");
+        assert!(runtime.block_on(repaired.resolve()).is_ok());
     }
 
     #[test]

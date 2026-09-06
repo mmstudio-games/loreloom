@@ -1,6 +1,6 @@
 use std::{fmt, time::Duration};
 
-use armillae_llm::{BridgeError, ErrorMetadata};
+use armillae_llm::{BridgeError, ErrorMetadata, TransportErrorKind};
 use loreloom_core::FailureId;
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 
@@ -164,6 +164,10 @@ pub struct ModelFailureDiagnostic {
     pub retryable: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retry_after_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transport_kind: Option<TransportErrorKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub os_error: Option<i32>,
 }
 
 impl ModelFailureDiagnostic {
@@ -253,6 +257,24 @@ impl ModelFailureDiagnostic {
         }
         if let Some(status) = self.http_status {
             summary.push_str(&format!(" · HTTP {status}"));
+            if let Some(reason) = http_reason(status) {
+                summary.push(' ');
+                summary.push_str(reason);
+            }
+        } else if self.transport_kind.is_some()
+            || matches!(
+                self.category,
+                ModelFailureCategory::Transport | ModelFailureCategory::Timeout
+            )
+        {
+            summary.push_str(" · HTTP status unavailable");
+        }
+        if let Some(kind) = self.transport_kind {
+            summary.push_str(" · cause ");
+            summary.push_str(kind.code());
+        }
+        if let Some(code) = self.os_error {
+            summary.push_str(&format!(" · OS error {code}"));
         }
         if let Some(request_id) = &self.request_id {
             summary.push_str(" · request ");
@@ -268,9 +290,47 @@ impl ModelFailureDiagnostic {
         if let Some(retry_after_ms) = self.retry_after_ms {
             summary.push_str(&format!(" · retry after {retry_after_ms} ms"));
         }
+        if let Some(hint) = self.recovery_hint() {
+            summary.push_str(" · ");
+            summary.push_str(hint);
+        }
         summary.push_str(" · ref ");
         summary.push_str(&self.correlation_id.to_string());
         summary
+    }
+
+    #[must_use]
+    pub fn recovery_hint(&self) -> Option<&'static str> {
+        match self.http_status {
+            Some(401) => Some("check the API credential"),
+            Some(402) => Some("check Provider billing or credits"),
+            Some(403) => Some("check account/model permissions and gateway access rules"),
+            Some(404) => Some("check the endpoint and model name"),
+            Some(429) => Some("wait before retrying; check Provider rate limits or quota"),
+            Some(408 | 504) => Some("request timed out; retry later or review timeout limits"),
+            Some(500..=599) => Some("Provider or gateway failed; retry later"),
+            Some(400 | 413 | 422) => Some("check model support and request size or parameters"),
+            _ => match self.transport_kind {
+                Some(TransportErrorKind::ConnectionRefused) => {
+                    Some("check endpoint availability and proxy port")
+                }
+                Some(TransportErrorKind::Timeout) => {
+                    Some("check network/proxy connectivity and timeout limits")
+                }
+                Some(
+                    TransportErrorKind::Connect
+                    | TransportErrorKind::HostUnreachable
+                    | TransportErrorKind::NetworkUnreachable,
+                ) => Some("check network, DNS, TLS and proxy configuration"),
+                Some(
+                    TransportErrorKind::ConnectionReset
+                    | TransportErrorKind::ConnectionAborted
+                    | TransportErrorKind::BrokenPipe
+                    | TransportErrorKind::UnexpectedEof,
+                ) => Some("connection interrupted; check proxy or gateway and retry"),
+                _ => None,
+            },
+        }
     }
 
     fn new(
@@ -288,10 +348,14 @@ impl ModelFailureDiagnostic {
             request_id: None,
             retryable: None,
             retry_after_ms: None,
+            transport_kind: None,
+            os_error: None,
         }
     }
 
     fn apply_metadata(&mut self, metadata: &ErrorMetadata) {
+        self.transport_kind = metadata.transport_kind;
+        self.os_error = metadata.os_error;
         self.provider = DiagnosticLabel::from_untrusted(&metadata.provider);
         self.http_status = metadata
             .http_status
@@ -306,6 +370,25 @@ impl ModelFailureDiagnostic {
 impl fmt::Display for ModelFailureDiagnostic {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(&self.user_summary())
+    }
+}
+
+fn http_reason(status: u16) -> Option<&'static str> {
+    match status {
+        400 => Some("Bad Request"),
+        401 => Some("Unauthorized"),
+        402 => Some("Payment Required"),
+        403 => Some("Forbidden"),
+        404 => Some("Not Found"),
+        408 => Some("Request Timeout"),
+        413 => Some("Payload Too Large"),
+        422 => Some("Unprocessable Content"),
+        429 => Some("Too Many Requests"),
+        500 => Some("Internal Server Error"),
+        502 => Some("Bad Gateway"),
+        503 => Some("Service Unavailable"),
+        504 => Some("Gateway Timeout"),
+        _ => None,
     }
 }
 
@@ -328,6 +411,71 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn http_permission_and_rate_limit_failures_have_distinct_actionable_summaries() {
+        for (error, expected, hint) in [
+            (
+                BridgeError::PermissionDenied {
+                    metadata: ErrorMetadata::new("deepseek").with_http_status(403),
+                },
+                "HTTP 403 Forbidden",
+                "permissions",
+            ),
+            (
+                BridgeError::RateLimited {
+                    metadata: ErrorMetadata::new("deepseek").with_http_status(429),
+                    retry_after: Some(Duration::from_secs(20)),
+                },
+                "HTTP 429 Too Many Requests",
+                "wait before retrying",
+            ),
+            (
+                BridgeError::Transport {
+                    metadata: ErrorMetadata::new("deepseek").with_http_status(503),
+                    retryable: true,
+                },
+                "HTTP 503 Service Unavailable",
+                "Provider or gateway failed",
+            ),
+        ] {
+            let diagnostic = ModelFailureDiagnostic::from_bridge_error(
+                ModelInvocationKind::Narrator,
+                ModelFailureStage::Invocation,
+                &error,
+            );
+            let summary = diagnostic.user_summary();
+            assert!(summary.contains(expected));
+            assert!(summary.contains(hint));
+            assert!(!summary.contains("HTTP status unavailable"));
+            if diagnostic.http_status == Some(429) {
+                assert!(summary.contains("retry after 20000 ms"));
+            }
+        }
+    }
+
+    #[test]
+    fn network_failure_round_trips_typed_cause_without_claiming_http_response() {
+        let mut metadata = ErrorMetadata::new("deepseek");
+        metadata.transport_kind = Some(TransportErrorKind::ConnectionRefused);
+        metadata.os_error = Some(61);
+        let diagnostic = ModelFailureDiagnostic::from_bridge_error(
+            ModelInvocationKind::Narrator,
+            ModelFailureStage::Invocation,
+            &BridgeError::Transport {
+                retryable: true,
+                metadata,
+            },
+        );
+        let encoded = serde_json::to_string(&diagnostic).expect("encode");
+        let decoded: ModelFailureDiagnostic = serde_json::from_str(&encoded).expect("decode");
+        assert_eq!(decoded, diagnostic);
+        let summary = decoded.user_summary();
+        assert!(summary.contains("HTTP status unavailable"));
+        assert!(summary.contains("cause connection_refused"));
+        assert!(summary.contains("OS error 61"));
+        assert!(summary.contains("proxy port"));
+    }
 
     #[test]
     fn bridge_projection_keeps_safe_facts_and_drops_raw_text() {

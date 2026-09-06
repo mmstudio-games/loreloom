@@ -158,3 +158,12 @@ OPEN 项、后续 RFC 或 P0 Spike；空 crate 不代表相关协议已经实现
 
 - [x] 修复 Launcher Settings 只读占位：编辑既有 Host 配置，校验、原子保存、取消与失败重试，
   保存后用于本次启动，并覆盖配置持久化及确定性页面交互。
+
+- [x] 接入 HTTP/网络失败诊断：明确状态码含义与恢复方向，保留类型化网络原因，覆盖 403/429/5xx 与无响应失败。
+  Armillae 修复已公开推送到 `fix/http-failure-diagnostics`，全部依赖固定到
+  `b2208f9c4c27f9b8bb1101919038beb0d3a938fe`。上游 135 项测试、正式 Git 依赖下 Loreloom 140 项测试、
+  格式、Check、Clippy 和 Semifold 状态检查均通过；无本地依赖覆盖，Bevy ECS 保持 0.19.1。
+
+- [x] 将 Load Save 扩展为 Saves 管理页：读取、默认取消的删除确认、Host 校验删除、列表刷新及测试。
+
+- [x] Recover interactive ProviderSetup failures in the TUI, retain pending game selection, support configuration repair/retry and return to launcher, and verify deterministic behavior.

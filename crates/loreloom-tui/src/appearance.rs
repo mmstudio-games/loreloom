@@ -100,20 +100,31 @@ impl AppearancePresenter {
     }
 
     pub(crate) fn sync(&mut self, snapshot: &UiSnapshot, target: Option<Size>) {
+        self.sync_view(snapshot.player.appearance.as_ref(), target);
+    }
+
+    fn clear(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
+        self.requested = None;
+        self.prepared = None;
+        self.failure = false;
+    }
+
+    fn sync_view(&mut self, appearance: Option<&AppearanceView>, target: Option<Size>) {
         while let Ok(result) = self.results.try_recv() {
             self.apply_result(result);
         }
 
-        let Some(appearance) = snapshot.player.appearance.as_ref() else {
-            self.requested = None;
-            self.prepared = None;
-            self.failure = false;
+        let Some(appearance) = appearance else {
+            self.clear();
             return;
         };
         let Some(target) = target.filter(|target| target.width > 0 && target.height > 0) else {
+            self.clear();
             return;
         };
         let Ok(key) = self.catalog.render_key(appearance) else {
+            self.clear();
             self.failure = true;
             return;
         };
@@ -138,6 +149,9 @@ impl AppearancePresenter {
 
     pub(crate) fn protocol(&self) -> Option<&Protocol> {
         let prepared = self.prepared.as_ref()?;
+        if self.failure || self.requested != Some((prepared.key, prepared.target)) {
+            return None;
+        }
         let elapsed = self.prepared_at.elapsed();
         let total = prepared.frames.iter().fold(Duration::ZERO, |total, frame| {
             total.saturating_add(frame.duration)
@@ -167,8 +181,8 @@ impl AppearancePresenter {
                 .is_none_or(|prepared| self.requested != Some((prepared.key, prepared.target)))
         {
             Some("preparing portrait…")
-        } else if self.protocol_type == ProtocolType::Halfblocks {
-            Some("low fidelity · image_protocol can override")
+        } else if self.protocol_type == ProtocolType::Halfblocks && self.protocol().is_some() {
+            Some("Portrait: text mode")
         } else {
             None
         }
@@ -257,6 +271,106 @@ fn prepare(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn fixture() -> (AppearanceCatalog, AppearanceView) {
+        let namespace = "games.loreloom.portrait-test".parse().expect("namespace");
+        let pack = br#"schema_version = 1
+pack_id = "games.loreloom.portrait-test:appearance_pack/main"
+[[models]]
+id = "games.loreloom.portrait-test:appearance_model/player"
+canvas_width = 8
+canvas_height = 8
+[[models.frames]]
+name = "idle"
+duration_ms = 100
+[[models.frames.layers]]
+name = "body"
+z_index = 0
+source = "appearance/images/body.png"
+"#;
+        let mut png = std::io::Cursor::new(Vec::new());
+        image::RgbaImage::from_pixel(8, 8, image::Rgba([255, 0, 0, 255]))
+            .write_to(&mut png, image::ImageFormat::Png)
+            .expect("png");
+        let catalog = AppearanceCatalog::compile([
+            (&namespace, "appearance/pack.toml", pack.as_slice()),
+            (
+                &namespace,
+                "appearance/images/body.png",
+                png.get_ref().as_slice(),
+            ),
+        ])
+        .expect("catalog");
+        (
+            catalog,
+            AppearanceView {
+                revision: loreloom_core::Revision::new(0),
+                model_id: "games.loreloom.portrait-test:appearance_model/player"
+                    .parse()
+                    .expect("model"),
+                parameters: Default::default(),
+            },
+        )
+    }
+
+    #[test]
+    fn halfblocks_draw_pixels_and_only_report_status_for_an_actual_portrait() {
+        let (catalog, view) = fixture();
+        let mut presenter =
+            AppearancePresenter::new(catalog, Picker::halfblocks()).expect("worker");
+        assert_eq!(presenter.status(), None);
+        presenter.sync_view(Some(&view), Some(Size::new(8, 6)));
+        assert_eq!(presenter.status(), Some("preparing portrait…"));
+        let result = presenter
+            .results
+            .recv_timeout(Duration::from_secs(5))
+            .expect("image result");
+        presenter.apply_result(result);
+        assert_eq!(presenter.status(), Some("Portrait: text mode"));
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(16, 10)).expect("terminal");
+        terminal
+            .draw(|frame| {
+                frame.render_widget(
+                    ratatui_image::Image::new(presenter.protocol().expect("portrait")),
+                    frame.area(),
+                )
+            })
+            .expect("draw");
+        assert!(
+            terminal.backend().buffer().content.iter().any(|cell| {
+                matches!(cell.fg, ratatui::style::Color::Rgb(red, 0, 0) if red > 0)
+                    || matches!(cell.bg, ratatui::style::Color::Rgb(red, 0, 0) if red > 0)
+            }),
+            "halfblocks must draw the composed red image: {:?}",
+            terminal.backend().buffer()
+        );
+        presenter.sync_view(None, Some(Size::new(8, 6)));
+        assert_eq!(presenter.status(), None);
+        assert!(presenter.protocol().is_none());
+    }
+
+    #[test]
+    fn hidden_or_removed_portrait_invalidates_in_flight_results() {
+        for missing_view in [false, true] {
+            let (catalog, view) = fixture();
+            let mut presenter =
+                AppearancePresenter::new(catalog, Picker::halfblocks()).expect("worker");
+            presenter.sync_view(Some(&view), Some(Size::new(8, 6)));
+            let result = presenter
+                .results
+                .recv_timeout(Duration::from_secs(5))
+                .expect("image result");
+            if missing_view {
+                presenter.sync_view(None, Some(Size::new(8, 6)));
+            } else {
+                presenter.sync_view(Some(&view), None);
+            }
+            presenter.apply_result(result);
+            assert!(presenter.protocol().is_none());
+            assert_eq!(presenter.status(), None);
+        }
+    }
 
     #[test]
     fn stale_worker_failure_cannot_replace_the_current_generation() {

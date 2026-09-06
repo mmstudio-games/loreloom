@@ -318,7 +318,7 @@ mod tests {
         );
         let correlation_id = diagnostic.correlation_id.to_string();
         let failed = failed_snapshot(
-            setup.initial_snapshot,
+            setup.initial_snapshot.clone(),
             &RuntimeError::BridgeUnavailable(diagnostic),
         );
 
@@ -329,6 +329,41 @@ mod tests {
         assert!(notice.message.as_str().contains("HTTP 400"));
         assert!(notice.message.as_str().contains(&correlation_id));
         assert!(!notice.message.as_str().contains("must-not-escape"));
+        for (error, expected) in [
+            (
+                BridgeError::PermissionDenied {
+                    metadata: ErrorMetadata::new("deepseek").with_http_status(403),
+                },
+                "HTTP 403 Forbidden",
+            ),
+            (
+                BridgeError::RateLimited {
+                    metadata: ErrorMetadata::new("deepseek").with_http_status(429),
+                    retry_after: None,
+                },
+                "HTTP 429 Too Many Requests",
+            ),
+        ] {
+            let diagnostic = ModelFailureDiagnostic::from_bridge_error(
+                ModelInvocationKind::Narrator,
+                ModelFailureStage::Invocation,
+                &error,
+            );
+            let failed = failed_snapshot(
+                setup.initial_snapshot.clone(),
+                &RuntimeError::BridgeUnavailable(diagnostic),
+            );
+            assert!(
+                failed
+                    .notices
+                    .last()
+                    .expect("notice")
+                    .message
+                    .as_str()
+                    .contains(expected)
+            );
+            assert!(failed.can_submit);
+        }
     }
 
     #[test]

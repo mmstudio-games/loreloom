@@ -80,7 +80,7 @@ fn scan_directory(directory: &Path, world_id: &ModId, entries: &mut Vec<SaveCata
         let Some(save_name) = file_name.strip_suffix(SIDECAR_SUFFIX) else {
             continue;
         };
-        if save_name.is_empty() {
+        if save_name.is_empty() || matches!(save_name, "." | ".." | "saves") {
             continue;
         }
         let Ok(bytes) = fs::read(&path) else {
@@ -112,6 +112,31 @@ fn scan_directory(directory: &Path, world_id: &ModId, entries: &mut Vec<SaveCata
             last_used_at: sidecar.last_used_at,
         });
     }
+}
+
+/// Delete a catalog save before this process opens a Store handle.
+pub fn delete(
+    world_root: &Path,
+    world_id: &ModId,
+    selected: &SaveCatalogEntry,
+) -> Result<(), AppError> {
+    let catalog_root = fs::symlink_metadata(world_root.join(".loreloom"))?;
+    if catalog_root.file_type().is_symlink() || !catalog_root.is_dir() {
+        return Err(AppError::SaveCatalog(
+            "save catalog directory is unavailable",
+        ));
+    }
+    if !scan(world_root, world_id)
+        .iter()
+        .any(|entry| entry.path == selected.path && entry.save_id == selected.save_id)
+    {
+        return Err(AppError::SaveCatalog(
+            "selected save changed or is unavailable",
+        ));
+    }
+    fs::remove_dir_all(&selected.path)?;
+    fs::remove_file(sidecar_path(&selected.path))?;
+    Ok(())
 }
 
 pub fn register(
@@ -249,6 +274,59 @@ mod tests {
         assert_ne!(second, first);
         assert!(!second.exists());
         assert!(!sidecar_path(&second).exists());
+    }
+
+    #[test]
+    fn delete_validates_identity_and_world_before_removing_save_and_index() {
+        let root = tempfile::tempdir().expect("root");
+        let path = root.path().join(".loreloom/saves/delete-me");
+        fs::create_dir_all(&path).expect("save");
+        fs::write(path.join("data"), "persisted data").expect("data");
+        let world = ModId::parse("games.loreloom.test").expect("world");
+        let id = "sav_01890f6a-2b3c-7d4e-8f90-123456789abc"
+            .parse()
+            .expect("id");
+        register(&path, id, world.clone(), "Test").expect("register");
+        let entry = scan(root.path(), &world).remove(0);
+        assert!(
+            delete(
+                root.path(),
+                &ModId::parse("games.loreloom.other").expect("other"),
+                &entry
+            )
+            .is_err()
+        );
+        let mut stale = entry.clone();
+        stale.save_id = "sav_01890f6a-2b3d-7d4e-8f90-123456789abc"
+            .parse()
+            .expect("id");
+        assert!(delete(root.path(), &world, &stale).is_err());
+        assert!(path.join("data").is_file());
+        delete(root.path(), &world, &entry).expect("delete");
+        assert!(!path.exists());
+        assert!(!sidecar_path(&path).exists());
+        assert!(scan(root.path(), &world).is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn delete_rejects_save_replaced_with_symlink() {
+        let root = tempfile::tempdir().expect("root");
+        let path = root.path().join(".loreloom/saves/link");
+        fs::create_dir_all(&path).expect("save");
+        let world = ModId::parse("games.loreloom.test").expect("world");
+        let id = "sav_01890f6a-2b3c-7d4e-8f90-123456789abc"
+            .parse()
+            .expect("id");
+        register(&path, id, world.clone(), "Test").expect("register");
+        let entry = scan(root.path(), &world).remove(0);
+        fs::remove_dir(&path).expect("remove empty dir");
+        let outside = tempfile::tempdir().expect("outside");
+        fs::write(outside.path().join("keep"), "keep").expect("data");
+        std::os::unix::fs::symlink(outside.path(), &path).expect("link");
+        assert!(delete(root.path(), &world, &entry).is_err());
+        assert!(outside.path().join("keep").exists());
+        assert!(sidecar_path(&path).exists());
     }
 
     fn write_test_sidecar(

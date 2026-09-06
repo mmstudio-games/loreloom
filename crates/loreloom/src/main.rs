@@ -68,120 +68,226 @@ fn run_application_with(
             resolve_installed_mod_paths(&cli.world_path, &persisted),
         );
     }
-    let (save_path, save_display_name, bootstrap) = if cli.headless_input.is_some() {
-        let save_path = cli
+    let mut force_launcher = false;
+    let (save_path, save_display_name, bootstrap, resolved) = 'launch: loop {
+        let (save_path, save_display_name, bootstrap) = if cli.headless_input.is_some() {
+            let save_path = cli
+                .save_path
+                .clone()
+                .unwrap_or_else(|| cli.world_path.join(".loreloom/save"));
+            let display_name = display_name_for_save(&save_path);
+            let bootstrap = if save_path.exists() {
+                PlayerBootstrap::Fixed
+            } else {
+                let content = inspect_world_with(&cli.world_path, &active_mod_paths)?;
+                match content.player_creation {
+                    loreloom_content::PlayerCreationMode::Fixed => PlayerBootstrap::Fixed,
+                    loreloom_content::PlayerCreationMode::Preset { .. }
+                    | loreloom_content::PlayerCreationMode::Ugc { .. } => {
+                        return Err(AppError::Arguments(
+                            "a headless new game requires fixed player creation; create the save interactively first",
+                        ));
+                    }
+                }
+            };
+            (save_path, Some(display_name), bootstrap)
+        } else if let Some(save_path) = cli
             .save_path
-            .clone()
-            .unwrap_or_else(|| cli.world_path.join(".loreloom/save"));
-        let display_name = display_name_for_save(&save_path);
-        let bootstrap = if save_path.exists() {
-            PlayerBootstrap::Fixed
+            .as_ref()
+            .filter(|path| path.exists() && !force_launcher)
+        {
+            (
+                save_path.clone(),
+                Some(display_name_for_save(save_path)),
+                PlayerBootstrap::Fixed,
+            )
         } else {
-            let content = inspect_world_with(&cli.world_path, &active_mod_paths)?;
-            match content.player_creation {
-                loreloom_content::PlayerCreationMode::Fixed => PlayerBootstrap::Fixed,
-                loreloom_content::PlayerCreationMode::Preset { .. }
-                | loreloom_content::PlayerCreationMode::Ugc { .. } => {
-                    return Err(AppError::Arguments(
-                        "a headless new game requires fixed player creation; create the save interactively first",
-                    ));
+            let mut content = inspect_world_with(&cli.world_path, &active_mod_paths)?;
+            let new_game_only = cli.save_path.is_some() && !force_launcher;
+            let mut entries = if new_game_only {
+                Vec::new()
+            } else {
+                scan(&cli.world_path, &content.world_id)
+            };
+            if tui_terminal.is_none() {
+                tui_terminal = Some(TuiTerminal::open()?);
+            }
+            let terminal = tui_terminal
+                .as_mut()
+                .ok_or(AppError::Arguments("terminal unavailable"))?;
+            let mut open_saves = false;
+            let mut open_mods = false;
+            let mut open_settings = false;
+            let mut settings_draft = None;
+            let mut notice = None;
+            let mut draft_selection = None;
+            loop {
+                let mut model =
+                    project_startup_model(&content, &entries, config_path, new_game_only)?;
+                model.open_saves = open_saves;
+                model.open_mods = open_mods;
+                model.open_settings = open_settings;
+                model.setting_fields = configured.settings()?;
+                model.settings_draft = settings_draft.take();
+                model.notice = notice.take();
+                if let Some(selection) = draft_selection.take() {
+                    project_mod_selection(&mut model.packages.mods, &selection);
+                }
+                match terminal.run_startup(model, configured.tui_config())? {
+                    StartupAction::OpenSave { index } => {
+                        let entry = entries
+                            .get(index)
+                            .ok_or(AppError::SaveCatalog("selected save is unavailable"))?;
+                        break (
+                            entry.path.clone(),
+                            Some(entry.display_name.clone()),
+                            PlayerBootstrap::Fixed,
+                        );
+                    }
+                    StartupAction::DeleteSave { index } => {
+                        let result = entries
+                            .get(index)
+                            .ok_or(AppError::SaveCatalog("selected save is unavailable"))
+                            .and_then(|entry| {
+                                save_catalog::delete(&cli.world_path, &content.world_id, entry)
+                            });
+                        notice = Some(match result {
+                            Ok(()) => "Save deleted.".to_owned(),
+                            Err(error) => format!("Save could not be deleted: {error}"),
+                        });
+                        entries = scan(&cli.world_path, &content.world_id);
+                        open_saves = true;
+                        open_mods = false;
+                        open_settings = false;
+                    }
+                    StartupAction::NewGame(selection) => {
+                        let (path, display_name) =
+                            match cli.save_path.clone().filter(|_| !force_launcher) {
+                                Some(path) => {
+                                    let display_name = display_name_for_save(&path);
+                                    (path, Some(display_name))
+                                }
+                                None => (new_save_path(&cli.world_path)?, None),
+                            };
+                        break (path, display_name, player_bootstrap(selection)?);
+                    }
+                    StartupAction::ApplyMods { enabled } => {
+                        open_saves = false;
+                        open_settings = false;
+                        let requested = selected_mods(&enabled);
+                        let mut candidate_selection = requested.clone();
+                        candidate_selection.extend(content.selected_mods_for_paths(&cli.mod_paths));
+                        let result =
+                            apply_mod_selection(&cli.world_path, &content, &candidate_selection);
+                        open_mods = true;
+                        match result {
+                            Ok((candidate_paths, candidate_content)) => {
+                                active_mod_paths = candidate_paths;
+                                content = candidate_content;
+                                notice = Some("Mod selection saved.".to_owned());
+                            }
+                            Err(error) => {
+                                draft_selection = Some(candidate_selection);
+                                notice =
+                                    Some(format!("Mod selection could not be applied: {error}"));
+                            }
+                        }
+                    }
+                    StartupAction::ApplySettings { fields } => {
+                        open_saves = false;
+                        open_mods = false;
+                        open_settings = true;
+                        match settings_document.save(config_path, &fields) {
+                            Ok(candidate) => {
+                                configured = candidate;
+                                notice =
+                                    Some("Settings saved. They apply to this launch.".to_owned());
+                            }
+                            Err(error) => {
+                                settings_draft = Some(fields);
+                                notice = Some(format!("Settings could not be saved: {error}"));
+                            }
+                        }
+                    }
+                    StartupAction::RetryStartup | StartupAction::BackToLauncher => continue,
+                    StartupAction::Quit => return Ok(()),
                 }
             }
         };
-        (save_path, Some(display_name), bootstrap)
-    } else if let Some(save_path) = cli.save_path.as_ref().filter(|path| path.exists()) {
-        (
-            save_path.clone(),
-            Some(display_name_for_save(save_path)),
-            PlayerBootstrap::Fixed,
-        )
-    } else {
-        let mut content = inspect_world_with(&cli.world_path, &active_mod_paths)?;
-        let entries = if cli.save_path.is_some() {
-            Vec::new()
-        } else {
-            scan(&cli.world_path, &content.world_id)
+        let resolved = match tokio.block_on(configured.clone().resolve()) {
+            Ok(resolved) => resolved,
+            Err(error)
+                if cli.headless_input.is_none() && matches!(error, AppError::ProviderSetup(_)) =>
+            {
+                if tui_terminal.is_none() {
+                    tui_terminal = Some(TuiTerminal::open()?);
+                }
+                let terminal = tui_terminal
+                    .as_mut()
+                    .ok_or(AppError::Arguments("terminal unavailable"))?;
+                let content = inspect_world_with(&cli.world_path, &active_mod_paths)?;
+                let mut recovery_error = error.to_string();
+                let mut draft = None;
+                let mut notice = None;
+                let mut open_settings = false;
+                loop {
+                    let mut model = project_startup_model(&content, &[], config_path, false)?;
+                    model.recovery_error = Some(recovery_error.clone());
+                    model.open_settings = open_settings;
+                    model.setting_fields = configured.settings()?;
+                    model.settings_draft = draft.take();
+                    model.notice = notice.take();
+                    match terminal.run_startup(model, configured.tui_config())? {
+                        StartupAction::RetryStartup => {
+                            let attempt = SettingsDocument::load(config_path).and_then(
+                                |(document, candidate)| {
+                                    settings_document = document;
+                                    configured = candidate;
+                                    tokio.block_on(configured.clone().resolve())
+                                },
+                            );
+                            match attempt {
+                                Ok(resolved) => break resolved,
+                                Err(error) => {
+                                    recovery_error = error.to_string();
+                                    open_settings = false;
+                                }
+                            }
+                        }
+                        StartupAction::ApplySettings { fields } => {
+                            match settings_document.save(config_path, &fields) {
+                                Ok(candidate) => {
+                                    configured = candidate;
+                                    open_settings = false;
+                                    notice = Some(
+                                        "Settings saved. Select Retry to continue your game."
+                                            .to_owned(),
+                                    );
+                                }
+                                Err(error) => {
+                                    open_settings = true;
+                                    draft = Some(fields);
+                                    notice = Some(format!("Settings could not be saved: {error}"));
+                                }
+                            }
+                        }
+                        StartupAction::BackToLauncher => {
+                            force_launcher = true;
+                            continue 'launch;
+                        }
+                        StartupAction::Quit => return Ok(()),
+                        _ => return Err(AppError::Arguments("unexpected startup recovery action")),
+                    }
+                }
+            }
+            Err(error) => return Err(error),
         };
-        let terminal = tui_terminal.insert(TuiTerminal::open()?);
-        let mut open_mods = false;
-        let mut open_settings = false;
-        let mut settings_draft = None;
-        let mut notice = None;
-        let mut draft_selection = None;
-        loop {
-            let mut model =
-                project_startup_model(&content, &entries, config_path, cli.save_path.is_some())?;
-            model.open_mods = open_mods;
-            model.open_settings = open_settings;
-            model.setting_fields = configured.settings()?;
-            model.settings_draft = settings_draft.take();
-            model.notice = notice.take();
-            if let Some(selection) = draft_selection.take() {
-                project_mod_selection(&mut model.packages.mods, &selection);
-            }
-            match terminal.run_startup(model, configured.tui_config())? {
-                StartupAction::OpenSave { index } => {
-                    let entry = entries
-                        .get(index)
-                        .ok_or(AppError::SaveCatalog("selected save is unavailable"))?;
-                    break (
-                        entry.path.clone(),
-                        Some(entry.display_name.clone()),
-                        PlayerBootstrap::Fixed,
-                    );
-                }
-                StartupAction::NewGame(selection) => {
-                    let (path, display_name) = match cli.save_path.clone() {
-                        Some(path) => {
-                            let display_name = display_name_for_save(&path);
-                            (path, Some(display_name))
-                        }
-                        None => (new_save_path(&cli.world_path)?, None),
-                    };
-                    break (path, display_name, player_bootstrap(selection)?);
-                }
-                StartupAction::ApplyMods { enabled } => {
-                    open_settings = false;
-                    let requested = selected_mods(&enabled);
-                    let mut candidate_selection = requested.clone();
-                    candidate_selection.extend(content.selected_mods_for_paths(&cli.mod_paths));
-                    let result =
-                        apply_mod_selection(&cli.world_path, &content, &candidate_selection);
-                    open_mods = true;
-                    match result {
-                        Ok((candidate_paths, candidate_content)) => {
-                            active_mod_paths = candidate_paths;
-                            content = candidate_content;
-                            notice = Some("Mod selection saved.".to_owned());
-                        }
-                        Err(error) => {
-                            draft_selection = Some(candidate_selection);
-                            notice = Some(format!("Mod selection could not be applied: {error}"));
-                        }
-                    }
-                }
-                StartupAction::ApplySettings { fields } => {
-                    open_mods = false;
-                    open_settings = true;
-                    match settings_document.save(config_path, &fields) {
-                        Ok(candidate) => {
-                            configured = candidate;
-                            notice = Some("Settings saved. They apply to this launch.".to_owned());
-                        }
-                        Err(error) => {
-                            settings_draft = Some(fields);
-                            notice = Some(format!("Settings could not be saved: {error}"));
-                        }
-                    }
-                }
-                StartupAction::Quit => return Ok(()),
-            }
-        }
+        break (save_path, save_display_name, bootstrap, resolved);
     };
     let ResolvedProductConfig {
         providers,
         tui: tui_config,
-    } = tokio.block_on(configured.resolve())?;
+    } = resolved;
     let WorldSetup {
         mut runtime,
         initial_snapshot,

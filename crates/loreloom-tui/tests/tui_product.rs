@@ -837,3 +837,25 @@ fn terminal_session_restores_normal_partial_and_unwind_paths_in_reverse_order() 
     assert!(unwind.is_err());
     assert_eq!(*calls.borrow(), complete);
 }
+
+#[test]
+fn model_http_failure_notices_keep_status_and_reason_visible() {
+    for reason in [
+        "HTTP 403 Forbidden",
+        "HTTP 429 Too Many Requests",
+        "HTTP 503 Service Unavailable",
+    ] {
+        let mut app = sample_app();
+        app.working_phase = None;
+        app.snapshot.phase = RuntimePhase::Failed;
+        app.snapshot.notices = vec![UiNotice {
+            kind: NoticeKind::Error,
+            message: ShortText::new(format!(
+                "Model request failed · narrator/invocation · {reason}"
+            ))
+            .expect("notice"),
+        }];
+        let terminal = render(&app, 140, 40);
+        assert!(text_snapshot(terminal.backend().buffer()).contains(reason));
+    }
+}

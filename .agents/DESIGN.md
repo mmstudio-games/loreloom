@@ -290,7 +290,7 @@ Loreloom Runtime ───────────────► Persistence
     并把 loadout 原子保存到不参与内容哈希的 `.loreloom/mods.toml`。运行中不热启停 Mod；摘要、路径
     与本地 loadout 都不进入 ECS、Agent Context 或 Transcript，存档仍以实际采用的 `ModLock` 为准。
 57. 未显式提供 `--save` 的交互式启动默认进入世界级 Launcher，而不是静默打开固定存档：入口提供
-    Continue、New Game、Load Save、Mods、Settings 与 Quit；Continue 只选择当前 `world_id` 最近使用
+    Continue、New Game、Saves、Mods、Settings 与 Quit；Continue 只选择当前 `world_id` 最近使用
     的可用存档。显式 `--save` 保留自动化/高级用户直达语义，已存在路径直接加载，不存在路径进入该
     目标的新游戏创建流程；Headless 可以显式绕过 Launcher。新游戏的玩家来源由根世界声明为
     `fixed | preset | ugc`：fixed 使用初始 Scene 的玩家模板，preset 由用户选择版本化 Character
@@ -366,3 +366,11 @@ Spec、角色持久状态或当前产品行为。
 3. 完成 Store、Armillae/Bevy、TUI、Agent Loop、Content/NpcFactory 和 Mod/Rule P0 Spike；
 4. 对仍标记 OPEN 的协议建立后续 RFC 或明确冻结记录；
 5. 只有对应实施门禁解除后，才在相关 crate 中建立公共 API 与产品实现。
+
+HTTP 失败诊断沿用 Armillae → Agent → Runtime → TUI 的既有责任链；Armillae 保留 HTTP status
+和类型化网络失败事实，Loreloom 展示状态码含义、网络失败类型与可操作提示，不回显原始响应。
+
+Launcher 存档页支持读取和删除当前世界的 catalog 条目；TUI 在默认取消的确认弹窗后提交删除请求，
+Host 在打开 Runtime/Store 前重新校验条目并删除对应存档目录和 sidecar，刷新列表与 Continue。
+
+Interactive Provider setup failures stay in the same terminal session on a recovery page. The Host retains the pending game selection and offers retry, Settings, return to launcher, and quit before opening World/Save. Headless retains failure exit behavior.

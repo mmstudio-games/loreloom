@@ -2125,7 +2125,7 @@ records、World/Mod payload、Prompt、玩家输入、模型正文、Tool 数据
 显式 `--save` 打开；Launcher 可以忽略该条目或显示 unavailable，但不得通过同时打开多个 embedded
 Store 来探测，以免绕过当前 SurrealDB 确定性 shutdown 门禁。
 
-Launcher 只列出当前根世界 ID 的条目。Continue 选择 `last_used_at` 最大的可用条目；Load Save 显式
+Launcher 只列出当前根世界 ID 的条目。Continue 选择 `last_used_at` 最大的可用条目；Saves 显式
 列出全部兼容条目。最终选中后仍必须执行正常 SaveManifest、WorldLock/ModLock、checksum 和领域
 重建校验，catalog 不能替代 Store 验证。New Game 先完成玩家创建与全部静态校验，再原子创建 Save；
 失败不得留下可被 Launcher 当成有效存档的 sidecar。
@@ -2205,8 +2205,8 @@ checkpoint 是一个普通显式事务中的版本化 Snapshot/compaction record
 ### 12.0 世界 Launcher 与新游戏流程
 
 未显式提供 `--save` 的交互式运行先显示世界级 Launcher，默认焦点按可用性落在 Continue 或 New
-Game。固定入口顺序为 Continue、New Game、Load Save、Mods、Settings、Quit；不可用项必须可辨识且
-不能触发隐式 fallback。Continue/Load Save 选择后离开 Launcher 并按正常流程打开；Quit 在 Provider
+Game。固定入口顺序为 Continue、New Game、Saves、Mods、Settings、Quit；不可用项必须可辨识且
+不能触发隐式 fallback。Continue/Saves 选择后离开 Launcher 并按正常流程打开；Quit 在 Provider
 或 Store 创建前退出。Launcher 的 Mods 页复用运行中 Mods overlay 的 WORLD、ENABLED、
 INSTALLED NOT ENABLED 分组和完整内容计数；`Up`/`Down` 选择扩展，`Space` 选择/反选，`Enter` 编译并
 应用，`Esc` 丢弃未应用修改。
@@ -2494,7 +2494,7 @@ setup code，可以包含经过安全字符约束的 Provider 名称；Environme
 显式 endpoint 必须同时通过 Armillae 结构校验和 Host `allowed_endpoint_hosts` 精确 allowlist；非
 loopback host 只允许 HTTPS，HTTP 只允许显式列出的 localhost 或 loopback IP。未配置 endpoint 的
 命名 Provider 使用 Adapter 自身默认 endpoint，不经过自定义 host 例外。配置加载或任一 Bridge
-resolve/create 失败必须在创建/打开 World 和 Save 前结束；不能先发布 World 再发现 Provider Secret
+resolve/create 失败必须在创建/打开 World 和 Save 前中止本次启动尝试；交互式进入恢复页，Headless 返回失败。不能先发布 World 再发现 Provider Secret
 或 endpoint 无效。
 
 ## 14. 并发、取消与故障
@@ -2719,7 +2719,7 @@ CI 使用最新 stable，不执行 MSRV Job，不允许 manifest 出现 `rust-ve
     显示顶层 Definition 总数、非零分类、Prompt 与 Patch 数量；无效 installed candidate 只显示汇总
     数量，列表不含 hash、路径、内容文本或字节数，滚动与关闭不产生 Runtime intent、WorldCommand
     或持久化变化。Launcher Mods 页保持相同分组与摘要，增加启动前选择、反选、应用与取消交互。
-61. 未显式提供 `--save` 时先进入当前世界 Launcher；Continue 选择最近兼容存档，Load Save 可选其它
+61. 未显式提供 `--save` 时先进入当前世界 Launcher；Continue 选择最近兼容存档，Saves 可选其它
     兼容条目，New Game 按 fixed/preset/UGC 创建，Quit 在 Provider/Store 创建前退出。显式已有
     `--save` 直达加载，显式不存在 `--save` 进入该目标的新游戏流程，Headless 可确定性绕过。Launcher、
     初始化加载态与游戏页共享一个可恢复的终端会话，切换期间不显示原始终端。
@@ -2765,3 +2765,20 @@ RFC 0001 已于 2026-08-30 被项目方接受。以下事项继续阻塞对应�
 
 本 Spec 保持 Active；实施清单必须把上述门禁映射到具体任务，未解除门禁的 crate 只能保留无公共
 领域 API 的脚手架或承载明确标注的 Spike。
+
+### HTTP 失败诊断补充
+
+`ModelFailureDiagnostic` 保留 Adapter 提供的 HTTP status，并显示标准含义和恢复方向；
+403 权限拒绝、429 限流、401 认证失败、408/504 超时与其它 5xx 服务端错误不得混淆。
+无 HTTP 响应时显示“HTTP status unavailable”，并投影可选固定枚举 transport_kind 与 OS error code，
+不把连接失败伪装成服务端 HTTP 拒绝，不从字符串猜测 DNS/TLS 或鉴权原因。
+原始错误文本、URL、header、Provider 响应正文不进入诊断。`retryable` 只是事实提示，不触发自动重试。
+Armillae 修复必须固定到公开 Git revision，不能依赖未提交的本地 checkout 或修改 Cargo cache。
+
+Launcher 的 Saves 页面始终可进入，空列表展示空状态。Enter 读取选中存档，Delete/D 请求删除；
+确认弹窗显示存档名和不可撤销说明，默认选中 Cancel，Esc 取消，切换到 Delete 后 Enter 才提交。
+确认期间屏蔽列表读取与导航。Host 仅删除重新验证仍属于当前世界 catalog 的相同 SaveId/路径条目，
+拒绝符号链接目录/sidecar；先删除存档目录，再删除索引。删除发生在本次进程打开 Store 前，
+不增加运行中删除或存档切换。成功或失败均重新扫描并留在存档页显示结果，Continue 使用刷新后的列表。
+
+Interactive ProviderSetup failures (including explicit --save) abort the current startup attempt, not the process. Before opening World/Save, display a safe diagnostic with Retry, Settings, Back to launcher, and Quit. Preserve the selected save and player creation result. Retry reloads and validates configuration and credential sources; Settings edits references through existing atomic persistence. Returning to launcher cancels the pending selection. Keep the same terminal session throughout. External shell exports cannot update the running process environment; suggest an existing environment variable or file credential reference. Headless still returns a structured failure and nonzero exit. World/Store initialization failures are outside this retry boundary.
