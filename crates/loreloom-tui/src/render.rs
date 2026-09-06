@@ -162,6 +162,12 @@ fn render_wide(
 
     let state_area = render_portrait(frame, sidebar, portrait, portrait_status);
     render_state(frame, &app.snapshot, state_area, true);
+    frame.render_widget(
+        Block::default()
+            .borders(Borders::RIGHT)
+            .border_style(Style::default().fg(MUTED)),
+        sidebar,
+    );
     render_story(frame, app, story);
     render_input(frame, app, composer);
 }
@@ -437,29 +443,17 @@ fn render_state(frame: &mut Frame<'_>, snapshot: &UiSnapshot, area: Rect, separa
         }
     }
 
-    let block = if separated {
-        Block::default()
-            .borders(Borders::RIGHT)
-            .border_style(Style::default().fg(MUTED))
-    } else {
-        Block::default()
-    };
     let target = if separated {
         Rect::new(
             area.x.saturating_add(1),
             area.y,
-            area.width.saturating_sub(1),
+            area.width.saturating_sub(2),
             area.height,
         )
     } else {
         area
     };
-    frame.render_widget(
-        Paragraph::new(lines)
-            .block(block)
-            .wrap(Wrap { trim: false }),
-        target,
-    );
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), target);
 }
 
 fn render_story(frame: &mut Frame<'_>, app: &mut TuiApp, area: Rect) {

@@ -252,7 +252,8 @@ fn prepare(
                 .new_protocol(
                     DynamicImage::ImageRgba8(frame.image),
                     request.target,
-                    Resize::Fit(None),
+                    // Scale the full authored canvas, including transparent margins.
+                    Resize::Scale(Some(image::imageops::FilterType::Nearest)),
                 )
                 .map_err(|_| ())?;
             Ok(PreparedFrame {
@@ -273,6 +274,14 @@ mod tests {
     use super::*;
 
     fn fixture() -> (AppearanceCatalog, AppearanceView) {
+        fixture_with_image(image::RgbaImage::from_pixel(
+            8,
+            8,
+            image::Rgba([255, 0, 0, 255]),
+        ))
+    }
+
+    fn fixture_with_image(image: image::RgbaImage) -> (AppearanceCatalog, AppearanceView) {
         let namespace = "games.loreloom.portrait-test".parse().expect("namespace");
         let pack = br#"schema_version = 1
 pack_id = "games.loreloom.portrait-test:appearance_pack/main"
@@ -289,7 +298,7 @@ z_index = 0
 source = "appearance/images/body.png"
 "#;
         let mut png = std::io::Cursor::new(Vec::new());
-        image::RgbaImage::from_pixel(8, 8, image::Rgba([255, 0, 0, 255]))
+        image
             .write_to(&mut png, image::ImageFormat::Png)
             .expect("png");
         let catalog = AppearanceCatalog::compile([
@@ -348,6 +357,61 @@ source = "appearance/images/body.png"
         presenter.sync_view(None, Some(Size::new(8, 6)));
         assert_eq!(presenter.status(), None);
         assert!(presenter.protocol().is_none());
+    }
+
+    #[test]
+    fn portrait_scales_with_available_space_and_preserves_transparent_canvas() {
+        // A narrow subject in a square canvas must retain its authored margins.
+        let mut source = image::RgbaImage::new(8, 8);
+        for y in 2..6 {
+            for x in 3..5 {
+                source.put_pixel(x, y, image::Rgba([255, 0, 0, 255]));
+            }
+        }
+        let (catalog, view) = fixture_with_image(source);
+        let picker = Picker::halfblocks(); // 10 x 20 pixels per cell.
+        for (target, expected) in [
+            (Size::new(8, 6), Size::new(8, 4)),
+            (Size::new(16, 10), Size::new(16, 8)),
+        ] {
+            let prepared = prepare(
+                &catalog,
+                &picker,
+                RenderRequest {
+                    generation: 1,
+                    appearance: view.clone(),
+                    target,
+                },
+            )
+            .expect("prepare");
+            let protocol = &prepared.frames[0].protocol;
+            assert_eq!(
+                protocol.size(),
+                expected,
+                "square canvas must scale to fit in pixel space"
+            );
+            let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(
+                target.width,
+                target.height,
+            ))
+            .expect("terminal");
+            terminal
+                .draw(|frame| {
+                    frame.render_widget(ratatui_image::Image::new(protocol), frame.area())
+                })
+                .expect("draw");
+            let buffer = terminal.backend().buffer();
+            let is_red = |cell: &ratatui::buffer::Cell| {
+                matches!(cell.fg, ratatui::style::Color::Rgb(r, 0, 0) if r > 0)
+                    || matches!(cell.bg, ratatui::style::Color::Rgb(r, 0, 0) if r > 0)
+            };
+            assert!(is_red(&buffer[(expected.width / 2, expected.height / 2)]));
+            assert!(
+                !is_red(&buffer[(0, 0)]),
+                "transparent margin must not be cropped"
+            );
+            assert!(!is_red(&buffer[(expected.width - 1, expected.height - 1)]));
+        }
     }
 
     #[test]
