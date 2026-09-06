@@ -146,16 +146,16 @@ fn goose_catalog(source: &Path) -> Result<AppearanceCatalog, Box<dyn Error>> {
     ))?)
 }
 
-// Pack v1 uses one timeline; bake the independent eye/body cadence into eight frames.
+// Two 4-second resting breaths (15/min), with a brief blink every 8 seconds.
+// Split the final body phase for the eyes without adding another body movement.
 fn goose_frames() -> Vec<AppearanceFrame> {
-    (0..4)
-        .flat_map(|cycle| {
-            [
-                goose_frame(0, 0, &format!("idle_{cycle}"), 950),
-                goose_frame(1, u32::from(cycle == 3), &format!("motion_{cycle}"), 150),
-            ]
-        })
-        .collect()
+    vec![
+        goose_frame(0, 0, "rest_0", 2000),
+        goose_frame(1, 0, "rise_0", 2000),
+        goose_frame(0, 0, "rest_1", 2000),
+        goose_frame(1, 0, "rise_1", 1850),
+        goose_frame(1, 1, "blink", 150),
+    ]
 }
 
 fn goose_frame(body_frame: u32, eye_frame: u32, name: &str, duration_ms: u32) -> AppearanceFrame {
@@ -389,12 +389,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn body_moves_four_times_per_blink_and_only_eye_layers_close() {
+    fn resting_breaths_have_four_second_cycles_without_blink_driven_motion() {
         let frames = goose_frames();
-        assert_eq!(frames.len(), 8);
+        assert_eq!(frames.len(), 5);
         assert_eq!(
             frames.iter().map(|frame| frame.duration_ms).sum::<u32>(),
-            4400
+            8000
         );
         let layer_frame = |frame: &AppearanceFrame, name: &str| {
             frame
@@ -404,13 +404,19 @@ mod tests {
                 .expect("layer")
                 .source_frame
         };
-        assert_eq!(
-            frames
-                .iter()
-                .filter(|frame| layer_frame(frame, "body") == 1)
-                .count(),
-            4
-        );
+        let mut elapsed = 0;
+        let mut previous = 1;
+        let mut body_changes = Vec::new();
+        for frame in &frames {
+            let current = layer_frame(frame, "body");
+            if current != previous {
+                body_changes.push(elapsed);
+            }
+            previous = current;
+            elapsed += frame.duration_ms;
+        }
+        assert_eq!(body_changes, vec![0, 2000, 4000, 6000]);
+        assert_eq!(frames.last().expect("blink").duration_ms, 150);
         assert_eq!(
             frames
                 .iter()
