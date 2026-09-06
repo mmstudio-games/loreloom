@@ -105,7 +105,7 @@ fn goose_catalog(source: &Path) -> Result<AppearanceCatalog, Box<dyn Error>> {
                 color_default("left_eye", [59, 155, 101]),
                 color_default("right_eye", [61, 128, 193]),
             ],
-            frames: vec![goose_frame(0, "awake", 950), goose_frame(1, "blink", 150)],
+            frames: goose_frames(),
         }],
     };
     let pack_bytes = toml::to_string(&pack)?.into_bytes();
@@ -146,7 +146,19 @@ fn goose_catalog(source: &Path) -> Result<AppearanceCatalog, Box<dyn Error>> {
     ))?)
 }
 
-fn goose_frame(source_frame: u32, name: &str, duration_ms: u32) -> AppearanceFrame {
+// Pack v1 uses one timeline; bake the independent eye/body cadence into eight frames.
+fn goose_frames() -> Vec<AppearanceFrame> {
+    (0..4)
+        .flat_map(|cycle| {
+            [
+                goose_frame(0, 0, &format!("idle_{cycle}"), 950),
+                goose_frame(1, u32::from(cycle == 3), &format!("motion_{cycle}"), 150),
+            ]
+        })
+        .collect()
+}
+
+fn goose_frame(body_frame: u32, eye_frame: u32, name: &str, duration_ms: u32) -> AppearanceFrame {
     let layers = [
         ("base_head", 5, "body/base-head.png", None, true),
         (
@@ -226,7 +238,13 @@ fn goose_frame(source_frame: u32, name: &str, duration_ms: u32) -> AppearanceFra
         name: name.to_owned(),
         z_index,
         source: virtual_path(source),
-        source_frame: if animated { source_frame } else { 0 },
+        source_frame: if !animated {
+            0
+        } else if matches!(name, "left_iris" | "right_iris" | "eyelids" | "lashes") {
+            eye_frame
+        } else {
+            body_frame
+        },
         mask: None,
         mask_frame: None,
         tint: tint.map(|name| AppearanceTint::Parameter {
@@ -363,5 +381,59 @@ impl RuntimeClient for IdleClient {
 
     fn shutdown(&mut self) -> Result<(), UiClientError> {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn body_moves_four_times_per_blink_and_only_eye_layers_close() {
+        let frames = goose_frames();
+        assert_eq!(frames.len(), 8);
+        assert_eq!(
+            frames.iter().map(|frame| frame.duration_ms).sum::<u32>(),
+            4400
+        );
+        let layer_frame = |frame: &AppearanceFrame, name: &str| {
+            frame
+                .layers
+                .iter()
+                .find(|layer| layer.name == name)
+                .expect("layer")
+                .source_frame
+        };
+        assert_eq!(
+            frames
+                .iter()
+                .filter(|frame| layer_frame(frame, "body") == 1)
+                .count(),
+            4
+        );
+        assert_eq!(
+            frames
+                .iter()
+                .filter(|frame| layer_frame(frame, "eyelids") == 1)
+                .count(),
+            1
+        );
+        for frame in &frames {
+            for name in ["left_iris", "right_iris", "lashes"] {
+                assert_eq!(layer_frame(frame, name), layer_frame(frame, "eyelids"));
+            }
+            for name in [
+                "base_head",
+                "hair_sides",
+                "hair_fringe",
+                "shirt",
+                "left_arm",
+                "right_arm",
+                "left_sleeve",
+                "right_sleeve",
+            ] {
+                assert_eq!(layer_frame(frame, name), layer_frame(frame, "body"));
+            }
+        }
     }
 }
