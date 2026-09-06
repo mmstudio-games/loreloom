@@ -184,6 +184,42 @@ fn appearance_target(size: Size, config: TuiConfig) -> Option<Size> {
         .saturating_mul(config.state_width_percent)
         .saturating_div(100)
         .saturating_sub(2);
-    let height = size.height.saturating_sub(15).min(28);
+    let sidebar_height = size.height.saturating_sub(crate::render::HEADER_HEIGHT + 1);
+    let height = (sidebar_height / 3)
+        .min(12)
+        .min(size.height.saturating_sub(15));
     (width >= 8 && height >= 6).then_some(Size::new(width, height))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn portrait_height_reserves_space_for_state_text_at_all_terminal_sizes() {
+        let config = TuiConfig::default();
+        for height in 0..=120 {
+            if let Some(target) = appearance_target(Size::new(120, height), config) {
+                assert!(target.height <= 12);
+                assert!(
+                    target.height <= height.saturating_sub(crate::render::HEADER_HEIGHT + 1) / 3
+                );
+                assert!(height - target.height >= 15);
+            }
+        }
+        assert_eq!(
+            appearance_target(Size::new(120, 24), config)
+                .expect("portrait")
+                .height,
+            7
+        );
+        assert_eq!(
+            appearance_target(Size::new(120, 60), config)
+                .expect("portrait")
+                .height,
+            12
+        );
+        assert!(appearance_target(Size::new(120, 20), config).is_none());
+        assert!(appearance_target(Size::new(crate::WIDE_LAYOUT_MINIMUM - 1, 60), config).is_none());
+    }
 }

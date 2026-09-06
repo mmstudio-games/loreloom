@@ -16,7 +16,7 @@ use crate::{NarrowPage, TuiApp, TuiOverlay};
 
 pub const WIDE_LAYOUT_MINIMUM: u16 = 80;
 
-const HEADER_HEIGHT: u16 = 2;
+pub(crate) const HEADER_HEIGHT: u16 = 2;
 const COMPOSER_HEIGHT: u16 = 4;
 const ACCENT: Color = Color::Cyan;
 const MUTED: Color = Color::DarkGray;
