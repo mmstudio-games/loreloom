@@ -1,0 +1,26 @@
+LORELOOM  Rainbound Inn
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────
+  Settings  ·  1 unsaved
+  Configuration  loreloom.toml
+
+  ╭ PREFERENCES ────────────────────────────────────────╮ ╭ EDIT VALUE ──────────────────────────────╮
+  │ NARRATOR                                            │ │ narrator.model                           │
+  │  › model *                                          │ │ original-edited▏                         │
+  │    original                                         │ │                                          │
+  │    endpoint                                         │ │ Model name                               │
+  │    (not set)                                        │ │                                          │
+  │                                                     │ │                                          │
+  │ NPC                                                 │ │                                          │
+  │    model                                            │ │                                          │
+  │    story-model                                      │ │                                          │
+  │                                                     │ │                                          │
+  │ TUI                                                 │ │                                          │
+  │    image protocol                                   │ │                                          │
+  │    auto                                             │ │                                          │
+  │                                                     │ │                                          │
+  │                                                     │ │                                          │
+  │                                                     │ │                                          │
+  ╰────────────────────────────────────────────── 1 / 4 ╯ ╰──────────────────────────────────────────╯
+                               Enter accept  Ctrl+S save  Esc cancel edit
+

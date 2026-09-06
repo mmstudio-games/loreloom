@@ -1,5 +1,7 @@
 use std::collections::BTreeSet;
 
+use unicode_segmentation::UnicodeSegmentation;
+
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use loreloom_core::{ContentDefinitionId, Fixed, ModId, ModPackageStatus, PackageCatalogView};
 use ratatui::{
@@ -1583,64 +1585,247 @@ fn render_mods(frame: &mut Frame<'_>, app: &mut StartupApp, area: Rect) {
     );
 }
 
+fn setting_group(key: &str) -> &str {
+    key.split('.').next().unwrap_or(key)
+}
+
+fn setting_label(key: &str) -> String {
+    key.replace('_', " ").replace('.', " / ")
+}
+
+fn setting_changed(app: &StartupApp, index: usize) -> bool {
+    let Some(field) = app.model.setting_fields.get(index) else {
+        return false;
+    };
+    let value = if index == app.selected {
+        app.settings_editor
+            .as_ref()
+            .map_or(field.value.as_str(), InputEditor::text)
+    } else {
+        &field.value
+    };
+    app.initial_settings
+        .get(index)
+        .is_none_or(|initial| initial.value != value)
+}
+
 fn render_settings(frame: &mut Frame<'_>, app: &StartupApp, area: Rect) {
-    let rows = Layout::vertical([
-        Constraint::Length(4),
-        Constraint::Min(1),
-        Constraint::Length(4),
-    ])
-    .split(inset(area, 2, 1));
-    let mut heading = vec![Line::from(Span::styled(
-        "SETTINGS",
-        Style::default().fg(ACCENT),
-    ))];
-    heading.extend(app.model.settings.iter().cloned().map(Line::from));
+    let area = inset(area, if area.width >= 60 { 2 } else { 1 }, 0);
+    let changed = (0..app.model.setting_fields.len())
+        .filter(|index| setting_changed(app, *index))
+        .count();
+    let rows = Layout::vertical([Constraint::Length(3), Constraint::Min(1)]).split(area);
+    let mut heading = vec![Line::from(vec![
+        Span::styled("Settings", Style::default().add_modifier(Modifier::BOLD)),
+        Span::styled(
+            if changed == 0 {
+                "  ·  Saved".to_owned()
+            } else {
+                format!("  ·  {changed} unsaved")
+            },
+            Style::default().fg(if changed == 0 { MUTED } else { Color::Yellow }),
+        ),
+    ])];
+    heading.extend(
+        app.model
+            .settings
+            .iter()
+            .take(1)
+            .cloned()
+            .map(|line| Line::from(Span::styled(line, Style::default().fg(MUTED)))),
+    );
     frame.render_widget(Paragraph::new(heading), rows[0]);
-    let visible = usize::from(rows[1].height).max(1);
-    let start = app.selected.saturating_sub(visible - 1);
-    let lines = app
-        .model
-        .setting_fields
-        .iter()
-        .enumerate()
-        .skip(start)
-        .take(visible)
-        .map(|(index, field)| {
-            let selected = index == app.selected;
-            let value = if selected {
-                app.settings_editor
-                    .as_ref()
-                    .map_or_else(|| field.value.clone(), InputEditor::text_with_cursor)
+    let panels = if area.width >= 96 {
+        Layout::horizontal([Constraint::Percentage(56), Constraint::Percentage(44)])
+            .spacing(1)
+            .split(rows[1])
+    } else {
+        Layout::vertical([
+            Constraint::Min(3),
+            Constraint::Length(if area.height >= 18 { 8 } else { 5 }),
+        ])
+        .split(rows[1])
+    };
+    let block = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(MUTED))
+        .title(" PREFERENCES ")
+        .title_bottom(
+            Line::from(format!(
+                " {} / {} ",
+                if app.model.setting_fields.is_empty() {
+                    0
+                } else {
+                    app.selected + 1
+                },
+                app.model.setting_fields.len()
+            ))
+            .right_aligned(),
+        )
+        .padding(ratatui::widgets::Padding::horizontal(1));
+    let body = block.inner(panels[0]);
+    frame.render_widget(block, panels[0]);
+    let mut lines = Vec::new();
+    let mut selected_row = 0;
+    let mut previous_group = None;
+    for (index, field) in app.model.setting_fields.iter().enumerate() {
+        let group = setting_group(&field.key);
+        if previous_group != Some(group) {
+            if previous_group.is_some() {
+                lines.push(Line::from(""));
+            }
+            lines.push(Line::from(Span::styled(
+                setting_label(group).to_uppercase(),
+                Style::default().fg(ACCENT),
+            )));
+            previous_group = Some(group);
+        }
+        let selected = index == app.selected;
+        if selected {
+            selected_row = lines.len();
+        }
+        let label = field
+            .key
+            .split_once('.')
+            .map_or(field.key.as_str(), |(_, name)| name);
+        let style = if selected {
+            Style::default()
+                .fg(ACCENT)
+                .add_modifier(Modifier::BOLD | Modifier::REVERSED)
+        } else {
+            Style::default()
+        };
+        lines.push(
+            Line::from(vec![
+                Span::raw(if selected { " › " } else { "   " }),
+                Span::raw(setting_label(label)),
+                Span::styled(
+                    if setting_changed(app, index) {
+                        " *"
+                    } else {
+                        ""
+                    },
+                    Style::default().fg(Color::Yellow),
+                ),
+            ])
+            .style(style),
+        );
+        lines.push(Line::from(Span::styled(
+            format!(
+                "   {}",
+                if field.value.is_empty() {
+                    "(not set)"
+                } else {
+                    &field.value
+                }
+            ),
+            Style::default().fg(if selected { ACCENT } else { MUTED }),
+        )));
+    }
+    if lines.is_empty() {
+        lines.push(Line::from("No editable settings."));
+    }
+    // Keep the selected label and its value together, including after resize.
+    let scroll = selected_row
+        .saturating_add(2)
+        .saturating_sub(usize::from(body.height));
+    frame.render_widget(
+        Paragraph::new(lines).scroll((u16::try_from(scroll).unwrap_or(u16::MAX), 0)),
+        body,
+    );
+    render_setting_detail(frame, app, panels[1]);
+}
+
+fn render_setting_detail(frame: &mut Frame<'_>, app: &StartupApp, area: Rect) {
+    let editing = app.settings_editor.is_some();
+    let block = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(if editing { ACCENT } else { MUTED }))
+        .title(if editing {
+            " EDIT VALUE "
+        } else {
+            " SELECTED SETTING "
+        })
+        .padding(ratatui::widgets::Padding::horizontal(1));
+    let body = block.inner(area);
+    frame.render_widget(block, area);
+    let Some(field) = app.model.setting_fields.get(app.selected) else {
+        return;
+    };
+    frame.render_widget(
+        Paragraph::new(Span::styled(
+            &field.key,
+            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+        )),
+        Rect::new(body.x, body.y, body.width, body.height.min(1)),
+    );
+    let value = app.settings_editor.as_ref().map_or_else(
+        || {
+            if field.value.is_empty() {
+                "(not set)".to_owned()
             } else {
                 field.value.clone()
-            };
-            Line::from(Span::styled(
-                format!(
-                    "{}{}  =  {}",
-                    if selected { "› " } else { "  " },
-                    field.key,
-                    value
-                ),
-                Style::default().fg(if selected { ACCENT } else { Color::White }),
-            ))
-        })
-        .collect::<Vec<_>>();
-    frame.render_widget(Paragraph::new(lines), rows[1]);
-    if let Some(field) = app.model.setting_fields.get(app.selected) {
-        let value = app
-            .settings_editor
-            .as_ref()
-            .map_or_else(|| field.value.clone(), InputEditor::text_with_cursor);
+            }
+        },
+        InputEditor::text_with_cursor,
+    );
+    let mut skip_bytes = 0;
+    if let Some(editor) = &app.settings_editor {
+        let prefix = editor
+            .text()
+            .graphemes(true)
+            .take(editor.cursor())
+            .collect::<String>();
+        let mut width = Line::from(prefix.as_str()).width();
+        for grapheme in prefix.graphemes(true) {
+            if width < usize::from(body.width) {
+                break;
+            }
+            width = width.saturating_sub(Line::from(grapheme).width());
+            skip_bytes += grapheme.len();
+        }
+    }
+    if body.height > 1 {
         frame.render_widget(
-            Paragraph::new(
-                app.notice
-                    .clone()
-                    .unwrap_or_else(|| format!("{}\n{}", field.help, value)),
-            )
-            .wrap(Wrap { trim: false }),
-            rows[2],
+            Paragraph::new(Span::styled(
+                &value[skip_bytes..],
+                Style::default().add_modifier(Modifier::BOLD),
+            )),
+            Rect::new(body.x, body.y + 1, body.width, 1),
         );
     }
+    let mut lines = Vec::new();
+    if let Some(notice) = &app.notice {
+        lines.push(Line::from(Span::styled(
+            notice,
+            Style::default().fg(Color::Yellow),
+        )));
+    } else if body.height > 4 {
+        lines.push(Line::from(""));
+    }
+    lines.push(Line::from(Span::styled(
+        &field.help,
+        Style::default().fg(MUTED),
+    )));
+    if app.model.settings.len() > 1 {
+        lines.push(Line::from(""));
+        lines.extend(
+            app.model
+                .settings
+                .iter()
+                .skip(1)
+                .map(|line| Line::from(Span::styled(line, Style::default().fg(MUTED)))),
+        );
+    }
+    frame.render_widget(
+        Paragraph::new(lines).wrap(Wrap { trim: false }),
+        Rect::new(
+            body.x,
+            body.y.saturating_add(2),
+            body.width,
+            body.height.saturating_sub(2),
+        ),
+    );
 }
 
 fn render_presets(frame: &mut Frame<'_>, app: &StartupApp, area: Rect) {
@@ -1923,7 +2108,10 @@ fn render_startup_footer(frame: &mut Frame<'_>, app: &StartupApp, area: Rect) {
         StartupPage::Saves => "↑↓ select  Enter load  D/Delete delete  Esc back",
         StartupPage::Presets => "↑↓ select  Enter confirm  Esc back",
         StartupPage::Mods => "↑↓ select  Space toggle  Enter apply  Esc cancel",
-        StartupPage::Settings => "↑↓ select  Enter edit/accept  Ctrl+S save  Esc cancel",
+        StartupPage::Settings if app.settings_editor.is_some() => {
+            "Enter accept  Ctrl+S save  Esc cancel edit"
+        }
+        StartupPage::Settings => "↑↓ select  Enter edit  Ctrl+S save  Esc back",
         StartupPage::Form => "↑↓/Tab field  ←→ choose  Space toggle  Enter next/confirm  Esc back",
     };
     frame.render_widget(
@@ -2062,8 +2250,95 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect::<String>();
-        assert!(rendered.contains("budget.59  =  12"));
+        assert!(rendered.contains("budget.59"));
+        assert!(rendered.contains("61 / 61"));
         assert!(rendered.contains("Ctrl+S save"));
+    }
+
+    #[test]
+    fn settings_layout_snapshots_and_resize_keep_editing_visible() {
+        let mut model = settings_model();
+        model.open_settings = true;
+        model.setting_fields.extend([
+            StartupSettingView {
+                key: "narrator.endpoint".into(),
+                value: String::new(),
+                help: "Blank uses the provider default.".into(),
+            },
+            StartupSettingView {
+                key: "npc.model".into(),
+                value: "story-model".into(),
+                help: "Model name".into(),
+            },
+            StartupSettingView {
+                key: "tui.image_protocol".into(),
+                value: "auto".into(),
+                help: "Terminal image protocol".into(),
+            },
+        ]);
+        let mut app = StartupApp::new(model);
+        press(&mut app, KeyCode::Enter);
+        handle_startup_paste(&mut app, "-edited");
+        for (width, height, name, expected) in [
+            (
+                104,
+                26,
+                "settings-wide.txt",
+                include_str!("../tests/snapshots/settings-wide.txt"),
+            ),
+            (
+                60,
+                24,
+                "settings-narrow.txt",
+                include_str!("../tests/snapshots/settings-narrow.txt"),
+            ),
+        ] {
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("terminal");
+            terminal
+                .draw(|frame| render_startup(frame, &mut app))
+                .expect("render");
+            let snapshot = terminal
+                .backend()
+                .buffer()
+                .content
+                .chunks(usize::from(width))
+                .map(|row| {
+                    row.iter()
+                        .map(|cell| cell.symbol())
+                        .collect::<String>()
+                        .trim_end()
+                        .to_owned()
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+                + "\n";
+            if std::env::var_os("UPDATE_SETTINGS_SNAPSHOTS").is_some() {
+                std::fs::write(
+                    format!("{}/tests/snapshots/{name}", env!("CARGO_MANIFEST_DIR")),
+                    &snapshot,
+                )
+                .expect("snapshot");
+            } else {
+                assert_eq!(snapshot, expected, "{name}");
+            }
+        }
+        handle_startup_paste(&mut app, &"中文".repeat(60));
+        for (width, height) in [(104, 26), (60, 24), (32, 16), (1, 1)] {
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("terminal");
+            terminal
+                .draw(|frame| render_startup(frame, &mut app))
+                .expect("resize");
+            if width > 1 {
+                assert!(
+                    terminal
+                        .backend()
+                        .buffer()
+                        .content
+                        .iter()
+                        .any(|cell| cell.symbol() == "▏")
+                );
+            }
+        }
     }
 
     fn mod_package(id: &str, status: ModPackageStatus) -> ModPackageView {

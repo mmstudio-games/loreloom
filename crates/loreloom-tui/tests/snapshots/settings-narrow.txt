@@ -1,0 +1,24 @@
+LORELOOM  Rainbound Inn
+
+────────────────────────────────────────────────────────────
+  Settings  ·  1 unsaved
+  Configuration  loreloom.toml
+
+  ╭ PREFERENCES ─────────────────────────────────────────╮
+  │ NARRATOR                                             │
+  │  › model *                                           │
+  │    original                                          │
+  │    endpoint                                          │
+  │    (not set)                                         │
+  │                                                      │
+  ╰─────────────────────────────────────────────── 1 / 4 ╯
+  ╭ EDIT VALUE ──────────────────────────────────────────╮
+  │ narrator.model                                       │
+  │ original-edited▏                                     │
+  │                                                      │
+  │ Model name                                           │
+  │                                                      │
+  │                                                      │
+  ╰──────────────────────────────────────────────────────╯
+         Enter accept  Ctrl+S save  Esc cancel edit
+
