@@ -1317,7 +1317,7 @@ pub fn render_startup(frame: &mut Frame<'_>, app: &mut StartupApp) {
                         Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
                     ))
                     .border_type(BorderType::Rounded)
-                    .border_style(Style::default().fg(ACCENT))
+                    .border_style(Style::default().fg(Color::Red))
                     .padding(ratatui::widgets::Padding::horizontal(1)),
             ),
             popup,
