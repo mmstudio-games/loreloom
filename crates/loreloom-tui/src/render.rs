@@ -598,7 +598,7 @@ fn render_story(frame: &mut Frame<'_>, app: &mut TuiApp, area: Rect) {
     frame.render_widget(paragraph.scroll((app.transcript_top_offset(), 0)), body);
 }
 
-fn render_input(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
+fn render_input(frame: &mut Frame<'_>, app: &mut TuiApp, area: Rect) {
     if area.height == 0 || area.width == 0 {
         return;
     }
@@ -615,6 +615,7 @@ fn render_input(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(border));
     let body = block.inner(area);
+    app.input_width = body.width;
     frame.render_widget(block, area);
     let viewport = input_viewport(&app.editor, body.width, body.height);
     let lines = viewport
@@ -660,57 +661,81 @@ fn input_viewport(editor: &crate::InputEditor, width: u16, height: u16) -> Input
     if width == 0 || height == 0 {
         return InputViewport::default();
     }
-    let width = usize::from(width);
+    let layout = input_layout(editor.text(), width);
+    let (cursor_column, cursor_row) = layout.positions[editor.cursor()];
+    let start = cursor_row
+        .saturating_add(1)
+        .saturating_sub(usize::from(height));
+    InputViewport {
+        rows: layout
+            .rows
+            .into_iter()
+            .skip(start)
+            .take(usize::from(height))
+            .collect(),
+        cursor: Some((cursor_column as u16, (cursor_row - start) as u16)),
+    }
+}
+
+struct InputLayout {
+    rows: Vec<String>,
+    positions: Vec<(usize, usize)>,
+}
+
+fn input_layout(text: &str, width: u16) -> InputLayout {
+    let width = usize::from(width.max(1));
     let indent = if width >= 4 { "  " } else { "" };
     let mut rows = vec![if indent.is_empty() {
         String::new()
     } else {
         "› ".to_owned()
     }];
+    let mut positions = Vec::new();
     let mut column = indent.len();
-    let mut cursor_row = 0;
-    let mut cursor_column = 0;
-    let mut append = |grapheme: &str, cursor: bool| {
+    for grapheme in text.graphemes(true).chain(std::iter::once("")) {
         let newline = matches!(grapheme, "\n" | "\r\n" | "\r");
         let cells = if newline {
             0
         } else {
             Line::from(grapheme).width()
         };
-        if column + cells > width || (cursor && column >= width) {
+        if !newline && (column + cells > width || column >= width) {
             rows.push(indent.to_owned());
             column = indent.len();
         }
-        if cursor {
-            cursor_row = rows.len() - 1;
-            cursor_column = column;
-        }
+        positions.push((column.min(width - 1), rows.len() - 1));
         if newline {
             rows.push(indent.to_owned());
             column = indent.len();
-            return;
+        } else {
+            if let Some(row) = rows.last_mut() {
+                row.push_str(grapheme);
+            }
+            column += cells;
         }
-        if let Some(row) = rows.last_mut() {
-            row.push_str(grapheme);
-        }
-        column += cells;
+    }
+    InputLayout { rows, positions }
+}
+
+pub(crate) fn move_input_vertical(editor: &mut crate::InputEditor, width: u16, down: bool) {
+    let layout = input_layout(editor.text(), width);
+    let (column, row) = layout.positions[editor.cursor()];
+    let target_row = if down {
+        row.saturating_add(1)
+    } else {
+        row.saturating_sub(1)
     };
-    for (index, grapheme) in editor.text().graphemes(true).enumerate() {
-        append(grapheme, index == editor.cursor());
-    }
-    if editor.cursor() == editor.grapheme_count() {
-        append("", true);
-    }
-    let start = cursor_row
-        .saturating_add(1)
-        .saturating_sub(usize::from(height));
-    InputViewport {
-        rows: rows
-            .into_iter()
-            .skip(start)
-            .take(usize::from(height))
-            .collect(),
-        cursor: Some((cursor_column as u16, (cursor_row - start) as u16)),
+    let target = layout
+        .positions
+        .iter()
+        .enumerate()
+        .filter(|(_, (_, candidate_row))| *candidate_row == target_row)
+        .min_by_key(|(_, (candidate_column, _))| candidate_column.abs_diff(column))
+        .map(|(index, _)| index);
+    if let Some(target) = target {
+        editor.set_cursor(target);
+    } else if down {
+        editor.set_cursor(editor.grapheme_count());
     }
 }
 
@@ -1132,6 +1157,55 @@ const fn spinner(frame: u8) -> &'static str {
 mod input_tests {
     use super::input_viewport;
     use crate::InputEditor;
+
+    #[test]
+    fn newline_after_a_full_visual_row_does_not_add_a_blank_row() {
+        let editor = InputEditor::with_text("一二三四\n下一行").expect("input");
+        assert_eq!(
+            input_viewport(&editor, 10, 3).rows,
+            ["› 一二三四", "  下一行"]
+        );
+    }
+
+    #[test]
+    fn vertical_navigation_uses_wrapped_rows_and_down_on_last_row_moves_to_end() {
+        let mut editor = InputEditor::with_text("一二三四五六七八九十").expect("input");
+        editor.set_cursor(1);
+        super::move_input_vertical(&mut editor, 10, true);
+        assert_eq!(editor.cursor(), 5);
+        super::move_input_vertical(&mut editor, 10, false);
+        assert_eq!(editor.cursor(), 1);
+        super::move_input_vertical(&mut editor, 10, true);
+        super::move_input_vertical(&mut editor, 10, true);
+        assert_eq!(editor.cursor(), 9);
+        super::move_input_vertical(&mut editor, 10, true);
+        assert_eq!(editor.cursor(), 10);
+        super::move_input_vertical(&mut editor, 10, true);
+        assert_eq!(editor.cursor(), 10);
+        super::move_input_vertical(&mut editor, 12, false);
+        assert_eq!(editor.cursor(), 5, "navigation uses the resized width");
+    }
+
+    #[test]
+    fn vertical_navigation_handles_explicit_newlines_and_unicode_cell_columns() {
+        let mut editor = InputEditor::with_text("中文abc\r\ne\u{301}👩‍👩‍👧‍👦xy\n尾").expect("input");
+        editor.set_cursor(2);
+        super::move_input_vertical(&mut editor, 20, true);
+        assert_eq!(
+            editor.cursor(),
+            9,
+            "same terminal column after mixed-width text"
+        );
+        super::move_input_vertical(&mut editor, 20, true);
+        assert_eq!(
+            editor.cursor(),
+            editor.grapheme_count(),
+            "short final row clamps to its end"
+        );
+        editor.set_cursor(1);
+        super::move_input_vertical(&mut editor, 20, false);
+        assert_eq!(editor.cursor(), 1);
+    }
 
     #[test]
     fn cursor_does_not_shift_or_rewrap_chinese_and_combining_characters() {

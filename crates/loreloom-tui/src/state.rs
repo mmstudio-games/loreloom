@@ -66,6 +66,7 @@ pub struct TuiApp {
     pub mods_page_rows: u16,
     pub working_phase: Option<RuntimePhase>,
     pub spinner_frame: u8,
+    pub(crate) input_width: u16,
     pending_submission: Option<PendingSubmission>,
     live_tool_activity: Option<Vec<ToolActivity>>,
 }
@@ -92,6 +93,7 @@ impl TuiApp {
             mods_page_rows: 1,
             working_phase: None,
             spinner_frame: 0,
+            input_width: 80,
             pending_submission: None,
             live_tool_activity: None,
         }
@@ -324,11 +326,11 @@ pub fn handle_key(app: &mut TuiApp, key: KeyEvent) -> Option<UiIntent> {
             None
         }
         (KeyCode::Up, _) => {
-            app.editor.move_up();
+            crate::render::move_input_vertical(&mut app.editor, app.input_width, false);
             None
         }
         (KeyCode::Down, _) => {
-            app.editor.move_down();
+            crate::render::move_input_vertical(&mut app.editor, app.input_width, true);
             None
         }
         (KeyCode::Home, _) => {

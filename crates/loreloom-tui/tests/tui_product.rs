@@ -909,3 +909,32 @@ fn native_composer_cursor_preserves_the_character_underneath() {
         app.editor.move_right();
     }
 }
+
+#[test]
+fn arrow_keys_follow_composer_rows_and_updated_terminal_width() {
+    let mut app = TuiApp::new(snapshot());
+    app.editor = InputEditor::with_text("中文".repeat(80)).expect("input");
+    app.editor.move_home();
+    app.editor.move_right();
+    let mut terminal = render_mut(&mut app, 48, 18);
+    let initial = terminal.get_cursor_position().expect("cursor");
+    handle_key(&mut app, KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+    assert!(app.editor.cursor() > 1);
+    let mut terminal = render_mut(&mut app, 48, 18);
+    let next = terminal.get_cursor_position().expect("cursor");
+    assert_eq!(initial.x, next.x);
+    assert_eq!(initial.y + 1, next.y);
+    handle_key(&mut app, KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+    assert_eq!(app.editor.cursor(), 1);
+    render_mut(&mut app, 32, 18);
+    handle_key(&mut app, KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+    let narrow_cursor = app.editor.cursor();
+    handle_key(&mut app, KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+    render_mut(&mut app, 48, 18);
+    handle_key(&mut app, KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+    assert!(app.editor.cursor() > narrow_cursor);
+    app.editor.move_end();
+    app.editor.move_left();
+    handle_key(&mut app, KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+    assert_eq!(app.editor.cursor(), app.editor.grapheme_count());
+}

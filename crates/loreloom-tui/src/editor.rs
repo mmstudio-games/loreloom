@@ -71,6 +71,10 @@ impl InputEditor {
         Ok(())
     }
 
+    pub(crate) fn set_cursor(&mut self, cursor: usize) {
+        self.cursor = cursor.min(self.grapheme_count());
+    }
+
     pub fn move_left(&mut self) {
         self.cursor = self.cursor.saturating_sub(1);
     }
