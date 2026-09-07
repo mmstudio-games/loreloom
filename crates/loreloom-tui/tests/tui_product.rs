@@ -859,3 +859,20 @@ fn model_http_failure_notices_keep_status_and_reason_visible() {
         assert!(text_snapshot(terminal.backend().buffer()).contains(reason));
     }
 }
+
+#[test]
+fn composer_keeps_long_unicode_input_and_cursor_visible_after_resize() {
+    let mut app = TuiApp::new(snapshot());
+    app.editor =
+        InputEditor::with_text(format!("{}END", "中文e\u{301}👩‍👩‍👧‍👦".repeat(30))).expect("input");
+    for width in [120, 80, 48, 32] {
+        let terminal = render(&app, width, 18);
+        assert!(text_snapshot(terminal.backend().buffer()).contains("END▏"));
+    }
+    app.editor.move_home();
+    let terminal = render(&app, 48, 18);
+    assert!(text_snapshot(terminal.backend().buffer()).contains("› ▏"));
+    assert!(!text_snapshot(terminal.backend().buffer()).contains("END"));
+    app.editor.move_end();
+    assert!(text_snapshot(render(&app, 48, 18).backend().buffer()).contains("END▏"));
+}
