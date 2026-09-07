@@ -12,7 +12,7 @@
  ◇ Unknown condition · Hands tremble.
 
  ╭ Working · Esc to cancel ───────────────────╮
- │› Look closer▏                              │
+ │› Look closer                               │
  │                                            │
  ╰────────────────────────────────────────────╯
     working · Tab · F2 Mods · PgUp/PgDn · ^C

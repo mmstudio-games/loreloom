@@ -300,7 +300,7 @@ fn product_renderer_is_deterministic_for_wide_and_narrow_layouts() {
     assert!(!wide.contains("Narrator:"));
     assert!(wide.contains("Narrator is thinking…"));
     assert!(wide.contains("observe_scene  running"));
-    assert!(wide.contains("Look closer▏"));
+    assert!(wide.contains("Look closer"));
     assert!(wide.contains("Esc cancel"));
     assert!(!wide.contains("rev 7"));
     assert!(!wide.contains("r7"));
@@ -327,7 +327,7 @@ fn product_renderer_is_deterministic_for_wide_and_narrow_layouts() {
             .fg,
         ratatui::style::Color::Cyan
     );
-    assert!(story.contains("Look closer▏"));
+    assert!(story.contains("Look closer"));
     app.narrow_page = NarrowPage::State;
     let state = text_snapshot(render(&app, 48, 18).backend().buffer());
     assert_eq!(
@@ -337,13 +337,13 @@ fn product_renderer_is_deterministic_for_wide_and_narrow_layouts() {
     assert!(state.contains("Aster"));
     assert!(state.contains("STATUS"));
     assert!(state.contains("Unknown condition · Hands tremble."));
-    assert!(state.contains("Look closer▏"));
+    assert!(state.contains("Look closer"));
 
     app.working_phase = None;
     app.editor = InputEditor::with_text("first\nsecond").expect("multiline input");
     let multiline = text_snapshot(render(&app, 80, 18).backend().buffer());
     assert!(multiline.contains("│› first"));
-    assert!(multiline.contains("│  second▏"));
+    assert!(multiline.contains("│  second"));
 }
 
 #[test]
@@ -867,12 +867,45 @@ fn composer_keeps_long_unicode_input_and_cursor_visible_after_resize() {
         InputEditor::with_text(format!("{}END", "中文e\u{301}👩‍👩‍👧‍👦".repeat(30))).expect("input");
     for width in [120, 80, 48, 32] {
         let terminal = render(&app, width, 18);
-        assert!(text_snapshot(terminal.backend().buffer()).contains("END▏"));
+        assert!(text_snapshot(terminal.backend().buffer()).contains("END"));
     }
     app.editor.move_home();
     let terminal = render(&app, 48, 18);
-    assert!(text_snapshot(terminal.backend().buffer()).contains("› ▏"));
+    assert!(text_snapshot(terminal.backend().buffer()).contains("› "));
     assert!(!text_snapshot(terminal.backend().buffer()).contains("END"));
     app.editor.move_end();
-    assert!(text_snapshot(render(&app, 48, 18).backend().buffer()).contains("END▏"));
+    assert!(text_snapshot(render(&app, 48, 18).backend().buffer()).contains("END"));
+}
+
+#[test]
+fn native_composer_cursor_preserves_the_character_underneath() {
+    let mut app = TuiApp::new(snapshot());
+    app.editor = InputEditor::with_text("女男我我dsss范围e\u{301}👩‍👩‍👧‍👦").expect("input");
+    let expected = text_snapshot(render(&app, 80, 18).backend().buffer());
+    app.editor.move_home();
+    for grapheme in [
+        "女",
+        "男",
+        "我",
+        "我",
+        "d",
+        "s",
+        "s",
+        "s",
+        "范",
+        "围",
+        "e\u{301}",
+        "👩‍👩‍👧‍👦",
+    ] {
+        let mut terminal = render(&app, 80, 18);
+        let cursor = terminal.get_cursor_position().expect("native cursor");
+        let buffer = terminal.backend().buffer();
+        assert_eq!(
+            text_snapshot(buffer),
+            expected,
+            "moving the cursor must not move text"
+        );
+        assert_eq!(buffer.cell(cursor).expect("cursor cell").symbol(), grapheme);
+        app.editor.move_right();
+    }
 }

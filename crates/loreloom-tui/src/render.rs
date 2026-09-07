@@ -616,7 +616,9 @@ fn render_input(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
         .border_style(Style::default().fg(border));
     let body = block.inner(area);
     frame.render_widget(block, area);
-    let lines = input_viewport(&app.editor, body.width, body.height)
+    let viewport = input_viewport(&app.editor, body.width, body.height);
+    let lines = viewport
+        .rows
         .into_iter()
         .map(|line| {
             let prefix_bytes = if line.starts_with("› ") {
@@ -639,13 +641,24 @@ fn render_input(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
         })
         .collect::<Vec<_>>();
     frame.render_widget(Paragraph::new(lines), body);
+    if app.overlay.is_none()
+        && let Some((x, y)) = viewport.cursor
+    {
+        frame.set_cursor_position((body.x + x, body.y + y));
+    }
+}
+
+#[derive(Debug, Default)]
+struct InputViewport {
+    rows: Vec<String>,
+    cursor: Option<(u16, u16)>,
 }
 
 // Wrap graphemes once for both painting and cursor tracking. Counting bytes or
 // logical newlines cannot locate the cursor after full-width text wraps.
-fn input_viewport(editor: &crate::InputEditor, width: u16, height: u16) -> Vec<String> {
+fn input_viewport(editor: &crate::InputEditor, width: u16, height: u16) -> InputViewport {
     if width == 0 || height == 0 {
-        return Vec::new();
+        return InputViewport::default();
     }
     let width = usize::from(width);
     let indent = if width >= 4 { "  " } else { "" };
@@ -656,19 +669,26 @@ fn input_viewport(editor: &crate::InputEditor, width: u16, height: u16) -> Vec<S
     }];
     let mut column = indent.len();
     let mut cursor_row = 0;
+    let mut cursor_column = 0;
     let mut append = |grapheme: &str, cursor: bool| {
-        if matches!(grapheme, "\n" | "\r\n" | "\r") {
-            rows.push(indent.to_owned());
-            column = indent.len();
-            return;
-        }
-        let cells = Line::from(grapheme).width();
-        if column + cells > width {
+        let newline = matches!(grapheme, "\n" | "\r\n" | "\r");
+        let cells = if newline {
+            0
+        } else {
+            Line::from(grapheme).width()
+        };
+        if column + cells > width || (cursor && column >= width) {
             rows.push(indent.to_owned());
             column = indent.len();
         }
         if cursor {
             cursor_row = rows.len() - 1;
+            cursor_column = column;
+        }
+        if newline {
+            rows.push(indent.to_owned());
+            column = indent.len();
+            return;
         }
         if let Some(row) = rows.last_mut() {
             row.push_str(grapheme);
@@ -676,21 +696,22 @@ fn input_viewport(editor: &crate::InputEditor, width: u16, height: u16) -> Vec<S
         column += cells;
     };
     for (index, grapheme) in editor.text().graphemes(true).enumerate() {
-        if index == editor.cursor() {
-            append("▏", true);
-        }
-        append(grapheme, false);
+        append(grapheme, index == editor.cursor());
     }
     if editor.cursor() == editor.grapheme_count() {
-        append("▏", true);
+        append("", true);
     }
     let start = cursor_row
         .saturating_add(1)
         .saturating_sub(usize::from(height));
-    rows.into_iter()
-        .skip(start)
-        .take(usize::from(height))
-        .collect()
+    InputViewport {
+        rows: rows
+            .into_iter()
+            .skip(start)
+            .take(usize::from(height))
+            .collect(),
+        cursor: Some((cursor_column as u16, (cursor_row - start) as u16)),
+    }
 }
 
 fn render_footer(frame: &mut Frame<'_>, app: &TuiApp, area: Rect, narrow: bool) {
@@ -1113,43 +1134,50 @@ mod input_tests {
     use crate::InputEditor;
 
     #[test]
+    fn cursor_does_not_shift_or_rewrap_chinese_and_combining_characters() {
+        let mut editor = InputEditor::with_text("一二三四五六七八九十e\u{301}👩‍👩‍👧‍👦").expect("input");
+        let expected = input_viewport(&editor, 10, 8).rows;
+        editor.move_home();
+        for _ in 0..editor.grapheme_count() {
+            let view = input_viewport(&editor, 10, 8);
+            assert_eq!(view.rows, expected);
+            let (x, y) = view.cursor.expect("cursor");
+            assert!(x < 10 && y < 8);
+            editor.move_right();
+        }
+    }
+
+    #[test]
     fn chinese_input_scrolls_at_cell_boundaries_and_follows_cursor() {
         let mut editor = InputEditor::with_text("一二三四五六七八九十").expect("input");
-        assert_eq!(input_viewport(&editor, 10, 2), ["  五六七八", "  九十▏"]);
+        let view = input_viewport(&editor, 10, 2);
+        assert_eq!(view.rows, ["  五六七八", "  九十"]);
+        assert_eq!(view.cursor, Some((6, 1)));
         editor.move_home();
-        assert_eq!(input_viewport(&editor, 10, 2), ["› ▏一二三", "  四五六七"]);
+        let view = input_viewport(&editor, 10, 2);
+        assert_eq!(view.rows, ["› 一二三四", "  五六七八"]);
+        assert_eq!(view.cursor, Some((2, 0)));
         editor.move_end();
-        assert_eq!(input_viewport(&editor, 12, 2), ["  六七八九十", "  ▏"]);
-        for _ in 0..6 {
-            editor.move_left();
-        }
-        editor.insert("新").expect("insert");
-        assert_eq!(input_viewport(&editor, 10, 2), ["› 一二三四", "  新▏五六"]);
-        editor.backspace();
-        assert_eq!(input_viewport(&editor, 10, 2), ["› 一二三四", "  ▏五六七"]);
+        let view = input_viewport(&editor, 12, 2);
+        assert_eq!(view.rows, ["  六七八九十", "  "]);
+        assert_eq!(view.cursor, Some((2, 1)));
     }
 
     #[test]
     fn multiline_and_grapheme_clusters_keep_cursor_in_view() {
         let mut editor = InputEditor::with_text("first\r\nsecond\n末尾e\u{301}👩‍👩‍👧‍👦").expect("input");
-        assert_eq!(
-            input_viewport(&editor, 10, 2),
-            ["  second", "  末尾e\u{301}👩‍👩‍👧‍👦▏"]
-        );
+        let view = input_viewport(&editor, 10, 2);
+        assert_eq!(view.rows, ["  second", "  末尾e\u{301}👩‍👩‍👧‍👦"]);
+        assert_eq!(view.cursor, Some((9, 1)));
         editor.move_up();
-        assert!(
-            input_viewport(&editor, 10, 2)
-                .join("\n")
-                .contains("seco▏nd")
-        );
+        assert_eq!(input_viewport(&editor, 10, 2).cursor, Some((6, 1)));
         for (width, height) in [(1, 1), (3, 2), (6, 1), (40, 4)] {
-            assert!(
-                input_viewport(&editor, width, height)
-                    .join("\n")
-                    .contains('▏')
-            );
+            let (x, y) = input_viewport(&editor, width, height)
+                .cursor
+                .expect("cursor");
+            assert!(x < width && y < height);
         }
-        assert!(input_viewport(&editor, 0, 2).is_empty());
-        assert!(input_viewport(&editor, 10, 0).is_empty());
+        assert!(input_viewport(&editor, 0, 2).cursor.is_none());
+        assert!(input_viewport(&editor, 10, 0).cursor.is_none());
     }
 }

@@ -12,7 +12,7 @@
  Resolve  12  base 10  │ ⠋ Narrator is thinking…
  CONDITIONS            │ i Demo ready
  ◇ Unknown condition · │ ╭ Working · Esc to cancel ───────────────────────────╮
- Hands tremble.        │ │› Look closer▏                                      │
+ Hands tremble.        │ │› Look closer                                       │
                        │ │                                                    │
                        │ ╰────────────────────────────────────────────────────╯
       Narrator is thinking · Ctrl+O Mods · Esc cancel · PgUp/PgDn · ^C quit

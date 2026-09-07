@@ -12,7 +12,7 @@
  ⠋ Narrator is thinking…
  i Demo ready
  ╭ Working · Esc to cancel ───────────────────╮
- │› Look closer▏                              │
+ │› Look closer                               │
  │                                            │
  ╰────────────────────────────────────────────╯
     working · Tab · F2 Mods · PgUp/PgDn · ^C
