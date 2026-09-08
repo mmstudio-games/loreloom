@@ -131,6 +131,7 @@ OPEN 项、后续 RFC 或 P0 Spike；空 crate 不代表相关协议已经实现
 - [x] 在 Tool 执行前后发布安全的当前 Turn Activity，实时更新 TUI pending/终态状态并保持玩家输入、
   Tool Activity、Narrator 正文的显示顺序；
 - [x] 完成面向叙事阅读的 TUI 视觉重构；
+- [x] 统一 Narrator 正文左对齐，移除后续显式行的额外缩进，保留段落空行并覆盖宽窄屏回归测试；
 - [x] 修复 Transcript 底部锚定、按折行 viewport 约束的 PageUp/PageDown 与鼠标滚轮滚动；
 - [x] 在玩家输入被 Runtime command queue 接受后立即显示本地 pending 玩家行，并由最终 Snapshot
   确定性替换或清除；

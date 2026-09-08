@@ -2391,6 +2391,8 @@ Effect 或其它嵌套对象。enabled 摘要来自实际编译候选在应用�
   不应淹没叙事内容；
 - 终端 session 初始化顺序为 raw mode、alternate screen、隐藏 cursor、bracketed paste、mouse
   capture；正常退出、部分初始化失败与 panic unwind 均按逆序尝试恢复所有已启用状态；
+- Narrator 叙事正文统一左对齐，TUI 不为首段或后续段落额外添加首行缩进；保留正文中的显式
+  换行、段落空行及原有空白，自动折行同样从正文左边界开始。玩家、角色和系统消息的标记布局独立处理。
 - 渲染测试不得访问网络或真实 Provider。
 
 ### 12.4 TUI 产品状态与 Runtime Client

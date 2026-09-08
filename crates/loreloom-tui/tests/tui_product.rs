@@ -938,3 +938,25 @@ fn arrow_keys_follow_composer_rows_and_updated_terminal_width() {
     handle_key(&mut app, KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
     assert_eq!(app.editor.cursor(), app.editor.grapheme_count());
 }
+
+#[test]
+fn narrator_paragraphs_align_left_and_preserve_blank_lines_on_wide_and_narrow_screens() {
+    let mut app = TuiApp::new(snapshot());
+    app.snapshot.transcript.items.remove(0);
+    let prose = "炉火轻轻摇曳。\n\n柜台后传来话音。\n她抬头看过来。";
+    app.snapshot.transcript.items[0].text = LongText::new(prose).expect("prose");
+    app.snapshot.tool_activity.clear();
+    app.snapshot.notices.clear();
+    for width in [100, 48] {
+        let terminal = render(&app, width, 24);
+        let buffer = terminal.backend().buffer();
+        let first = find_ascii(buffer, "炉").expect("first paragraph");
+        let second = find_ascii(buffer, "柜").expect("second paragraph");
+        let continuation = find_ascii(buffer, "她").expect("explicit continuation");
+        assert_eq!(first.0, second.0);
+        assert_eq!(first.0, continuation.0);
+        assert_eq!(second.1, first.1 + 2, "preserve paragraph gap");
+        assert_eq!(continuation.1, second.1 + 1);
+        assert_eq!(app.snapshot.transcript.items[0].text.as_str(), prose);
+    }
+}

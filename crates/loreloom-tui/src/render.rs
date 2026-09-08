@@ -518,10 +518,12 @@ fn render_story(frame: &mut Frame<'_>, app: &mut TuiApp, area: Rect) {
             ])),
         }
         for continuation in text_lines {
-            lines.push(Line::from(Span::styled(
-                format!("  {continuation}"),
-                text_style,
-            )));
+            let text = if matches!(item.speaker, TranscriptSpeaker::Narrator) {
+                continuation.to_owned()
+            } else {
+                format!("  {continuation}")
+            };
+            lines.push(Line::from(Span::styled(text, text_style)));
         }
     }
     if let Some(input) = app.pending_submission_text() {
