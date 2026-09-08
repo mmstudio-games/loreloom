@@ -108,6 +108,8 @@ mod tests {
 
     fn transcript(id: &str, text: &str) -> TranscriptItemRecord {
         TranscriptItemRecord {
+            audience: loreloom_core::TranscriptAudience::Player,
+            source_id: None,
             id: parse::<TranscriptItemId>(id),
             session_id: parse::<SessionId>("ses_01890f6a-2b30-7d4e-8f90-123456789abc"),
             revision: Some(Revision::new(1)),

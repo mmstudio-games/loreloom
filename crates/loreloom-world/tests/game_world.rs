@@ -1230,6 +1230,8 @@ fn trusted_runtime_appends_versioned_transcript_records() {
     )
     .expect("load world");
     let item = TranscriptItemRecord {
+        audience: loreloom_core::TranscriptAudience::Player,
+        source_id: None,
         id: "trn_01890f6a-2b80-7d4e-8f90-123456789abc"
             .parse::<TranscriptItemId>()
             .expect("transcript id"),

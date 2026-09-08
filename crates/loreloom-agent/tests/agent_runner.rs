@@ -520,15 +520,13 @@ fn canonical_agent_wire_rejects_unknown_fields_and_invalid_plans() {
                 "request_id": "ntr_01890f6a-2b50-7d4e-8f90-123456789abc",
                 "actor_id": "obj_01890f6a-2b51-7d4e-8f90-123456789abc",
                 "scene_id": "obj_01890f6a-2b52-7d4e-8f90-123456789abc",
-                "based_on_revision": 1,
-                "assignment": "listen"
+                "based_on_revision": 1
             },
             {
                 "request_id": "ntr_01890f6a-2b50-7d4e-8f90-123456789abc",
                 "actor_id": "obj_01890f6a-2b53-7d4e-8f90-123456789abc",
                 "scene_id": "obj_01890f6a-2b52-7d4e-8f90-123456789abc",
-                "based_on_revision": 1,
-                "assignment": "answer"
+                "based_on_revision": 1
             }
         ]
     });

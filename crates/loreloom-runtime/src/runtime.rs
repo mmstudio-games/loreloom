@@ -9,9 +9,9 @@ use armillae_llm::LlmBridge;
 use loreloom_agent::{
     AgentDefinition, AgentRunner, AgentToolContext, BudgetReason, CancellationToken,
     ModelFailureDiagnostic, ModelInvocationKind, NarratorDefinition, NarratorNpcDecision,
-    NarratorPlan, NpcAgent, NpcAssignment, NpcControllerKind, NpcLifetime, NpcNarrativeAction,
-    NpcTarget, NpcTurnRequest, NpcTurnResult, NpcTurnStatus, ResourceUsage, ToolCallOutcome,
-    ToolCallProgress, TurnInvocation, TurnOutcome, TurnStatus,
+    NarratorPlan, NpcAgent, NpcControllerKind, NpcLifetime, NpcNarrativeAction, NpcTarget,
+    NpcTurnRequest, NpcTurnResult, NpcTurnStatus, ResourceUsage, ToolCallOutcome, ToolCallProgress,
+    TurnInvocation, TurnOutcome, TurnStatus,
 };
 use loreloom_core::{
     ActorId, CharacterController, CharacterLifetime, ContentDefinitionId, GeneratedOrigin,
@@ -500,6 +500,39 @@ impl GameRuntime {
                     ));
                     continue;
                 }
+                if self
+                    .service
+                    .npc_turn_scene(
+                        before.player.actor_id,
+                        request.actor_id,
+                        self.service.revision().await,
+                    )
+                    .await
+                    .ok()
+                    != Some(request.scene_id)
+                {
+                    npc_results.push(unstarted_result(
+                        request,
+                        self.service.revision().await,
+                        NpcTurnStatus::Stale,
+                    ));
+                    continue;
+                }
+                if before
+                    .scene
+                    .visible_actors
+                    .iter()
+                    .any(|actor| actor.actor_id == request.actor_id)
+                {
+                    self.service
+                        .remember_npc_dialogue(
+                            request.actor_id,
+                            self.session_id,
+                            Some(&player_transcript),
+                            None,
+                        )
+                        .await?;
+                }
                 let (mut character, mut scene, mut dialogue) = match self
                     .service
                     .npc_context(request.actor_id, request.scene_id)
@@ -540,10 +573,6 @@ impl GameRuntime {
                     registration.definition.clone(),
                     character,
                     scene,
-                    NpcAssignment {
-                        text: request.assignment.clone(),
-                        revision: observed_revision,
-                    },
                     dialogue,
                     context_truncated,
                 )?;
@@ -582,6 +611,18 @@ impl GameRuntime {
                     budget_failure = Some(reason);
                 }
                 let (status, response, failure) = npc_output(&turn);
+                if status == NpcTurnStatus::Completed
+                    && let Some(response) = &response
+                {
+                    self.service
+                        .remember_npc_dialogue(
+                            request.actor_id,
+                            self.session_id,
+                            None,
+                            Some(response.clone()),
+                        )
+                        .await?;
+                }
                 if let NpcTurnStatus::BudgetExhausted(reason) = status {
                     budget_failure = Some(reason);
                 }

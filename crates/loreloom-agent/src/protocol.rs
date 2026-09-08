@@ -18,6 +18,8 @@ pub type NarrationText = BoundedText<65536>;
 pub enum AgentError {
     #[error("agent context revisions do not match")]
     ContextRevision,
+    #[error("NPC context contains data outside the actor scope")]
+    ContextOwnership,
     #[error("narrator plan is invalid: {field}")]
     InvalidPlan { field: &'static str },
     #[error("narrator NPC decision is invalid: {field}")]
@@ -217,9 +219,39 @@ pub struct NpcContext {
     pub revision: Revision,
     pub character: CharacterContext,
     pub scene: SceneContext,
-    pub assignment: NpcAssignment,
     pub recent_dialogue: Vec<TranscriptItemRecord>,
     pub truncated: bool,
+}
+
+impl NpcContext {
+    fn validate(&self) -> Result<(), AgentError> {
+        if self.revision != self.character.revision || self.revision != self.scene.revision {
+            return Err(AgentError::ContextRevision);
+        }
+        if self.actor_id != self.character.actor_id
+            || self.character.location_id != self.scene.place_id
+            || !self.scene.recent_events.is_empty()
+            || self
+                .character
+                .known_facts
+                .iter()
+                .any(|fact| fact.owner_id != self.actor_id)
+            || self
+                .character
+                .goals
+                .iter()
+                .any(|goal| goal.owner_id != self.actor_id)
+            || self.recent_dialogue.iter().any(|item| {
+                item.audience
+                    != (loreloom_core::TranscriptAudience::Npc {
+                        actor_id: self.actor_id,
+                    })
+            })
+        {
+            return Err(AgentError::ContextOwnership);
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -233,25 +265,25 @@ impl NpcAgent {
         definition: AgentDefinition,
         character: CharacterContext,
         scene: SceneContext,
-        assignment: NpcAssignment,
         recent_dialogue: Vec<TranscriptItemRecord>,
         truncated: bool,
     ) -> Result<Self, AgentError> {
-        if character.revision != scene.revision || character.revision != assignment.revision {
+        if character.revision != scene.revision {
             return Err(AgentError::ContextRevision);
         }
-        Ok(Self {
+        let agent = Self {
             context: NpcContext {
                 actor_id: character.actor_id,
                 revision: character.revision,
                 character,
                 scene,
-                assignment,
                 recent_dialogue,
                 truncated,
             },
             definition,
-        })
+        };
+        agent.context.validate()?;
+        Ok(agent)
     }
 
     pub fn request(
@@ -259,6 +291,7 @@ impl NpcAgent {
         definitions: impl IntoIterator<Item = ToolDefinition>,
         global_prompts: &[LongText],
     ) -> Result<CompletionRequest, AgentError> {
+        self.context.validate()?;
         let allowed = &self.definition.allowed_tools;
         let tools = definitions
             .into_iter()
@@ -321,7 +354,6 @@ pub struct NpcTurnRequest {
     pub actor_id: ActorId,
     pub scene_id: ObjectId,
     pub based_on_revision: Revision,
-    pub assignment: AssignmentText,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

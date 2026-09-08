@@ -785,6 +785,16 @@ impl GameWorld {
     }
 
     fn validate_references(&self, registry: &DefinitionRegistry) -> Result<(), WorldError> {
+        let mut receipts = BTreeSet::new();
+        for item in self.transcripts.values() {
+            self.validate_transcript_audience(item)?;
+            if let (loreloom_core::TranscriptAudience::Npc { actor_id }, Some(source_id)) =
+                (&item.audience, item.source_id)
+                && !receipts.insert((*actor_id, source_id))
+            {
+                return domain_rule("transcript_duplicate_receipt");
+            }
+        }
         let mut parameter_schemas = BTreeSet::new();
         let mut saved_parameters = BTreeSet::new();
         let mut rule_state_counts = BTreeMap::<ContentDefinitionId, u32>::new();
@@ -2072,6 +2082,42 @@ impl GameWorld {
         Ok((scene_id, records))
     }
 
+    fn validate_transcript_audience(&self, item: &TranscriptItemRecord) -> Result<(), WorldError> {
+        use loreloom_core::{TranscriptAudience, TranscriptSpeaker};
+        match &item.audience {
+            TranscriptAudience::Player => {
+                if item.source_id.is_some() {
+                    return domain_rule("transcript_public_source");
+                }
+            }
+            TranscriptAudience::Npc { actor_id } => {
+                if self.character(*actor_id).is_none() {
+                    return domain_rule("transcript_owner");
+                }
+                if let Some(source_id) = item.source_id {
+                    let Some(source) = self.transcripts.get(&source_id) else {
+                        return domain_rule("transcript_source");
+                    };
+                    if source.audience != TranscriptAudience::Player
+                        || !matches!(source.speaker, TranscriptSpeaker::Player { .. })
+                        || source.text != item.text
+                        || source.speaker != item.speaker
+                        || source.session_id != item.session_id
+                        || source.revision > item.revision
+                        || !item.supporting_events.is_empty()
+                    {
+                        return domain_rule("transcript_source");
+                    }
+                } else if !matches!(item.speaker, TranscriptSpeaker::Actor { actor_id: Some(owner), .. } if owner == *actor_id)
+                    || !item.supporting_events.is_empty()
+                {
+                    return domain_rule("transcript_private_speaker");
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn append_transcripts(
         &mut self,
         actor_id: ActorId,
@@ -2084,6 +2130,23 @@ impl GameWorld {
         let mut seen = BTreeSet::new();
         for item in &items {
             DomainRecord::TranscriptItem(item.clone()).validate()?;
+            self.validate_transcript_audience(item)?;
+            if let Some(source) = item.source_id
+                && (self.transcripts.values().any(|existing| {
+                    existing.audience == item.audience && existing.source_id == Some(source)
+                }) || items.iter().any(|other| {
+                    other.id != item.id
+                        && other.audience == item.audience
+                        && other.source_id == Some(source)
+                }))
+            {
+                return domain_rule("transcript_duplicate_receipt");
+            }
+            if let loreloom_core::TranscriptAudience::Npc { actor_id: owner } = item.audience
+                && owner != actor_id
+            {
+                return domain_rule("transcript_owner");
+            }
             if item.revision != Some(revision)
                 || !seen.insert(item.id)
                 || self.transcripts.contains_key(&item.id)
@@ -2094,6 +2157,7 @@ impl GameWorld {
                 actor_id: speaker, ..
             } = &item.speaker
                 && *speaker != actor_id
+                && item.audience == loreloom_core::TranscriptAudience::Player
             {
                 return domain_rule("transcript_player_actor");
             }

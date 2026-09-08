@@ -159,6 +159,8 @@ fn snapshot() -> UiSnapshot {
         transcript: TranscriptWindow {
             items: vec![
                 TranscriptItemRecord {
+                    audience: loreloom_core::TranscriptAudience::Player,
+                    source_id: None,
                     id: parse::<TranscriptItemId>("trn_01890f6a-2b40-7d4e-8f90-123456789abc"),
                     session_id: session,
                     revision: Some(Revision::new(5)),
@@ -171,6 +173,8 @@ fn snapshot() -> UiSnapshot {
                     supporting_events: Vec::new(),
                 },
                 TranscriptItemRecord {
+                    audience: loreloom_core::TranscriptAudience::Player,
+                    source_id: None,
                     id: parse::<TranscriptItemId>("trn_01890f6a-2b41-7d4e-8f90-123456789abc"),
                     session_id: session,
                     revision: Some(Revision::new(6)),

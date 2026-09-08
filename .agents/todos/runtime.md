@@ -168,3 +168,6 @@ OPEN 项、后续 RFC 或 P0 Spike；空 crate 不代表相关协议已经实现
 - [x] 将 Load Save 扩展为 Saves 管理页：读取、默认取消的删除确认、Host 校验删除、列表刷新及测试。
 
 - [x] Recover interactive ProviderSetup failures in the TUI, retain pending game selection, support configuration repair/retry and return to launcher, and verify deterministic behavior.
+
+- [x] 隔离 NPC 对话收件记录与自身响应，移除全局 Transcript/event 和自由文本 assignment 注入，
+  验证多 NPC、缺席/后来到场、预算裁剪、保存重建和失败恢复。

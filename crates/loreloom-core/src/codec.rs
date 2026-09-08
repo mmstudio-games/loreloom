@@ -425,6 +425,8 @@ mod tests {
     #[test]
     fn transcript_requires_revision_when_committed() {
         let record = DomainRecord::TranscriptItem(TranscriptItemRecord {
+            audience: crate::TranscriptAudience::Player,
+            source_id: None,
             id: parse::<TranscriptItemId>("trn_01890f6a-2b3c-7d4e-8f90-123456789abc"),
             session_id: parse("ses_01890f6a-2b3d-7d4e-8f90-123456789abc"),
             revision: None,
@@ -437,6 +439,36 @@ mod tests {
             supporting_events: Vec::new(),
         });
         assert!(record.validate().is_err());
+    }
+
+    #[test]
+    fn transcript_audience_round_trips_and_missing_or_unknown_permissions_are_rejected() {
+        let owner: ActorId = parse("obj_01890f6a-2b3e-7d4e-8f90-123456789abc");
+        let item = TranscriptItemRecord {
+            audience: crate::TranscriptAudience::Npc { actor_id: owner },
+            source_id: None,
+            id: parse("trn_01890f6a-2b3c-7d4e-8f90-123456789abc"),
+            session_id: parse("ses_01890f6a-2b3d-7d4e-8f90-123456789abc"),
+            revision: Some(crate::Revision::new(1)),
+            speaker: TranscriptSpeaker::Actor {
+                actor_id: Some(owner),
+                display_name: crate::DisplayName::new("NPC").expect("name"),
+            },
+            text: crate::LongText::new("owned memory").expect("text"),
+            state: TranscriptState::Committed,
+            supporting_events: Vec::new(),
+        };
+        let mut json = serde_json::to_value(&item).expect("encode");
+        assert_eq!(
+            serde_json::from_value::<TranscriptItemRecord>(json.clone()).expect("decode"),
+            item
+        );
+        json.as_object_mut().expect("object").remove("audience");
+        assert!(serde_json::from_value::<TranscriptItemRecord>(json.clone()).is_err());
+        json["audience"] = serde_json::json!({"type": "all_npcs"});
+        assert!(serde_json::from_value::<TranscriptItemRecord>(json.clone()).is_err());
+        json["audience"] = serde_json::json!({"type": "npc", "actor_id": owner, "extra": true});
+        assert!(serde_json::from_value::<TranscriptItemRecord>(json).is_err());
     }
 
     #[test]

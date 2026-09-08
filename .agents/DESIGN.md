@@ -116,7 +116,7 @@ Loreloom Runtime ───────────────► Persistence
     不重新判断叙事重要性，只负责注入 Scene/Place/Revision、解析世界 GenerationPolicy 与
     AgentProfile，并校验 Capability、预算和世界不变量；
 11. `NpcAgent` 是一次 NPC Turn 的临时对象，由 Agent Definition、不可变
-    `CharacterContext`、`SceneContext` 和 `NpcAssignment` 构造；持久角色只保存 ECS 状态和
+    `CharacterContext`、`SceneContext` 和角色独立对话收件记录构造；持久角色只保存 ECS 状态和
     Agent Binding；
 12. 共享 `AgentRunner` 拥有 Bridge 与 Tool 执行能力，Agent 对象本身不持有 Provider Client、
     可变 World 或可持久化的运行服务；
@@ -226,7 +226,7 @@ Loreloom Runtime ───────────────► Persistence
 45. Condition Clock 在 periodic 与 expiry 同 tick 时先执行 periodic，再重新校验并执行 expiry；周期
     Effect 作用于 Condition target。诊断不写回 Condition，而使用观察者拥有、以目标 Actor 为 subject、
     Condition Definition 为 value 的 confirmed KnownFact 决定是否投影真实名称。
-46. Runtime 只从已接受的 `request_npc_turn { actor_id, assignment }` ToolCall 构造引用 committed
+46. Runtime 只从已接受的 `request_npc_turn { actor_id }` ToolCall 构造引用 committed
     `ActorId` 的内部 `NarratorPlan`；Scene 与 Revision 来自 ToolContext 和当前 World，不能由模型
     提交。Observation 对当前可调度角色显式投影 `npc_turn_available`，同一 Revision 中使用该
     ActorId 的请求不得再被隐藏条件拒绝。Narrator 调用 `create_npc` 请求 Preset/Generated NPC 时，
@@ -374,3 +374,7 @@ Launcher 存档页支持读取和删除当前世界的 catalog 条目；TUI 在�
 Host 在打开 Runtime/Store 前重新校验条目并删除对应存档目录和 sidecar，刷新列表与 Continue。
 
 Interactive Provider setup failures stay in the same terminal session on a recovery page. The Host retains the pending game selection and offers retry, Settings, return to launcher, and quit before opening World/Save. Headless retains failure exit behavior.
+
+NPC 上下文必须按 Actor 隔离：Runtime 只投影该角色拥有的知识、目标与持久化对话收件记录；
+共享的玩家可读 Transcript 不作为 NPC 记忆。Narrator 只能调度可见 NPC，不能通过自由文本任务
+向其注入其他角色的私有上下文。未记录历史感知权限的全局事件不进入 NPC 上下文。

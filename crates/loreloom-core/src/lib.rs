@@ -22,8 +22,8 @@ pub use domain::{
     GoalStatus, IntensityPolicy, ItemGrantInput, ItemRecord, KnowledgeStatus, KnownFactInput,
     KnownFactRecord, LifeState, ParameterSetRecord, ParameterValue, PlaceRecord, PlacementInput,
     Posture, RelationshipRecord, ResourcePool, RuleStateRecord, SceneRecord, SkillGrantInput,
-    SkillGrantRecord, SkillSource, SpawnConstraints, StackState, TranscriptItemRecord,
-    TranscriptSpeaker, TranscriptState, WorldStateRecord,
+    SkillGrantRecord, SkillSource, SpawnConstraints, StackState, TranscriptAudience,
+    TranscriptItemRecord, TranscriptSpeaker, TranscriptState, WorldStateRecord,
 };
 pub use identity::{
     ActionId, ActorId, ContentDefinitionId, EventId, FailureId, GenerationId, IdGenerator,

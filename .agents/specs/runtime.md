@@ -162,7 +162,7 @@ backup 协议遵循第 11.4 节。领域 record Schema、未知字段和领域�
 
 - 应用生命周期和 Working World 的逻辑写入所有权；
 - PlayerInput、NarratorPlan、NpcTurnRequest 和 RuntimeCommand 队列；
-- 从同一 Revision 生成 CharacterContext、SceneContext 和 NpcAssignment 并创建临时 NpcAgent；
+- 从同一 Revision 生成 CharacterContext 与 SceneContext 并创建临时 NpcAgent；
 - Agent Step / Tool Loop 与 Narrator 编排状态机；
 - Revision 冲突、提交、取消与故障策略；
 - Content/Generation 请求的 Capability、数量和模型预算策略；
@@ -909,7 +909,7 @@ Observation 必须携带 Revision。生成后 World 可以继续演化，但由�
 `expected_revision` 检测冲突。
 
 NarratorAgent 接收以 Scene 和已提交事件为中心的 `SceneObservation`，不得默认读取所有 NPC
-私有认知。NpcAgent 接收 `NpcContext`：其中 CharacterContext、SceneContext 和 NpcAssignment
+私有认知。NpcAgent 接收 `NpcContext`：其中 CharacterContext 与 SceneContext
 必须绑定同一 Revision，Inventory/Skill 仍使用有界摘要与按需 Tool。
 
 ### 8.2 Context assembler
@@ -1135,7 +1135,7 @@ lock 和当前 Observation 决定是否投影相应 Event/Action。
 | `NarratorPlan` | Runtime 从一次 Narrator Turn 的已接受 ToolCall 构造 | 保存有序 NpcTurnRequest，不是模型正文 wire |
 | `NpcAgent` | 单次 NPC Turn | 消费不可变角色/场景上下文并产生 ToolCall 与有界结果 |
 | `AgentBinding` | ECS 持久状态 | 把 Character 绑定到 Agent Profile 与自治策略 |
-| `NpcTurnRequest` | Runtime 临时队列记录 | 指定 NPC、Scene、Assignment 与计划所基于的 Revision |
+| `NpcTurnRequest` | Runtime 临时队列记录 | 指定 NPC、Scene 与计划所基于的 Revision |
 | `NpcTurnResult` | 单次 NPC Turn 临时结果 | 关联自然语言响应与实际 ToolResult/WorldEvent |
 | `AgentRunner` | 可共享运行服务 | 执行单次 Bridge、Tool Loop、取消、预算和结果关联 |
 
@@ -1161,7 +1161,6 @@ pub struct NpcContext {
     pub revision: Revision,
     pub character: CharacterContext,
     pub scene: SceneContext,
-    pub assignment: NpcAssignment,
     pub recent_dialogue: Vec<TranscriptItemRecord>,
     pub truncated: bool,
 }
@@ -1176,7 +1175,6 @@ pub struct NpcTurnRequest {
     pub actor_id: ActorId,
     pub scene_id: ObjectId,
     pub based_on_revision: Revision,
-    pub assignment: BoundedText<4096>,
 }
 
 pub struct NpcTurnResult {
@@ -1195,7 +1193,7 @@ pub struct NpcTurnResult {
 `CharacterContext` 固定包含 Actor/Revision、展示身份/Profile、Location、Base/Effective Attribute
 摘要、Resource、可感知 Condition、Inventory、可用 Skill、KnownFact 与 Goal 的有界拥有所有权
 投影；`SceneContext` 固定包含 Scene/Revision、展示 framing、World Clock、当前 Place、可见 Actor 与
-已提交 Event 摘要；`NpcAssignment` 只把 request assignment 与投影时 Revision 绑定。集合元素使用
+按感知权限允许的 Event 摘要（NPC 目前为空）；不向 NPC 注入自由文本任务。集合元素使用
 Core 的 Stable ID/Fixed/WorldTime，不引入 Bevy Entity 或 Armillae Provider 类型。
 
 展示投影不能要求 Agent/TUI 再访问 Content Registry。第一阶段 Core View wire 因此固定包含下列
@@ -1256,7 +1254,7 @@ request ID 必须唯一。
   Narrator、NpcAgent 或 generation stage 的正文调用 JSON/Schema 反序列化来取得控制数据；
 - Narrator 只能通过该 Model Call 的 Provider 原生 ToolCall 请求结构化编排或世界修改，不能在
   Tool Handler 内同步递归调用 NpcAgent；
-- `request_npc_turn` 的模型参数只包含 committed ActorId 与 assignment；Scene、request ID、
+- `request_npc_turn` 的模型参数只包含 committed ActorId；Scene、request ID、
   ToolContext Revision 与队列位置由
   Runtime 注入。已接受 ToolCall 的顺序就是 `NarratorPlan.npc_turns` 的语义执行顺序，Request 不携带
   `priority`，Runtime 不重新计算叙事优先级或公平性；
@@ -1265,16 +1263,15 @@ request ID 必须唯一。
 - Runtime 必须从 World 注入 Scene，验证 Actor、Scene membership、Revision 和 Capability，并在独立预算配置
   下确认仍有资源后才排队；模型或 Mod 不能通过 Request 扩大预算；
 - `based_on_revision` 记录 Narrator 制定计划时的 provenance，不是后续世界写入可沿用的
-  `expected_revision`；每个请求开始时必须针对当前 committed Revision 重新校验 Actor、Scene 和
-  Assignment，条件已失效时返回关联该 request ID 的 stale/rejected NpcTurnResult；
+  `expected_revision`；每个请求开始时必须针对当前 committed Revision 重新校验 Actor、Scene 与接收资格，条件已失效时返回关联该 request ID 的 stale/rejected NpcTurnResult；
 - Runtime 同时只能运行一个 Narrator/NPC Turn；队列中的请求不持有 ECS 引用，出队开始时
   必须按届时 committed Revision 重新校验并重新投影上下文；
 - CharacterContext 来自 ECS Character/Inventory/Skill/Knowledge 投影；
 - SceneContext 来自已提交 `SceneState`、`DirectorState` 和 Actor 可见 WorldEvent；Narrator
   隐藏模型历史不是场景事实；
-- NpcAssignment 表达本次任务或关注点，不自动成为 World Fact；
-- Runtime 必须从同一个 Revision 生成 CharacterContext、SceneContext 和 Assignment binding；
-- `NpcAgent::new(agent_definition, character_context, scene_context, assignment)` 只创建一次性
+- NPC 的本轮刺激来自自身的持久化对话收件记录与当前可观察状态，不接收自由文本 NpcAssignment；
+- Runtime 必须从同一个 Revision 生成 CharacterContext、SceneContext 与角色独立对话窗口；
+- `NpcAgent::new(agent_definition, character_context, scene_context)` 只创建一次性
   不可变执行对象；Agent Definition 由 AgentBinding 指向的版本化 Profile 解析；
 - NpcAgent 不持有 ECS Query/引用、`&mut World`、Provider Client、Store 或可持久化服务；
 - AgentRunner 持有 Bridge 与 Tool 执行能力；所有世界写入仍通过带 Actor/Revision 的
@@ -1532,7 +1529,7 @@ Preset/Generated 使用统一、质量优先的两阶段编排：
 重新生成。同一 PlayerInput 内结构完全相同的 CreateNpcRequest 具有编排幂等语义；首次成功物化后，
 后续相同 ToolCall 返回既有 ActorId。需要多个同类角色时，Narrator 必须给出可区分的 role/purpose。
 
-`request_npc_turn` 的模型参数固定为 committed `actor_id` 与自然语言 `assignment`。SceneId、Revision、
+`request_npc_turn` 的模型参数固定为 committed `actor_id`。SceneId、Revision、
 request identity 与队列位置由 Runtime 注入。Scene Observation 的每个 visible actor 显式包含
 `npc_turn_available`；它只在角色与玩家位于同一可见 Place、controller 为 Agent、AgentBinding
 enabled 且 Profile 可解析时为 true。同一 Revision 中使用该 ActorId 的请求必须接受；真正执行前若
@@ -2658,7 +2655,7 @@ CI 使用最新 stable，不执行 MSRV Job，不允许 manifest 出现 `rust-ve
 15. Preset/Generated NPC 只在 Narrator Turn 结束后物化，并在同一玩家输入内把 committed ActorId
     与完整角色投影交给 Narrator；物化前不能为该角色启动 NpcAgent；
 16. `request_npc_turn` ToolCall 经 Runtime 校验后，才按已接受 ToolCall 的顺序创建一次性 NpcAgent；
-17. NpcAgent 的 CharacterContext、SceneContext 和 Assignment 绑定该 Turn 开始时的同一
+17. NpcAgent 的 CharacterContext、SceneContext 与自身对话窗口绑定该 Turn 开始时的同一
     committed Revision；
 18. NpcAgent 不持有 Provider/World，也不能把 Character Snapshot 直接写回 ECS；
 19. EffectiveAttributes 按 Base、Flat、Multiply、Override、Clamp 与稳定 source 顺序重建；
@@ -2704,7 +2701,7 @@ CI 使用最新 stable，不执行 MSRV Job，不允许 manifest 出现 `rust-ve
 53. 等待 Provider 时 TUI 的 thinking 状态、取消和退出保持响应，不展示未完成模型正文，逻辑
     World Clock 不随墙钟时间隐式推进；
 54. Scene 切换原子停用当前 Scene 并激活或首次物化目标 Scene；再次进入恢复原状态且不调用 Provider。
-55. Observation 标记可调度的现有 NPC 后，Narrator 只需提交 ActorId 与 assignment；Tool 拒绝时
+55. Observation 标记可调度的现有 NPC 后，Narrator 只需提交 ActorId；Tool 拒绝时
     AgentRunner、UiSnapshot 与 TUI 保留脱敏错误码，且不持久化完整参数或 ToolResult。
 56. Content Place edge 物化为同 Scene 双向 ObjectId 连接，普通移动不能越过未连接 Place；存档重建
     后连接等价且未知、跨 Scene、单向或自连接 edge 被拒绝。
@@ -2784,3 +2781,27 @@ Launcher 的 Saves 页面始终可进入，空列表展示空状态。Enter 读�
 不增加运行中删除或存档切换。成功或失败均重新扫描并留在存档页显示结果，Continue 使用刷新后的列表。
 
 Interactive ProviderSetup failures (including explicit --save) abort the current startup attempt, not the process. Before opening World/Save, display a safe diagnostic with Retry, Settings, Back to launcher, and Quit. Preserve the selected save and player creation result. Retry reloads and validates configuration and credential sources; Settings edits references through existing atomic persistence. Returning to launcher cancels the pending selection. Keep the same terminal session throughout. External shell exports cannot update the running process environment; suggest an existing environment variable or file credential reference. Headless still returns a structured failure and nonzero exit. World/Store initialization failures are outside this retry boundary.
+
+### NPC 上下文隔离修正（2026-09-09）
+
+- TranscriptItem v1 新增必填 `audience`（`player` 或 `npc { actor_id }`）与 `source_id`
+  （可空的原始 TranscriptItemId）。NPC 收件记录和自身响应都持久化为 NPC audience，不能进入
+  玩家 UI 或 Narrator 的全局近期 Transcript；Narrator 仍接收本轮明确调度的 NpcTurnResult。
+- NPC 只接收 audience 精确匹配自身 Actor ID 的记录，先过滤再按条数/字节裁剪；不得根据当前
+  共处关系推断历史权限，不得从全局叙事文本恢复 NPC 记忆。
+- 玩家当轮输入只投递给本轮被请求回应、输入发生时已与玩家同处且执行时仍有效的 NPC。
+  Runtime 持有输入发生时的候选接收者快照，以原始玩家 Transcript 为来源生成独立收件记录，
+  同一 NPC 与 source_id 不重复投递。新生成或后来到场的 NPC 不获得此前输入。
+- NPC 回合输出保存为自身 audience 的记录；失败或预算耗尽的未完成响应不转为完成的记忆。
+  持久化沿用 WorldCommand 与 Store 原子提交/恢复路径，读档保持原始所有权和来源。
+- request_npc_turn 仅接受 actor_id；移除自由文本 assignment wire，NpcContext 不再接收
+  Narrator 自由文本任务。每轮根据自身上下文响应，不能经 assignment 转述其他 NPC 私有内容。
+- NPC 的 CharacterContext 按 owner 过滤知识/目标；SceneContext 只包含当前位置的公共场景
+  投影与共处 Actor 的公开状态。尚无历史感知权限记录的 recent_events 对 NPC 返回空集合；
+  当前公共世界状态可以被多个角色独立观察，不等于共享私有记忆。
+- Transcript audience/source 引用必须在提交和重建时校验；初始未发布 v1 直接更新，缺失新字段
+  的开发期记录拒绝，不推断默认权限或增加兼容读取分支。
+
+NpcAgent 在构造及每次生成 Model Request 时校验 Actor ID、Revision、当前位置一致性，以及
+Knowledge/Goal/Transcript 的所有权；未授权的全局事件或其它角色记录必须返回结构化错误，
+不能依赖 Prompt 要求模型忽略。持久化采用同一 owner/source 唯一收件约束，重复投递幂等。

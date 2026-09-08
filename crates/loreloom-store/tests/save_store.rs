@@ -352,6 +352,8 @@ async fn transcript_rows_and_record_projection_commit_together() {
         kind: WorldCommandKind::AdvanceTime { ticks: 1 },
     };
     let transcript = TranscriptItemRecord {
+        audience: loreloom_core::TranscriptAudience::Player,
+        source_id: None,
         id: parse::<TranscriptItemId>("trn_01890f6a-2b61-7d4e-8f90-123456789abc"),
         session_id: parse::<SessionId>("ses_01890f6a-2b62-7d4e-8f90-123456789abc"),
         revision: Some(Revision::new(1)),

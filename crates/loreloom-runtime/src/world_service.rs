@@ -7,9 +7,9 @@ use std::{
 use armillae_core::{ToolCall, ToolDefinition, ToolResult, ToolResultContent};
 use armillae_tools::{BoxFuture, ToolContext, ToolExecutionError, ToolExecutor};
 use loreloom_agent::{
-    AgentDefinition, AgentToolContext, AssignmentText, CreateNpcRequest, NarrativeImportance,
-    NarratorNpcDecision, NpcControllerKind, NpcCreationMode, NpcCreationSource,
-    NpcGenerationRequest, NpcNarrativeAction, NpcTarget, NpcTurnRequest,
+    AgentDefinition, AgentToolContext, CreateNpcRequest, NarrativeImportance, NarratorNpcDecision,
+    NpcControllerKind, NpcCreationMode, NpcCreationSource, NpcGenerationRequest,
+    NpcNarrativeAction, NpcTarget, NpcTurnRequest,
 };
 use loreloom_content::{
     CharacterCompileRequest, Definition, DefinitionRegistry, DraftCompileRequest, GenerationPolicy,
@@ -265,7 +265,7 @@ impl WorldService {
         }
     }
 
-    async fn npc_turn_scene(
+    pub(crate) async fn npc_turn_scene(
         &self,
         player_actor: ActorId,
         npc_actor: ActorId,
@@ -516,12 +516,12 @@ impl WorldService {
         let revision = inner.world.revision();
         let records = inner.world.project_records()?;
         let character = character_context(&records, &inner.registry, actor_id, revision)?;
-        let scene = scene_context(&records, &inner.events, &inner.registry, actor_id, revision)?;
+        let scene = scene_context(&records, &[], &inner.registry, actor_id, revision)?;
         if scene.scene_id != scene_id {
             return Err(RuntimeError::Unavailable);
         }
         let recent = tail(
-            transcript_records(&records),
+            npc_transcript_records(&records, actor_id),
             CONTEXT_TRANSCRIPT_SOURCE_LIMIT,
         );
         Ok((character, scene, recent))
@@ -730,6 +730,8 @@ impl WorldService {
         let mut inner = self.inner.lock().await;
         let revision = inner.world.revision().next()?;
         let transcript = loreloom_core::TranscriptItemRecord {
+            audience: loreloom_core::TranscriptAudience::Player,
+            source_id: None,
             id: loreloom_core::TranscriptItemId::generate_with(&mut inner.ids)?,
             session_id,
             revision: Some(revision),
@@ -748,6 +750,58 @@ impl WorldService {
         };
         apply_command(&mut inner, command).await?;
         Ok(transcript)
+    }
+
+    pub(crate) async fn remember_npc_dialogue(
+        &self,
+        actor_id: ActorId,
+        session_id: SessionId,
+        source: Option<&loreloom_core::TranscriptItemRecord>,
+        response: Option<LongText>,
+    ) -> Result<(), RuntimeError> {
+        let mut inner = self.inner.lock().await;
+        let audience = loreloom_core::TranscriptAudience::Npc { actor_id };
+        if let Some(source) = source
+            && inner
+                .world
+                .transcripts()
+                .any(|item| item.audience == audience && item.source_id == Some(source.id))
+        {
+            return Ok(());
+        }
+        let character = inner
+            .world
+            .character(actor_id)
+            .ok_or(RuntimeError::Unavailable)?;
+        let speaker = loreloom_core::TranscriptSpeaker::Actor {
+            actor_id: Some(actor_id),
+            display_name: character.display_name.clone(),
+        };
+        let (speaker, text, source_id) = match (source, response) {
+            (Some(source), None) => (source.speaker.clone(), source.text.clone(), Some(source.id)),
+            (None, Some(response)) => (speaker, response, None),
+            _ => return Err(RuntimeError::InvalidInput),
+        };
+        let revision = inner.world.revision().next()?;
+        let item = loreloom_core::TranscriptItemRecord {
+            audience,
+            source_id,
+            id: loreloom_core::TranscriptItemId::generate_with(&mut inner.ids)?,
+            session_id,
+            revision: Some(revision),
+            speaker,
+            text,
+            state: loreloom_core::TranscriptState::Committed,
+            supporting_events: Vec::new(),
+        };
+        let command = WorldCommand {
+            action_id: ActionId::generate_with(&mut inner.ids)?,
+            actor_id,
+            expected_revision: inner.world.revision(),
+            kind: WorldCommandKind::AppendTranscript { items: vec![item] },
+        };
+        apply_command(&mut inner, command).await?;
+        Ok(())
     }
 
     pub async fn execute(
@@ -1005,7 +1059,6 @@ pub(crate) enum PendingTopologyKind {
 #[serde(deny_unknown_fields)]
 struct NpcTurnToolRequest {
     actor_id: ActorId,
-    assignment: AssignmentText,
 }
 
 #[derive(serde::Deserialize)]
@@ -1299,10 +1352,9 @@ impl ToolExecutor for RuntimeToolExecutor {
                 description: "Queue one turn for an existing visible NPC whose observation has npc_turn_available=true. Copy its actor_id exactly; the runtime supplies scene and revision.".to_owned(),
                 input_schema: json!({
                     "type": "object",
-                    "required": ["actor_id", "assignment"],
+                    "required": ["actor_id"],
                     "properties": {
-                        "actor_id": { "type": "string" },
-                        "assignment": { "type": "string" }
+                        "actor_id": { "type": "string" }
                     },
                     "additionalProperties": false
                 }),
@@ -1756,7 +1808,6 @@ impl ToolExecutor for RuntimeToolExecutor {
                                 actor_id: request.actor_id,
                                 scene_id,
                                 based_on_revision: runtime.revision,
-                                assignment: request.assignment,
                             });
                             Ok::<JsonValue, RuntimeError>(json!({
                                 "status": "accepted_pending",
@@ -2576,12 +2627,35 @@ fn transcript_records(records: &[DomainRecord]) -> Vec<loreloom_core::Transcript
     let mut transcripts = records
         .iter()
         .filter_map(|record| match record {
-            DomainRecord::TranscriptItem(item) => Some(item.clone()),
+            DomainRecord::TranscriptItem(item)
+                if item.audience == loreloom_core::TranscriptAudience::Player =>
+            {
+                Some(item.clone())
+            }
             _ => None,
         })
         .collect::<Vec<_>>();
     transcripts.sort_by_key(|item| (item.revision, item.id));
     transcripts
+}
+
+fn npc_transcript_records(
+    records: &[DomainRecord],
+    actor_id: ActorId,
+) -> Vec<loreloom_core::TranscriptItemRecord> {
+    let mut items = records
+        .iter()
+        .filter_map(|record| match record {
+            DomainRecord::TranscriptItem(item)
+                if item.audience == (loreloom_core::TranscriptAudience::Npc { actor_id }) =>
+            {
+                Some(item.clone())
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    items.sort_by_key(|item| (item.revision, item.id));
+    items
 }
 
 fn transcript_window(records: &[DomainRecord], limit: usize) -> TranscriptWindow {

@@ -1008,8 +1008,7 @@ impl LlmBridge for NarratorBridge {
                                 .expect("test tool call ID"),
                             name: "request_npc_turn".to_owned(),
                             arguments: json!({
-                                "actor_id": npc.actor_id,
-                                "assignment": npc.assignment
+                                "actor_id": npc.actor_id
                             }),
                         })
                     })
@@ -1168,8 +1167,7 @@ impl GeneratedNarratorBridge {
             id: ToolCallId::new("request-generated-witness").expect("request tool call ID"),
             name: "request_npc_turn".to_owned(),
             arguments: json!({
-                "actor_id": actor_id,
-                "assignment": "Answer according to the character that now exists."
+                "actor_id": actor_id
             }),
         })
     }
@@ -1423,8 +1421,7 @@ impl LlmBridge for PresetNarratorBridge {
                         id: ToolCallId::new("request-preset-npc").expect("request tool call ID"),
                         name: "request_npc_turn".to_owned(),
                         arguments: json!({
-                            "actor_id": actor_id,
-                            "assignment": "Respond as the fully loaded preset character."
+                            "actor_id": actor_id
                         }),
                     }))
                 }
@@ -1649,8 +1646,6 @@ fn request(actor_id: ActorId, scene_id: ObjectId) -> NpcTurnRequest {
         actor_id,
         scene_id,
         based_on_revision: Revision::new(1),
-        assignment: loreloom_agent::AssignmentText::new("Listen, then let one second pass.")
-            .expect("assignment"),
     }
 }
 
@@ -2345,8 +2340,7 @@ async fn scene_transition_is_mutually_exclusive_with_scene_bound_npc_orchestrati
                 id: ToolCallId::new("npc-before-transition").expect("tool call ID"),
                 name: "request_npc_turn".to_owned(),
                 arguments: json!({
-                    "actor_id": fixture.npc,
-                    "assignment": "Remain in the current scene."
+                    "actor_id": fixture.npc
                 }),
             },
         )
@@ -2396,8 +2390,7 @@ async fn scene_transition_is_mutually_exclusive_with_scene_bound_npc_orchestrati
                 id: ToolCallId::new("npc-after-transition").expect("tool call ID"),
                 name: "request_npc_turn".to_owned(),
                 arguments: json!({
-                    "actor_id": fixture.npc,
-                    "assignment": "This request must wait for replanning."
+                    "actor_id": fixture.npc
                 }),
             },
         )
@@ -2505,7 +2498,7 @@ async fn player_narrator_npc_and_surreal_store_form_a_durable_vertical_slice() {
         Some(&outcome.snapshot.tool_activity)
     );
 
-    assert_eq!(outcome.snapshot.revision, Revision::new(3));
+    assert_eq!(outcome.snapshot.revision, Revision::new(5));
     assert_eq!(outcome.snapshot.transcript.items.len(), 2);
     assert_eq!(outcome.snapshot.player.attributes.len(), 1);
     assert_eq!(
@@ -2531,9 +2524,9 @@ async fn player_narrator_npc_and_surreal_store_form_a_durable_vertical_slice() {
     assert_eq!(outcome.npc_results[0].status, NpcTurnStatus::Completed);
     assert_eq!(
         outcome.npc_results[0].observed_revision,
-        Some(Revision::new(1))
+        Some(Revision::new(2))
     );
-    assert_eq!(outcome.npc_results[0].final_revision, Revision::new(2));
+    assert_eq!(outcome.npc_results[0].final_revision, Revision::new(4));
     assert_eq!(outcome.npc_results[0].world_events.len(), 1);
     assert_eq!(
         outcome.snapshot.supporting_events,
@@ -2551,8 +2544,8 @@ async fn player_narrator_npc_and_surreal_store_form_a_durable_vertical_slice() {
     assert!(message_text(2).contains("\"kind\":\"npc_turn\""));
 
     let loaded = observer.load().await.expect("load durable result");
-    assert_eq!(loaded.revision, Revision::new(3));
-    assert_eq!(loaded.transcripts.len(), 2);
+    assert_eq!(loaded.revision, Revision::new(5));
+    assert_eq!(loaded.transcripts.len(), 4);
     let rebuilt = GameWorld::from_records(
         loaded.revision,
         loaded.records,
@@ -2690,13 +2683,28 @@ async fn generated_npc_is_committed_before_narrator_replans_and_dispatches_it() 
     );
     assert_eq!(narrator.calls.load(Ordering::SeqCst), 5);
     assert_eq!(npc.requests().expect("NPC request log").len(), 1);
+    let requests = npc.requests().expect("new NPC request");
+    let npc_payload = requests[0]
+        .messages
+        .iter()
+        .flat_map(|m| m.content.iter())
+        .find_map(|part| match part {
+            armillae_core::ContentPart::Text(t) => serde_json::from_str::<JsonValue>(&t.text).ok(),
+            _ => None,
+        })
+        .expect("NPC payload");
+    assert_eq!(
+        npc_payload["context"]["recent_dialogue"],
+        json!([]),
+        "newcomers cannot inherit earlier player input"
+    );
     assert_eq!(outcome.npc_results.len(), 1);
     assert_eq!(outcome.npc_results[0].status, NpcTurnStatus::Completed);
     assert_eq!(
         outcome.npc_results[0].observed_revision,
         Some(Revision::new(2))
     );
-    assert_eq!(outcome.snapshot.revision, Revision::new(3));
+    assert_eq!(outcome.snapshot.revision, Revision::new(4));
     assert_eq!(
         outcome.narration.as_str(),
         "Ilya answers only after becoming part of the world."
@@ -2841,12 +2849,27 @@ async fn preset_npc_uses_the_same_spawn_event_and_post_commit_replanning_barrier
     assert!(narrator.saw_materialized_profile.load(Ordering::SeqCst));
     assert_eq!(narrator.calls.load(Ordering::SeqCst), 4);
     assert_eq!(npc.requests().expect("preset NPC requests").len(), 1);
+    let requests = npc.requests().expect("new NPC request");
+    let npc_payload = requests[0]
+        .messages
+        .iter()
+        .flat_map(|m| m.content.iter())
+        .find_map(|part| match part {
+            armillae_core::ContentPart::Text(t) => serde_json::from_str::<JsonValue>(&t.text).ok(),
+            _ => None,
+        })
+        .expect("NPC payload");
+    assert_eq!(
+        npc_payload["context"]["recent_dialogue"],
+        json!([]),
+        "newcomers cannot inherit earlier player input"
+    );
     assert_eq!(outcome.npc_results.len(), 1);
     assert_eq!(
         outcome.npc_results[0].observed_revision,
         Some(Revision::new(2))
     );
-    assert_eq!(outcome.snapshot.revision, Revision::new(3));
+    assert_eq!(outcome.snapshot.revision, Revision::new(4));
 
     let loaded = observer.load().await.expect("load preset save");
     let preset = loaded
@@ -3256,8 +3279,7 @@ async fn request_npc_turn_derives_the_current_scene_instead_of_accepting_model_s
                 name: "request_npc_turn".to_owned(),
                 arguments: json!({
                     "actor_id": fixture.npc,
-                    "scene_id": fixture.scene,
-                    "assignment": "The runtime must reject model-supplied scene state."
+                    "scene_id": fixture.scene
                 }),
             },
         )
@@ -3266,6 +3288,20 @@ async fn request_npc_turn_derives_the_current_scene_instead_of_accepting_model_s
     assert!(rejected_legacy_shape.is_error);
     assert_eq!(
         tool_result_json(&rejected_legacy_shape)["code"],
+        json!("invalid_input")
+    );
+    let rejected_assignment = executor.execute(
+        ToolContext::new().with_extension(AgentToolContext {
+            actor_id: fixture.player, revision: Revision::ZERO,
+            session_id: parse("ses_01890f6a-2bc1-7d4e-8f90-123456789abc"),
+            capabilities: BTreeSet::from(["narrator.request_npc_turn".to_owned()]),
+        }),
+        ToolCall { id: ToolCallId::new("private-assignment").expect("call"), name: "request_npc_turn".to_owned(),
+            arguments: json!({"actor_id": fixture.npc, "assignment": "ANOTHER_NPC_PRIVATE_MEMORY"}) },
+    ).await.expect("correlated rejection");
+    assert!(rejected_assignment.is_error);
+    assert_eq!(
+        tool_result_json(&rejected_assignment)["code"],
         json!("invalid_input")
     );
     let plan = NarratorPlan {
@@ -4144,4 +4180,373 @@ async fn generic_gameplay_tools_enforce_capabilities_and_preserve_session_overla
         .expect("choose result");
     assert!(!chosen.is_error);
     assert_eq!(service.revision().await, Revision::new(2));
+}
+
+#[tokio::test]
+async fn npc_memories_are_owned_persistent_and_never_replaced_by_global_transcript() {
+    let directory = TempDir::new().expect("directory");
+    let mut fixture = fixture();
+    let second = ActorId::from(object_id("2bd0"));
+    let second_root = object_id("2bd1");
+    let mut second_character = fixture
+        .records
+        .iter()
+        .find_map(|record| match record {
+            DomainRecord::Character(c) if c.id == fixture.npc => Some(c.clone()),
+            _ => None,
+        })
+        .expect("NPC");
+    let original_root = second_character.inventory_root;
+    second_character.id = second;
+    second_character.inventory_root = second_root;
+    second_character.display_name = name("Second NPC");
+    let mut inventory = fixture
+        .records
+        .iter()
+        .find_map(|record| match record {
+            DomainRecord::Item(item) if item.id == original_root => Some(item.clone()),
+            _ => None,
+        })
+        .expect("inventory");
+    inventory.id = second_root;
+    inventory.owned_by = Some(second);
+    inventory.bound_actor = Some(second);
+    fixture.records.extend([
+        DomainRecord::Character(second_character),
+        DomainRecord::Item(inventory),
+    ]);
+    for (owner, suffix, marker) in [
+        (fixture.npc, "2bd3", "A_PRIVATE_GOAL"),
+        (second, "2bd4", "B_PRIVATE_GOAL"),
+    ] {
+        fixture.records.push(DomainRecord::Goal(GoalRecord {
+            id: object_id(suffix),
+            owner_id: owner,
+            description: text(marker),
+            priority: 1,
+            status: GoalStatus::Active,
+            source: GoalSource::CharacterDefinition {
+                definition_id: fixture.preset_id.clone(),
+            },
+            updated_at: WorldTime::ZERO,
+        }));
+    }
+    let store = SaveStore::create(
+        directory.path().join("save"),
+        fixture.manifest.clone(),
+        fixture.records.clone(),
+    )
+    .await
+    .expect("save");
+    let mut observer = store.connect().await.expect("observer");
+    let service = WorldService::open(
+        store,
+        fixture.registry.clone(),
+        &fixture.manifest.world_lock,
+        &fixture.manifest.mod_lock,
+        fixture.world_config.clone(),
+    )
+    .await
+    .expect("service");
+    let session = parse("ses_01890f6a-2bd2-7d4e-8f90-123456789abc");
+    let mut bridges = Vec::new();
+    for (actor, input, reply) in [
+        (fixture.npc, "ONLY_A_INPUT", "ONLY_A_REPLY"),
+        (second, "ONLY_B_INPUT", "ONLY_B_REPLY"),
+    ] {
+        let bridge = Arc::new(MockBridge::scripted([MockResponse::text(reply)]));
+        let narrator = Arc::new(NarratorBridge::new(
+            NarratorPlan {
+                based_on_revision: service.revision().await,
+                npc_turns: vec![request(actor, fixture.scene)],
+            },
+            SupportMode::Empty,
+        ));
+        let mut runtime = GameRuntime::new(
+            Arc::clone(&service),
+            narrator,
+            narrator_definition(),
+            session,
+            RuntimeConfig::default(),
+        );
+        runtime.register_npc(
+            actor,
+            definition(fixture.profile_id.clone()),
+            bridge.clone(),
+        );
+        let outcome = runtime.handle_player_input(input).await.expect("turn");
+        assert_eq!(outcome.npc_results[0].status, NpcTurnStatus::Completed);
+        bridges.push(bridge);
+    }
+    service
+        .execute(
+            &AgentToolContext {
+                actor_id: fixture.player,
+                revision: service.revision().await,
+                session_id: session,
+                capabilities: BTreeSet::new(),
+            },
+            WorldCommandKind::AdvanceTime { ticks: 1 },
+        )
+        .await
+        .expect("unscoped event");
+    assert!(!service.events().await.is_empty());
+    let (_, scene_a, dialogue_a) = service
+        .npc_context(fixture.npc, fixture.scene)
+        .await
+        .expect("A context");
+    let (_, scene_b, dialogue_b) = service
+        .npc_context(second, fixture.scene)
+        .await
+        .expect("B context");
+    assert!(scene_a.recent_events.is_empty() && scene_b.recent_events.is_empty());
+    assert_eq!(
+        dialogue_a
+            .iter()
+            .map(|item| item.text.as_str())
+            .collect::<Vec<_>>(),
+        ["ONLY_A_INPUT", "ONLY_A_REPLY"]
+    );
+    assert_eq!(
+        dialogue_b
+            .iter()
+            .map(|item| item.text.as_str())
+            .collect::<Vec<_>>(),
+        ["ONLY_B_INPUT", "ONLY_B_REPLY"]
+    );
+    let (character_a, scene_a, _) = service
+        .npc_context(fixture.npc, fixture.scene)
+        .await
+        .expect("A");
+    assert!(
+        loreloom_agent::NpcAgent::new(
+            definition(fixture.profile_id.clone()),
+            character_a.clone(),
+            scene_a.clone(),
+            dialogue_b.clone(),
+            false
+        )
+        .is_err()
+    );
+    let mut agent = loreloom_agent::NpcAgent::new(
+        definition(fixture.profile_id.clone()),
+        character_a,
+        scene_a,
+        dialogue_a.clone(),
+        false,
+    )
+    .expect("owned context");
+    agent.context.recent_dialogue = dialogue_b.clone();
+    assert!(
+        agent.request(Vec::new(), &[]).is_err(),
+        "validate again at the model boundary"
+    );
+    let requests_b = bridges[1].requests().expect("requests");
+    let encoded = serde_json::to_string(&requests_b).expect("request JSON");
+    assert!(!encoded.contains("ONLY_A"));
+    assert!(!encoded.contains("A_PRIVATE_GOAL"));
+    assert!(encoded.contains("B_PRIVATE_GOAL"));
+    assert!(!encoded.contains("assignment"));
+    for _ in 0..70 {
+        service
+            .append_transcript(
+                fixture.player,
+                session,
+                TranscriptSpeaker::Narrator,
+                LongText::new("UNRELATED_GLOBAL_HISTORY").expect("text"),
+                Vec::new(),
+            )
+            .await
+            .expect("public text");
+    }
+    assert_eq!(
+        service
+            .npc_context(fixture.npc, fixture.scene)
+            .await
+            .expect("A after public history")
+            .2,
+        dialogue_a
+    );
+    let loaded = observer.load().await.expect("load");
+    let mut corrupt = loaded.records.clone();
+    for record in &mut corrupt {
+        if let DomainRecord::TranscriptItem(item) = record
+            && matches!(item.audience, loreloom_core::TranscriptAudience::Npc { .. })
+        {
+            item.audience = loreloom_core::TranscriptAudience::Npc {
+                actor_id: ActorId::from(object_id("2bff")),
+            };
+            break;
+        }
+    }
+    assert!(
+        GameWorld::from_records(
+            loaded.revision,
+            corrupt,
+            fixture.world_config.clone(),
+            &fixture.registry
+        )
+        .is_err()
+    );
+    let rebuilt = GameWorld::from_records(
+        loaded.revision,
+        loaded.records.clone(),
+        fixture.world_config.clone(),
+        &fixture.registry,
+    )
+    .expect("rebuild");
+    assert_eq!(
+        rebuilt
+            .transcripts()
+            .filter(|item| item.audience
+                == (loreloom_core::TranscriptAudience::Npc {
+                    actor_id: fixture.npc
+                }))
+            .count(),
+        2
+    );
+    let restored = WorldService::open(
+        observer,
+        fixture.registry,
+        &fixture.manifest.world_lock,
+        &fixture.manifest.mod_lock,
+        fixture.world_config,
+    )
+    .await
+    .expect("reopen");
+    assert_eq!(
+        restored
+            .npc_context(fixture.npc, fixture.scene)
+            .await
+            .expect("restored A")
+            .2,
+        dialogue_a
+    );
+    assert_eq!(
+        restored
+            .npc_context(second, fixture.scene)
+            .await
+            .expect("restored B")
+            .2,
+        dialogue_b
+    );
+}
+
+#[tokio::test]
+async fn failed_private_memory_commit_recovers_without_leaking_candidate_records() {
+    let directory = TempDir::new().expect("directory");
+    let fixture = fixture();
+    let store = SaveStore::create(
+        directory.path().join("save"),
+        fixture.manifest.clone(),
+        fixture.records.clone(),
+    )
+    .await
+    .expect("save");
+    let mut external = store.connect().await.expect("external");
+    let service = WorldService::open(
+        store,
+        fixture.registry.clone(),
+        &fixture.manifest.world_lock,
+        &fixture.manifest.mod_lock,
+        fixture.world_config.clone(),
+    )
+    .await
+    .expect("service");
+    let mut external_world = GameWorld::from_records(
+        Revision::ZERO,
+        fixture.records,
+        fixture.world_config,
+        &fixture.registry,
+    )
+    .expect("world");
+    let command = WorldCommand {
+        action_id: ActionId::generate_with(&mut SystemIdGenerator).expect("action"),
+        actor_id: fixture.player,
+        expected_revision: Revision::ZERO,
+        kind: WorldCommandKind::AdvanceTime { ticks: 1 },
+    };
+    let changes = external_world
+        .execute(command.clone(), &fixture.registry, &mut SystemIdGenerator)
+        .expect("external world");
+    external
+        .commit(&CommitRequest::from_execution(command, changes).expect("request"))
+        .await
+        .expect("external commit");
+    let session = parse("ses_01890f6a-2be0-7d4e-8f90-123456789abc");
+    let mut item = loreloom_core::TranscriptItemRecord {
+        audience: loreloom_core::TranscriptAudience::Npc {
+            actor_id: fixture.npc,
+        },
+        source_id: None,
+        id: loreloom_core::TranscriptItemId::generate_with(&mut SystemIdGenerator).expect("id"),
+        session_id: session,
+        revision: Some(Revision::new(1)),
+        speaker: TranscriptSpeaker::Actor {
+            actor_id: Some(fixture.npc),
+            display_name: name("Mira"),
+        },
+        text: LongText::new("PRIVATE_CANDIDATE").expect("text"),
+        state: loreloom_core::TranscriptState::Committed,
+        supporting_events: Vec::new(),
+    };
+    let mut context = AgentToolContext {
+        actor_id: fixture.npc,
+        revision: Revision::ZERO,
+        session_id: session,
+        capabilities: BTreeSet::new(),
+    };
+    assert!(
+        service
+            .execute(
+                &context,
+                WorldCommandKind::AppendTranscript {
+                    items: vec![item.clone()]
+                }
+            )
+            .await
+            .is_err()
+    );
+    assert!(
+        service
+            .npc_context(fixture.npc, fixture.scene)
+            .await
+            .expect("recovered context")
+            .2
+            .is_empty()
+    );
+    assert!(
+        external
+            .load()
+            .await
+            .expect("durable state")
+            .transcripts
+            .is_empty()
+    );
+    context.revision = service.revision().await;
+    item.revision = Some(context.revision.next().expect("revision"));
+    service
+        .execute(
+            &context,
+            WorldCommandKind::AppendTranscript { items: vec![item] },
+        )
+        .await
+        .expect("retry");
+    assert_eq!(
+        service
+            .npc_context(fixture.npc, fixture.scene)
+            .await
+            .expect("own memory")
+            .2
+            .len(),
+        1
+    );
+    assert!(
+        service
+            .npc_context(fixture.player, fixture.scene)
+            .await
+            .expect("other actor")
+            .2
+            .is_empty()
+    );
 }
