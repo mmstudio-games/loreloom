@@ -1,6 +1,6 @@
 [package]
 name = "loreloom-store"
-version = "0.1.0"
+version = "0.1.0-alpha.0"
 edition = "2024"
 description = "Versioned durable world storage and recovery for Loreloom"
 license.workspace = true
@@ -8,7 +8,7 @@ repository.workspace = true
 readme.workspace = true
 
 [dependencies]
-loreloom-core = { version = "0.1.0", path = "../loreloom-core" }
+loreloom-core = { version = "0.1.0-alpha.0", path = "../loreloom-core" }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.11.0"
