@@ -1,6 +1,6 @@
 [package]
 name = "loreloom-tui"
-version = "0.1.0"
+version = "0.1.0-alpha.0"
 edition = "2024"
 description = "Deterministic terminal user interface for Loreloom"
 license.workspace = true
@@ -10,8 +10,8 @@ readme.workspace = true
 [dependencies]
 crossterm = "0.29.0"
 image = { version = "0.25.8", default-features = false, features = ["png"] }
-loreloom-appearance = { version = "0.1.0", path = "../loreloom-appearance" }
-loreloom-core = { version = "0.1.0", path = "../loreloom-core" }
+loreloom-appearance = { version = "0.1.0-alpha.0", path = "../loreloom-appearance" }
+loreloom-core = { version = "0.1.0-alpha.0", path = "../loreloom-core" }
 ratatui = { version = "0.30.2", default-features = false, features = ["crossterm", "unstable-rendered-line-info"] }
 ratatui-image = { version = "11.0.6", default-features = false, features = ["crossterm"] }
 thiserror = "2.0.20"
